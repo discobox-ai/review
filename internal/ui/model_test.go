@@ -1419,3 +1419,163 @@ func TestAmendToggleLeavesTheIndexAlone(t *testing.T) {
 		t.Errorf("toggling amend changed the index:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
+
+// commitModel focuses the message buffer with some text already in it.
+func commitModel(t *testing.T, text string) Model {
+	t.Helper()
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("4"))
+	if m.focus != focusCommit {
+		t.Fatalf("focus = %v, want focusCommit", m.focus)
+	}
+	m.commit.SetValue(text)
+	return m
+}
+
+// Every key bubbles' textarea uses for editing must reach the textarea rather
+// than firing a command. This is the guarantee that makes the command layer
+// safe to have live while typing.
+func TestReadlineKeysStillEditTheMessage(t *testing.T) {
+	// Keys the message buffer owns, with the command that must not fire.
+	cases := []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{"ctrl+a line start", tea.KeyMsg{Type: tea.KeyCtrlA}},
+		{"ctrl+e line end", tea.KeyMsg{Type: tea.KeyCtrlE}},
+		{"ctrl+k kill after", tea.KeyMsg{Type: tea.KeyCtrlK}},
+		{"ctrl+u kill before", tea.KeyMsg{Type: tea.KeyCtrlU}},
+		{"ctrl+w delete word", tea.KeyMsg{Type: tea.KeyCtrlW}},
+		{"ctrl+d delete char", tea.KeyMsg{Type: tea.KeyCtrlD}},
+		{"ctrl+b back", tea.KeyMsg{Type: tea.KeyCtrlB}},
+		{"ctrl+f forward", tea.KeyMsg{Type: tea.KeyCtrlF}},
+		{"ctrl+n next line", tea.KeyMsg{Type: tea.KeyCtrlN}},
+		{"ctrl+p previous line", tea.KeyMsg{Type: tea.KeyCtrlP}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := commitModel(t, "hello world")
+			before := m.amend
+			got := drive(t, m, c.msg)
+
+			if got.focus != focusCommit {
+				t.Errorf("%s moved focus to %v", c.name, got.focus)
+			}
+			if got.amend != before {
+				t.Errorf("%s toggled amend", c.name)
+			}
+			if got.dialog != nil {
+				t.Errorf("%s opened the %q dialog", c.name, got.dialog.title)
+			}
+			if got.quit {
+				t.Errorf("%s quit", c.name)
+			}
+		})
+	}
+}
+
+// Ctrl-U really deletes to the start of the line rather than unstaging.
+func TestCtrlUEditsInTheMessageBuffer(t *testing.T) {
+	m := commitModel(t, "throw this away")
+	got := drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlU})
+	if got.commit.Value() != "" {
+		t.Errorf("commit buffer = %q, want Ctrl-U to have deleted to the line start", got.commit.Value())
+	}
+}
+
+// Ctrl-E moves to the end of the line rather than switching to amend.
+func TestCtrlEEditsInTheMessageBuffer(t *testing.T) {
+	m := commitModel(t, "some text")
+	m.commit.SetCursor(0)
+	got := drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	if got.amend {
+		t.Fatal("Ctrl-E switched to amend inside the message buffer")
+	}
+	got = drive(t, got, rkey("!"))
+	if got.commit.Value() != "some text!" {
+		t.Errorf("commit buffer = %q, want Ctrl-E to have moved to the line end", got.commit.Value())
+	}
+}
+
+// The command layer is reachable from the message buffer.
+func TestCommandsWorkWhileTypingAMessage(t *testing.T) {
+	t.Run("alt+i stages changed files", func(t *testing.T) {
+		m := commitModel(t, "a message")
+		repo := m.repo
+		m = drive(t, m, altKey("i"))
+		m = drive(t, m, New(repo).rescanCmd()())
+		if m.commit.Value() != "a message" {
+			t.Errorf("the message was edited: %q", m.commit.Value())
+		}
+		staged := map[string]bool{}
+		for _, f := range m.index.files {
+			staged[f.Path] = true
+		}
+		if !staged["foo.txt"] {
+			t.Errorf("Alt-I did not stage the modified file; staged = %v", staged)
+		}
+	})
+
+	t.Run("alt+e toggles amend", func(t *testing.T) {
+		m := commitModel(t, "a message")
+		m = drive(t, m, altKey("e"))
+		if !m.amend {
+			t.Error("Alt-E did not switch to amend")
+		}
+	})
+
+	t.Run("alt+u unstages", func(t *testing.T) {
+		m := commitModel(t, "a message")
+		repo := m.repo
+		// bar.txt is staged by the fixture; focus the staged list first.
+		m = drive(t, m, altKey("2"))
+		m = drive(t, m, altKey("4"))
+		m = drive(t, m, altKey("u"))
+		m = drive(t, m, New(repo).rescanCmd()())
+		for _, f := range m.index.files {
+			if f.Path == "bar.txt" {
+				t.Error("Alt-U did not unstage bar.txt")
+			}
+		}
+	})
+
+	t.Run("alt+- and alt+= change context", func(t *testing.T) {
+		m := commitModel(t, "a message")
+		start := m.context
+		m = drive(t, m, altKey("="))
+		if m.context != start+1 {
+			t.Errorf("context = %d, want %d", m.context, start+1)
+		}
+		m = drive(t, m, altKey("-"))
+		if m.context != start {
+			t.Errorf("context = %d, want %d", m.context, start)
+		}
+		if m.commit.Value() != "a message" {
+			t.Errorf("the message was edited: %q", m.commit.Value())
+		}
+	})
+
+	t.Run("ctrl+s signs off", func(t *testing.T) {
+		m := commitModel(t, "a message")
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlS})
+		if !strings.Contains(m.commit.Value(), "Signed-off-by:") {
+			t.Errorf("commit buffer = %q, want a sign off", m.commit.Value())
+		}
+	})
+}
+
+// Outside the buffer, git gui's own Ctrl accelerators still work.
+func TestGitGuiCtrlKeysStillWorkOutsideTheBuffer(t *testing.T) {
+	m := newTestModel(t)
+	if m.focus == focusCommit {
+		t.Fatal("expected to start outside the message buffer")
+	}
+	got := drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	if !got.amend {
+		t.Error("Ctrl-E should still toggle amend outside the message buffer")
+	}
+}

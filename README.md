@@ -115,19 +115,51 @@ In the commit message buffer only the arrow keys move out, and only from the
 very start of the text (`↑` on the first line, `←` at the first column) — so
 `h`/`j`/`k`/`l` stay typable there.
 
-### Commit menu
+### Commands
+
+These work **everywhere, including while you are typing a commit message**, so
+you never have to leave the buffer to run one.
 
 | Key | git gui command |
 | --- | --- |
 | `F5`, `Ctrl-R` | Rescan |
 | `Ctrl-T` | Stage To Commit |
-| `i` | Stage Changed Files To Commit |
-| `Ctrl-U` | Unstage From Commit |
+| `Alt-I` | Stage Changed Files To Commit |
+| `Alt-U` | Unstage From Commit |
 | `Ctrl-J` | Revert Changes |
 | `Ctrl-S` | Sign Off |
-| `Ctrl-E` | Amend Last Commit |
-| `Ctrl-Enter`, `Alt-C` | Commit |
-| `-` / `=` | Show Less / More Context |
+| `Alt-E` | Amend Last Commit |
+| `Alt-C`, `Ctrl-Enter` | Commit |
+| `Alt-P` | Push |
+| `Alt-M` | Local Merge / Abort Merge |
+| `Alt-B` | Create Branch |
+| `Ctrl-O` | Checkout Branch |
+| `Alt--` / `Alt-=` | Show Less / More Context |
+
+### Why not all Ctrl keys
+
+The commit message buffer is a real text field with readline editing, and most
+of git gui's accelerators collide with it: `Ctrl-E` is end-of-line, `Ctrl-U`
+kills to the start of the line, `Ctrl-P`/`Ctrl-N` move by line, `Ctrl-A`,
+`Ctrl-K`, `Ctrl-W`, `Ctrl-D`, `Ctrl-B` and `Ctrl-F` are all editing too. A
+command layer built purely on Ctrl would quietly break typing.
+
+So the keys are layered:
+
+1. **Commands** avoid every key the buffer binds for editing, and are live
+   everywhere. That is why "stage changed" is `Alt-I` rather than `Ctrl-I`.
+2. **git gui's own Ctrl accelerators** — `Ctrl-U` unstage, `Ctrl-E` amend,
+   `Ctrl-P` push, `Ctrl-N` create branch — stay bound everywhere *except*
+   inside the message buffer, where the editing meaning wins.
+3. **Unmodified letters** act on a pane's cursor, so they are live only while a
+   list or the diff has focus. In the buffer they are simply typed.
+
+Inside the buffer, `Ctrl-A`, `Ctrl-E`, `Ctrl-K`, `Ctrl-U`, `Ctrl-W`, `Ctrl-D`,
+`Ctrl-B`, `Ctrl-F`, `Ctrl-N`, `Ctrl-P` and the `Alt` word motions all edit the
+message exactly as you would expect. There is one deliberate exception:
+`Ctrl-T`, which the textarea uses to transpose two characters, stays git gui's
+Stage To Commit — transposing characters is not something anyone reaches for in
+a commit message.
 
 ### File lists
 
@@ -155,10 +187,10 @@ very start of the text (`↑` on the first line, `←` at the first column) — 
 
 | Key | Action |
 | --- | --- |
-| `Ctrl-N` | Create Branch |
+| `Alt-B`, `Ctrl-N` | Create Branch |
 | `Ctrl-O` | Checkout Branch |
-| `M` | Local Merge, or Abort Merge when one is in progress |
-| `Ctrl-P` | Push |
+| `Alt-M`, `M` | Local Merge, or Abort Merge when one is in progress |
+| `Alt-P`, `Ctrl-P` | Push |
 | `F1`, `?` | Help |
 | `Ctrl-Q`, `Ctrl-C` | Quit (`q` also quits from a list or the diff) |
 
@@ -167,8 +199,9 @@ very start of the text (`↑` on the first line, `←` at the first column) — 
 Three of git gui's accelerators cannot survive a terminal, so they moved:
 
 - **`Ctrl-I`** (Stage Changed Files To Commit) is byte-identical to `Tab`. It
-  is bound to `i` instead, on the lists and the diff pane.
-- **`Ctrl-M`** (Local Merge) is byte-identical to `Enter`. It is bound to `M`.
+  is `Alt-I`, or `i` on the lists and the diff pane.
+- **`Ctrl-M`** (Local Merge) is byte-identical to `Enter`. It is `Alt-M`, or
+  `M` on the lists and the diff pane.
 - **`Ctrl-Q`** is XON on terminals that still have flow control enabled, so
   `Ctrl-C` quits as well.
 

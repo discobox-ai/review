@@ -419,10 +419,15 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// still gets to show it.
 	m.clearStatus()
 
-	// Global accelerators, available regardless of focus.
+	// Repository commands. These work everywhere, including while a commit
+	// message is being typed, so they avoid every key the message buffer
+	// binds for readline style editing.
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m.doQuit()
+	case key.Matches(msg, m.keys.Help):
+		m.dialog = textDialog("difftui — keys", helpText())
+		return m, nil
 	case key.Matches(msg, m.keys.Rescan):
 		m.setOK("Rescanning…")
 		return m, m.rescanCmd()
@@ -440,6 +445,8 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.setFocus((m.focus + focusCount - 1) % focusCount)
 	case key.Matches(msg, m.keys.Stage):
 		return m.doStage()
+	case key.Matches(msg, m.keys.StageChanged):
+		return m, op("Stage Changed", true, m.repo.StageChanged)
 	case key.Matches(msg, m.keys.Unstage):
 		return m.doUnstage()
 	case key.Matches(msg, m.keys.Revert):
@@ -452,10 +459,32 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.doCommit()
 	case key.Matches(msg, m.keys.Push):
 		return m.doPush()
+	case key.Matches(msg, m.keys.Merge):
+		return m.doMerge()
 	case key.Matches(msg, m.keys.Branch):
 		return m.doCreateBranch()
 	case key.Matches(msg, m.keys.Checkout):
 		return m.doCheckout()
+	case key.Matches(msg, m.keys.LessContext):
+		return m.changeContext(-1)
+	case key.Matches(msg, m.keys.MoreContext):
+		return m.changeContext(+1)
+	}
+
+	// git-gui's accelerators for four of those commands are also readline
+	// editing keys, so they are live everywhere except inside the message
+	// buffer, where Ctrl-U, Ctrl-E, Ctrl-P and Ctrl-N have to keep editing.
+	if m.focus != focusCommit {
+		switch {
+		case key.Matches(msg, m.keys.UnstageCtrl):
+			return m.doUnstage()
+		case key.Matches(msg, m.keys.AmendCtrl):
+			return m.toggleAmend()
+		case key.Matches(msg, m.keys.PushCtrl):
+			return m.doPush()
+		case key.Matches(msg, m.keys.BranchCtrl):
+			return m.doCreateBranch()
+		}
 	}
 
 	if m.focus == focusCommit {
@@ -482,22 +511,24 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Unmodified keys, only while a list or the diff has focus.
+	// Unmodified keys. These act on a pane's cursor, so they are only live
+	// while a list or the diff has focus; in the message buffer they are
+	// just text.
 	switch {
 	case key.Matches(msg, m.keys.QuitAlt):
 		return m.doQuit()
-	case key.Matches(msg, m.keys.Help):
+	case msg.String() == "?":
 		m.dialog = textDialog("difftui — keys", helpText())
 		return m, nil
-	case key.Matches(msg, m.keys.StageChanged):
+	case key.Matches(msg, m.keys.StageChangedKey):
 		return m, op("Stage Changed", true, m.repo.StageChanged)
-	case key.Matches(msg, m.keys.Merge):
+	case key.Matches(msg, m.keys.MergeKey):
 		return m.doMerge()
 	case key.Matches(msg, m.keys.Delete):
 		return m.doDelete()
-	case key.Matches(msg, m.keys.LessContext):
+	case key.Matches(msg, m.keys.LessContextKey):
 		return m.changeContext(-1)
-	case key.Matches(msg, m.keys.MoreContext):
+	case key.Matches(msg, m.keys.MoreContextKey):
 		return m.changeContext(+1)
 	}
 
@@ -1336,7 +1367,7 @@ func (m Model) hints() string {
 	case focusWorkdir:
 		return "hjkl/arrows move · Space stage · Ctrl-J revert · m mark · i stage changed"
 	case focusIndex:
-		return "hjkl/arrows move · Space unstage · Ctrl-U unstage · m mark"
+		return "hjkl/arrows move · Space unstage · Ctrl-U unstage · m mark · i stage changed"
 	case focusDiff:
 		if m.diff.visual() {
 			n := 1 + max(m.diff.cursor, m.diff.anchor) - min(m.diff.cursor, m.diff.anchor)
@@ -1347,7 +1378,7 @@ func (m Model) hints() string {
 	case focusAmend:
 		return "Space/Enter toggles Amend Last Commit · ↑/↓ diff and message · Tab next"
 	default:
-		return "Ctrl-Enter commit · Ctrl-S sign off · Ctrl-E amend · Alt-1..4 panes · F1 help"
+		return "Alt-C commit · Ctrl-S sign off · Alt-E amend · Alt-I stage changed · F1 help"
 	}
 }
 
@@ -1371,17 +1402,26 @@ func helpText() string {
 		"  keys move out, and only from the very start of the text, so",
 		"  h/j/k/l stay typable.",
 		"",
-		"Commit",
+		"Commands  (these work everywhere, including while typing a message)",
 		"  F5, Ctrl-R   Rescan",
 		"  Ctrl-T       Stage To Commit",
-		"  i            Stage Changed Files To Commit",
-		"  Ctrl-U       Unstage From Commit",
+		"  Alt-I        Stage Changed Files To Commit",
+		"  Alt-U        Unstage From Commit",
 		"  Ctrl-J       Revert Changes",
 		"  Ctrl-S       Sign Off",
-		"  Ctrl-E       Amend Last Commit (or Tab to the checkbox and press",
+		"  Alt-E        Amend Last Commit (or Tab to the checkbox and press",
 		"               Space or Enter)",
-		"  Ctrl-Enter, Alt-C   Commit",
-		"  - / =        Show less / more diff context",
+		"  Alt-C, Ctrl-Enter   Commit",
+		"  Alt-P        Push          Alt-M  Local Merge",
+		"  Alt-B        Create Branch Ctrl-O Checkout Branch",
+		"  Alt-- / Alt-=  Show less / more diff context",
+		"",
+		"  Outside the message buffer, git gui's own keys work too:",
+		"  Ctrl-U unstage, Ctrl-E amend, Ctrl-P push, Ctrl-N create branch,",
+		"  and the plain letters i, M, D, - and =. Inside the buffer those",
+		"  keys stay with the text: Ctrl-A, Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W,",
+		"  Ctrl-D, Ctrl-B, Ctrl-F, Ctrl-N, Ctrl-P and the Alt word motions",
+		"  all edit the message as usual.",
 		"",
 		"File lists",
 		"  Up/Down, j/k  move (loads the diff)",
@@ -1399,9 +1439,9 @@ func helpText() string {
 		"  n / p         next / previous hunk",
 		"",
 		"Branch and remote",
-		"  Ctrl-N  Create Branch    Ctrl-O  Checkout Branch",
-		"  M       Local Merge / Abort Merge",
-		"  Ctrl-P  Push",
+		"  Alt-B, Ctrl-N  Create Branch    Ctrl-O  Checkout Branch",
+		"  Alt-M, M       Local Merge / Abort Merge",
+		"  Alt-P, Ctrl-P  Push",
 		"",
 		"  Ctrl-Q, Ctrl-C  Quit  (q also quits from a list or the diff)",
 		"",
@@ -1411,6 +1451,6 @@ func helpText() string {
 		"two tools share the buffer. Committing clears them.",
 		"",
 		"Ctrl-I and Ctrl-M cannot be told apart from Tab and Enter in a",
-		"terminal, so \"Stage Changed\" is bound to i and \"Local Merge\" to M.",
+		"terminal, which is why those two commands live on Alt-I and Alt-M.",
 	}, "\n")
 }

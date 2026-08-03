@@ -2,30 +2,57 @@ package ui
 
 import "github.com/charmbracelet/bubbles/key"
 
-// keyMap mirrors git-gui's accelerators wherever a terminal can deliver them.
-// Ctrl-I and Ctrl-M are indistinguishable from Tab and Enter on a terminal, so
-// those two commands ("Stage Changed Files To Commit" and "Local Merge") are
-// reachable through their unmodified letters while a list or the diff has
-// focus, and through the on-screen buttons.
+// keyMap is layered, because the commit message buffer is a text field and
+// most of git-gui's accelerators are also readline editing keys.
+//
+//  1. Repository commands work everywhere, including while typing a message.
+//     They avoid every key bubbles' textarea binds for editing, so Ctrl-A,
+//     Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W, Ctrl-D, Ctrl-B, Ctrl-F, Ctrl-N, Ctrl-P
+//     and the Alt word motions still edit the message.
+//  2. git-gui's own Ctrl accelerators that collide with those editing keys
+//     stay bound everywhere *except* inside the buffer, where editing wins.
+//  3. Unmodified letters act on a pane's cursor, so they are live only while a
+//     list or the diff has focus and would otherwise just be typed.
+//
+// Three of git-gui's accelerators cannot be delivered by a terminal at all:
+// Ctrl-I is Tab, Ctrl-M is Enter, and Ctrl-Q is XON where flow control is on.
 type keyMap struct {
 	Quit    key.Binding
 	QuitAlt key.Binding
 	Help    key.Binding
 	Rescan  key.Binding
 	Stage   key.Binding
-	Unstage key.Binding
 	Toggle  key.Binding
 
+	// Repository commands, live everywhere.
 	StageChanged key.Binding
+	Unstage      key.Binding
 	Revert       key.Binding
 	SignOff      key.Binding
 	Amend        key.Binding
 	Commit       key.Binding
 	Push         key.Binding
 	Merge        key.Binding
+	Branch       key.Binding
+	Checkout     key.Binding
+	LessContext  key.Binding
+	MoreContext  key.Binding
 
-	LessContext key.Binding
-	MoreContext key.Binding
+	// git-gui's Ctrl accelerators that double as readline editing keys.
+	UnstageCtrl key.Binding
+	AmendCtrl   key.Binding
+	PushCtrl    key.Binding
+	BranchCtrl  key.Binding
+
+	// Unmodified keys, only while a list or the diff has focus.
+	StageChangedKey key.Binding
+	MergeKey        key.Binding
+	LessContextKey  key.Binding
+	MoreContextKey  key.Binding
+	Delete          key.Binding
+	Mark            key.Binding
+	Visual          key.Binding
+	StageLine       key.Binding
 
 	FocusWorkdir key.Binding
 	FocusIndex   key.Binding
@@ -43,14 +70,6 @@ type keyMap struct {
 	Home     key.Binding
 	End      key.Binding
 
-	Mark      key.Binding
-	Visual    key.Binding
-	StageLine key.Binding
-
-	Branch   key.Binding
-	Checkout key.Binding
-	Delete   key.Binding
-
 	Accept key.Binding
 	Cancel key.Binding
 }
@@ -61,23 +80,42 @@ func newKeyMap() keyMap {
 		// flow control still enabled, so Ctrl-C quits too.
 		Quit:    key.NewBinding(key.WithKeys("ctrl+q", "ctrl+c"), key.WithHelp("Ctrl-Q", "quit")),
 		QuitAlt: key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
-		Help:    key.NewBinding(key.WithKeys("f1", "?"), key.WithHelp("F1", "help")),
+		Help:    key.NewBinding(key.WithKeys("f1"), key.WithHelp("F1", "help")),
 		Rescan:  key.NewBinding(key.WithKeys("f5", "ctrl+r"), key.WithHelp("F5", "rescan")),
 
-		Stage:   key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("Ctrl-T", "stage")),
-		Unstage: key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("Ctrl-U", "unstage")),
-		Toggle:  key.NewBinding(key.WithKeys(" ", "enter"), key.WithHelp("Space", "toggle staged")),
+		// Ctrl-T is the one editing key deliberately taken: it transposes two
+		// characters, which no one reaches for in a commit message, and it is
+		// git-gui's Stage To Commit.
+		Stage:  key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("Ctrl-T", "stage")),
+		Toggle: key.NewBinding(key.WithKeys(" ", "enter"), key.WithHelp("Space", "toggle staged")),
 
-		StageChanged: key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "stage changed")),
+		StageChanged: key.NewBinding(key.WithKeys("alt+i"), key.WithHelp("Alt-I", "stage changed")),
+		Unstage:      key.NewBinding(key.WithKeys("alt+u"), key.WithHelp("Alt-U", "unstage")),
 		Revert:       key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("Ctrl-J", "revert changes")),
 		SignOff:      key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("Ctrl-S", "sign off")),
-		Amend:        key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("Ctrl-E", "amend last commit")),
-		Commit:       key.NewBinding(key.WithKeys("ctrl+enter", "alt+c"), key.WithHelp("Ctrl-Enter", "commit")),
-		Push:         key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("Ctrl-P", "push")),
-		Merge:        key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "local merge")),
+		Amend:        key.NewBinding(key.WithKeys("alt+e"), key.WithHelp("Alt-E", "amend last commit")),
+		Commit:       key.NewBinding(key.WithKeys("ctrl+enter", "alt+c"), key.WithHelp("Alt-C", "commit")),
+		Push:         key.NewBinding(key.WithKeys("alt+p"), key.WithHelp("Alt-P", "push")),
+		Merge:        key.NewBinding(key.WithKeys("alt+m"), key.WithHelp("Alt-M", "local merge")),
+		Branch:       key.NewBinding(key.WithKeys("alt+b"), key.WithHelp("Alt-B", "create branch")),
+		Checkout:     key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("Ctrl-O", "checkout branch")),
+		LessContext:  key.NewBinding(key.WithKeys("alt+-", "alt+_"), key.WithHelp("Alt--", "less context")),
+		MoreContext:  key.NewBinding(key.WithKeys("alt+=", "alt++"), key.WithHelp("Alt-=", "more context")),
 
-		LessContext: key.NewBinding(key.WithKeys("ctrl+_", "ctrl+-", "-"), key.WithHelp("-", "less context")),
-		MoreContext: key.NewBinding(key.WithKeys("ctrl+=", "=", "+"), key.WithHelp("=", "more context")),
+		// git-gui's keys for the same commands, everywhere but the buffer.
+		UnstageCtrl: key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("Ctrl-U", "unstage")),
+		AmendCtrl:   key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("Ctrl-E", "amend last commit")),
+		PushCtrl:    key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("Ctrl-P", "push")),
+		BranchCtrl:  key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("Ctrl-N", "create branch")),
+
+		StageChangedKey: key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "stage changed")),
+		MergeKey:        key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "local merge")),
+		LessContextKey:  key.NewBinding(key.WithKeys("-"), key.WithHelp("-", "less context")),
+		MoreContextKey:  key.NewBinding(key.WithKeys("=", "+"), key.WithHelp("=", "more context")),
+		Delete:          key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete untracked")),
+		Mark:            key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "mark file")),
+		Visual:          key.NewBinding(key.WithKeys("V"), key.WithHelp("V", "visual line select")),
+		StageLine:       key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "stage this line")),
 
 		FocusWorkdir: key.NewBinding(key.WithKeys("alt+1"), key.WithHelp("Alt-1", "unstaged")),
 		FocusIndex:   key.NewBinding(key.WithKeys("alt+2"), key.WithHelp("Alt-2", "staged")),
@@ -94,14 +132,6 @@ func newKeyMap() keyMap {
 		PageDown: key.NewBinding(key.WithKeys("pgdown", "ctrl+f")),
 		Home:     key.NewBinding(key.WithKeys("home", "g")),
 		End:      key.NewBinding(key.WithKeys("end", "G")),
-
-		Mark:      key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "mark file")),
-		Visual:    key.NewBinding(key.WithKeys("V"), key.WithHelp("V", "visual line select")),
-		StageLine: key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "stage this line")),
-
-		Branch:   key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("Ctrl-N", "create branch")),
-		Checkout: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("Ctrl-O", "checkout branch")),
-		Delete:   key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete untracked")),
 
 		Accept: key.NewBinding(key.WithKeys("enter")),
 		Cancel: key.NewBinding(key.WithKeys("esc")),
