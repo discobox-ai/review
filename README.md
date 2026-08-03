@@ -179,6 +179,28 @@ Since a terminal has no right mouse button, git gui's diff context menu is on
 the keyboard: the hunk under the cursor is the one `Space`, `Ctrl-U` and `r`
 act on, and `v` starts the line selection that `S` stages.
 
+## Syntax highlighting
+
+Diffs are syntax highlighted, using [chroma](https://github.com/alecthomas/chroma)
+to pick a lexer from the file's name. Files chroma does not recognise are shown
+plain, rather than run through a fallback lexer that would colour nothing.
+
+Two details make it read well rather than just colourful:
+
+- **Each side of a hunk is lexed as one text** — context plus removed lines for
+  the old side, context plus added lines for the new one. A lexer is a state
+  machine, so fed one line at a time it restarts on every line and anything
+  spanning lines (block comments, raw strings) gets coloured as though it began
+  where it did not. A hunk is as much context as a diff has.
+- **The palette is short and deliberately quiet.** Keywords, types, literals and
+  comments are coloured; plain identifiers and punctuation are left in the
+  line's own foreground, because colouring everything emphasises nothing. The
+  colours also stay clear of the diff's own green and red, so a string never
+  lands green-on-green.
+
+Everything a token does not cover keeps the line's add/remove colour, so the
+shape of the diff still reads at a glance.
+
 ## Amending
 
 The `[ ] Amend Last Commit` checkbox in the commit message header is git gui's,
@@ -237,6 +259,7 @@ every marked file. With nothing marked they apply to the file under the cursor.
 | `internal/ui/model.go` | The Bubble Tea model: layout, keys, actions |
 | `internal/ui/filelist.go` | The two file panes |
 | `internal/ui/diffview.go` | The diff pane, hunk cursor and line selection |
+| `internal/ui/syntax.go` | Lexing a hunk and the highlighting palette |
 | `internal/ui/dialog.go` | The modal layer standing in for git gui's popups |
 
 Hunk and line staging work by rebuilding a minimal patch and feeding it to

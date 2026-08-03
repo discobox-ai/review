@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/obot-platform/difftui/internal/git"
 )
 
@@ -15,7 +16,8 @@ type diffView struct {
 	side  git.Side
 	patch *git.Patch
 	lines []git.DiffLine
-	text  string // shown instead of a patch for messages such as "no differences"
+	spans [][]span // syntax highlighting, parallel to lines
+	text  string   // shown instead of a patch for messages such as "no differences"
 
 	cursor int
 	offset int
@@ -28,12 +30,12 @@ type diffView struct {
 func newDiffView() *diffView { return &diffView{anchor: -1} }
 
 func (d *diffView) clear() {
-	d.file, d.patch, d.lines, d.text = nil, nil, nil, ""
+	d.file, d.patch, d.lines, d.text, d.spans = nil, nil, nil, "", nil
 	d.cursor, d.offset, d.anchor = 0, 0, -1
 }
 
 func (d *diffView) setMessage(msg string) {
-	d.patch, d.lines = nil, nil
+	d.patch, d.lines, d.spans = nil, nil, nil
 	d.text = msg
 	d.cursor, d.offset, d.anchor = 0, 0, -1
 }
@@ -42,6 +44,7 @@ func (d *diffView) setPatch(f *git.File, side git.Side, raw string) {
 	d.file, d.side, d.text = f, side, ""
 	d.patch = git.ParsePatch(raw)
 	d.lines = d.patch.Render()
+	d.spans = highlightLines(f.Path, d.lines)
 	d.cursor, d.offset, d.anchor = 0, 0, -1
 	// Start on the first hunk header so the first stage-hunk does the
 	// obvious thing.
@@ -201,7 +204,6 @@ func (d *diffView) view(st *styles, focused bool) string {
 	}
 	for i := d.offset; i < len(d.lines) && len(rows) < d.height; i++ {
 		l := d.lines[i]
-		body := pad(l.Text, d.width)
 		var style lipgloss.Style
 		switch l.Kind {
 		case '+':
@@ -221,12 +223,85 @@ func (d *diffView) view(st *styles, focused bool) string {
 		case d.inSelection(i):
 			style = style.Background(colInactive)
 		}
-		rows = append(rows, style.Render(body))
+		if isCodeLine(l.Kind) {
+			rows = append(rows, renderSyntaxLine(l.Text, d.spanAt(i), style, st.syntax, d.width))
+			continue
+		}
+		rows = append(rows, style.Render(pad(l.Text, d.width)))
 	}
 	for len(rows) < d.height {
 		rows = append(rows, strings.Repeat(" ", max(d.width, 0)))
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, append([]string{header}, rows...)...)
+}
+
+// spanAt returns the highlighting for a rendered line, if any.
+func (d *diffView) spanAt(i int) []span {
+	if i < 0 || i >= len(d.spans) {
+		return nil
+	}
+	return d.spans[i]
+}
+
+// renderSyntaxLine draws one diff line, colouring the runs the lexer
+// identified while keeping the line's own foreground everywhere else and its
+// background across the full pane width.
+func renderSyntaxLine(text string, spans []span, base lipgloss.Style, palette syntaxPalette, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	fg := make([]lipgloss.TerminalColor, len(runes))
+	for _, s := range spans {
+		value, ok := palette.color(s.token)
+		if !ok {
+			continue
+		}
+		// Spans are offsets into the code text, which starts one column in,
+		// after the +/-/space marker.
+		for at := max(s.start+1, 0); at < s.end+1 && at < len(runes); at++ {
+			fg[at] = value
+		}
+	}
+
+	var b strings.Builder
+	var buf []rune
+	var current lipgloss.TerminalColor
+	flush := func() {
+		if len(buf) == 0 {
+			return
+		}
+		style := base
+		if current != nil {
+			style = style.Foreground(current)
+		}
+		b.WriteString(style.Render(string(buf)))
+		buf = buf[:0]
+	}
+
+	used, truncated := 0, false
+	for at, r := range runes {
+		w := runewidth.RuneWidth(r)
+		if used+w > width {
+			truncated = true
+			break
+		}
+		if fg[at] != current {
+			flush()
+			current = fg[at]
+		}
+		buf = append(buf, r)
+		used += w
+	}
+	flush()
+	if truncated && used < width {
+		b.WriteString(base.Render("…"))
+		used++
+	}
+	if used < width {
+		b.WriteString(base.Render(strings.Repeat(" ", width-used)))
+	}
+	return b.String()
 }
 
 func itoa(i int) string {

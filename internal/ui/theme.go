@@ -52,6 +52,8 @@ type styles struct {
 	dialog      lipgloss.Style
 	dialogTitle lipgloss.Style
 	key         lipgloss.Style
+
+	syntax syntaxPalette
 }
 
 func newStyles() *styles {
@@ -90,5 +92,6 @@ func newStyles() *styles {
 		Border(lipgloss.RoundedBorder()).BorderForeground(colGold).Padding(1, 2)
 	s.dialogTitle = lipgloss.NewStyle().Foreground(colGold).Bold(true)
 	s.key = lipgloss.NewStyle().Foreground(colGold)
+	s.syntax = newSyntaxPalette()
 	return s
 }
