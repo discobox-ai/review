@@ -18,7 +18,9 @@ const (
 	focusWorkdir focusArea = iota
 	focusIndex
 	focusDiff
+	focusAmend // the "Amend Last Commit" checkbox, drawn above the buffer
 	focusCommit
+	focusCount
 )
 
 const (
@@ -431,9 +433,9 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.FocusCommit):
 		return m.setFocus(focusCommit)
 	case key.Matches(msg, m.keys.NextPane):
-		return m.setFocus((m.focus + 1) % 4)
+		return m.setFocus((m.focus + 1) % focusCount)
 	case key.Matches(msg, m.keys.PrevPane):
-		return m.setFocus((m.focus + 3) % 4)
+		return m.setFocus((m.focus + focusCount - 1) % focusCount)
 	case key.Matches(msg, m.keys.Stage):
 		return m.doStage()
 	case key.Matches(msg, m.keys.Unstage):
@@ -462,7 +464,9 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "up":
 			if atFirstLine {
-				return m.enterPane(focusDiff, entryBottom)
+				if t, ok := paneAbove(focusCommit); ok {
+					return m.enterPane(t, entryBottom)
+				}
 			}
 		case "left":
 			if atFirstLine && info.ColumnOffset == 0 {
@@ -498,6 +502,9 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.focus == focusDiff {
 		return m.diffKey(msg)
 	}
+	if m.focus == focusAmend {
+		return m.amendKey(msg)
+	}
 	return m.listKey(msg)
 }
 
@@ -514,8 +521,10 @@ func paneAbove(f focusArea) (focusArea, bool) {
 	switch f {
 	case focusIndex:
 		return focusWorkdir, true
-	case focusCommit:
+	case focusAmend:
 		return focusDiff, true
+	case focusCommit:
+		return focusAmend, true
 	}
 	return f, false
 }
@@ -525,6 +534,8 @@ func paneBelow(f focusArea) (focusArea, bool) {
 	case focusWorkdir:
 		return focusIndex, true
 	case focusDiff:
+		return focusAmend, true
+	case focusAmend:
 		return focusCommit, true
 	}
 	return f, false
@@ -536,7 +547,7 @@ func paneBelow(f focusArea) (focusArea, bool) {
 // you were looking at.
 func (m *Model) paneLeft(f focusArea) (focusArea, bool) {
 	switch f {
-	case focusDiff, focusCommit:
+	case focusDiff, focusAmend, focusCommit:
 		if _, side := m.activeList(); side == git.SideIndex {
 			return focusIndex, true
 		}
@@ -598,6 +609,9 @@ func (m Model) setFocus(f focusArea) (tea.Model, tea.Cmd) {
 		return m, textarea.Blink
 	}
 	m.commit.Blur()
+	if f != focusDiff {
+		m.diff.clearVisual()
+	}
 	if f == focusWorkdir || f == focusIndex {
 		return m, m.refreshDiffCmd()
 	}
@@ -665,7 +679,48 @@ func (m Model) listKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// amendKey handles the "Amend Last Commit" checkbox, which behaves like a
+// checkbox anywhere else: Space or Enter flips it.
+func (m Model) amendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Toggle):
+		return m.toggleAmend()
+	case key.Matches(msg, m.keys.Up):
+		if t, ok := paneAbove(m.focus); ok {
+			return m.enterPane(t, entryBottom)
+		}
+	case key.Matches(msg, m.keys.Down):
+		if t, ok := paneBelow(m.focus); ok {
+			return m.enterPane(t, entryTop)
+		}
+	case key.Matches(msg, m.keys.Left):
+		if t, ok := m.paneLeft(m.focus); ok {
+			return m.enterPane(t, entryKeep)
+		}
+	}
+	return m, nil
+}
+
 func (m Model) diffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// While a visual selection is open the cursor stays inside the diff:
+	// running off the end would abandon the selection mid-gesture.
+	if m.diff.visual() {
+		switch {
+		case key.Matches(msg, m.keys.Up):
+			m.diff.move(-1)
+			return m, nil
+		case key.Matches(msg, m.keys.Down):
+			m.diff.move(1)
+			return m, nil
+		case key.Matches(msg, m.keys.Cancel):
+			m.diff.clearVisual()
+			return m, nil
+		case key.Matches(msg, m.keys.Toggle):
+			// Space and Enter stage what is selected, as in the lists.
+			return m.doStageLines()
+		}
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Up):
 		if m.diff.cursor <= 0 {
@@ -701,8 +756,8 @@ func (m Model) diffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.diff.moveTo(0)
 	case key.Matches(msg, m.keys.End):
 		m.diff.moveTo(len(m.diff.lines) - 1)
-	case key.Matches(msg, m.keys.Select):
-		m.diff.toggleSelect()
+	case key.Matches(msg, m.keys.Visual):
+		m.diff.toggleVisual()
 	case key.Matches(msg, m.keys.StageLine):
 		return m.doStageLines()
 	case key.Matches(msg, m.keys.Toggle):
@@ -1207,10 +1262,14 @@ func (m Model) viewCommitArea() string {
 		check = "[x] Amend Last Commit"
 	}
 	labelStyled := m.st.commitLabel.Render(label)
-	amendStyled := m.st.dimText.Render(check)
+	amendStyle := m.st.dimText
 	if m.amend {
-		amendStyled = m.st.statusWA.Render(check)
+		amendStyle = m.st.statusWA
 	}
+	if m.focus == focusAmend {
+		amendStyle = amendStyle.Background(colSelBG).Bold(true)
+	}
+	amendStyled := amendStyle.Render(check)
 	gap := rightW - lipgloss.Width(labelStyled) - lipgloss.Width(amendStyled)
 	header := labelStyled
 	if gap > 0 {
@@ -1276,7 +1335,14 @@ func (m Model) hints() string {
 	case focusIndex:
 		return "hjkl/arrows move · Space unstage · Ctrl-U unstage · m mark"
 	case focusDiff:
-		return "Space stage hunk · v select lines · S stage lines · r revert hunk · n/p hunk · -/= context"
+		if m.diff.visual() {
+			n := 1 + max(m.diff.cursor, m.diff.anchor) - min(m.diff.cursor, m.diff.anchor)
+			return fmt.Sprintf("VISUAL LINE  %s · ↑/↓ extend · Space stage/unstage · V or Esc cancel",
+				plural(n, "line", "lines"))
+		}
+		return "Space stage hunk · V select lines · L stage line · r revert hunk · n/p hunk · -/= context"
+	case focusAmend:
+		return "Space/Enter toggles Amend Last Commit · ↑/↓ diff and message · Tab next"
 	default:
 		return "Ctrl-Enter commit · Ctrl-S sign off · Ctrl-E amend · Alt-1..4 panes · F1 help"
 	}
@@ -1287,7 +1353,7 @@ func helpText() string {
 		"Panes",
 		"  Alt-1  Unstaged Changes      Alt-2  Staged Changes",
 		"  Alt-3  Diff                  Alt-4  Commit Message",
-		"  Tab / Shift-Tab  cycle panes",
+		"  Tab / Shift-Tab  cycle panes, including the Amend checkbox",
 		"",
 		"  The panes form a grid, and the arrow keys (or h/j/k/l) walk it:",
 		"",
@@ -1309,7 +1375,8 @@ func helpText() string {
 		"  Ctrl-U       Unstage From Commit",
 		"  Ctrl-J       Revert Changes",
 		"  Ctrl-S       Sign Off",
-		"  Ctrl-E       Amend Last Commit",
+		"  Ctrl-E       Amend Last Commit (or Tab to the checkbox and press",
+		"               Space or Enter)",
 		"  Ctrl-Enter, Alt-C   Commit",
 		"  - / =        Show less / more diff context",
 		"",
@@ -1322,8 +1389,9 @@ func helpText() string {
 		"Diff pane",
 		"  Space, Ctrl-T stage the hunk under the cursor",
 		"  Ctrl-U        unstage the hunk under the cursor",
-		"  v             start or clear a line selection",
-		"  S             stage or unstage the selected lines",
+		"  V             visual line select, like vim: V again or Esc cancels,",
+		"                up/down extend, Space or Enter stages the selection",
+		"  L             stage or unstage just the line under the cursor",
 		"  r             revert the hunk (unstaged side only)",
 		"  n / p         next / previous hunk",
 		"",

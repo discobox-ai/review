@@ -85,7 +85,7 @@ difftui keeps git gui's accelerators wherever a terminal can deliver them.
 | Key | Action |
 | --- | --- |
 | `Alt-1` … `Alt-4` | Focus unstaged / staged / diff / commit message |
-| `Tab`, `Shift-Tab` | Cycle panes |
+| `Tab`, `Shift-Tab` | Cycle focus, including the Amend checkbox |
 | `←` `↓` `↑` `→`, `h` `j` `k` `l` | Move, crossing into the neighbouring pane at the edges |
 
 The four panes form a grid, and navigation walks it:
@@ -145,8 +145,8 @@ very start of the text (`↑` on the first line, `←` at the first column) — 
 | --- | --- |
 | `Space`, `Ctrl-T` | Stage Hunk For Commit |
 | `Ctrl-U` | Unstage Hunk From Commit |
-| `v` | Start or clear a line selection |
-| `S` | Stage / Unstage Lines |
+| `V` | Visual line select (see below) |
+| `L` | Stage / Unstage Line — just the one under the cursor |
 | `r` | Revert Hunk |
 | `n` / `p` | Next / previous hunk |
 | `↑`/`↓`, `k`/`j` | Move by line; `↓` past the end enters the commit message |
@@ -177,7 +177,21 @@ commit message buffer swallows them so you can type normally.
 
 Since a terminal has no right mouse button, git gui's diff context menu is on
 the keyboard: the hunk under the cursor is the one `Space`, `Ctrl-U` and `r`
-act on, and `v` starts the line selection that `S` stages.
+act on.
+
+### Visual line select
+
+`V` in the diff behaves like vim's visual line mode. It starts with the current
+line selected; `↑`/`↓` (or `k`/`j`) extend the selection; `V` again or `Esc`
+cancels. `Space` or `Enter` then stages the selected lines — the same keys that
+stage in the file lists — or unstages them when the diff is showing the staged
+side.
+
+While a selection is open the status bar switches to say so, counting the lines
+and listing what you can do, and the cursor stays inside the diff rather than
+running off into the next pane.
+
+`L` stages just the line under the cursor, without entering visual mode.
 
 ## Syntax highlighting
 
@@ -203,8 +217,10 @@ shape of the diff still reads at a glance.
 
 ## Amending
 
-The `[ ] Amend Last Commit` checkbox in the commit message header is git gui's,
-and `Ctrl-E` toggles it. Turning it on loads HEAD's message into the buffer;
+The `[ ] Amend Last Commit` checkbox in the commit message header is git gui's.
+`Ctrl-E` toggles it from anywhere, or `Tab` to it — it is a focus stop of its
+own, sitting between the diff and the message buffer where it is drawn, so
+`↑`/`↓` reach it too — and press `Space` or `Enter`. Turning it on loads HEAD's message into the buffer;
 turning it off puts back whatever you had been typing. Committing while it is
 ticked rewrites HEAD instead of adding a commit, and the label above the buffer
 changes to `Amended Commit Message:` so it is obvious which mode you are in.

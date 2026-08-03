@@ -115,13 +115,21 @@ func (d *diffView) jumpHunk(dir int) {
 	}
 }
 
-func (d *diffView) toggleSelect() {
+// toggleVisual starts visual line selection on the current line, or leaves it
+// again, the way V does in vim.
+func (d *diffView) toggleVisual() {
 	if d.anchor >= 0 {
 		d.anchor = -1
 		return
 	}
 	d.anchor = d.cursor
 }
+
+// visual reports whether a line selection is in progress.
+func (d *diffView) visual() bool { return d.anchor >= 0 }
+
+// clearVisual leaves visual line selection.
+func (d *diffView) clearVisual() { d.anchor = -1 }
 
 // selection returns the hunk index and the set of body line indexes currently
 // selected. With no active selection it is just the line under the cursor.
@@ -218,10 +226,12 @@ func (d *diffView) view(st *styles, focused bool) string {
 			style = st.body
 		}
 		switch {
-		case i == d.cursor && focused:
+		case d.inSelection(i) && focused:
 			style = style.Background(colSelBG)
 		case d.inSelection(i):
 			style = style.Background(colInactive)
+		case i == d.cursor && focused:
+			style = style.Background(colSelBG)
 		}
 		if isCodeLine(l.Kind) {
 			rows = append(rows, renderSyntaxLine(l.Text, d.spanAt(i), style, st.syntax, d.width))

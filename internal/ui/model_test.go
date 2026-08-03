@@ -453,7 +453,9 @@ func TestArrowKeysNavigateLikeHJKL(t *testing.T) {
 	}
 }
 
-func TestDiffPaneDownAtEndEntersCommit(t *testing.T) {
+// Down out of the diff walks the right hand column: the Amend checkbox sits
+// between the diff and the message buffer, which is where it is drawn.
+func TestDiffPaneDownAtEndWalksToAmendThenCommit(t *testing.T) {
 	base := newTestModel(t)
 	m, _ := base.setFocus(focusWorkdir)
 	mm := drive(t, m.(Model), rkey("l"))
@@ -464,22 +466,33 @@ func TestDiffPaneDownAtEndEntersCommit(t *testing.T) {
 		t.Fatal("diff pane is empty")
 	}
 	mm.diff.moveTo(len(mm.diff.lines) - 1)
+
 	mm = drive(t, mm, rkey("j"))
+	if mm.focus != focusAmend {
+		t.Fatalf("focus = %v, want focusAmend", mm.focus)
+	}
+	mm = drive(t, mm, tea.KeyMsg{Type: tea.KeyDown})
 	if mm.focus != focusCommit {
 		t.Errorf("focus = %v, want focusCommit", mm.focus)
+	}
+	// And back up again.
+	mm = drive(t, mm, tea.KeyMsg{Type: tea.KeyUp})
+	if mm.focus != focusAmend {
+		t.Errorf("focus = %v, want focusAmend on the way back up", mm.focus)
 	}
 }
 
 func TestCommitBufferEdgeNavigation(t *testing.T) {
 	base := newTestModel(t)
 
-	// Up on the first line leaves for the diff pane.
+	// Up on the first line leaves for the pane above, which is the Amend
+	// checkbox drawn on the buffer's header line.
 	m, _ := base.setFocus(focusCommit)
 	mm := m.(Model)
 	mm.commit.SetValue("")
 	got := drive(t, mm, tea.KeyMsg{Type: tea.KeyUp})
-	if got.focus != focusDiff {
-		t.Errorf("up at the top of the buffer: focus = %v, want focusDiff", got.focus)
+	if got.focus != focusAmend {
+		t.Errorf("up at the top of the buffer: focus = %v, want focusAmend", got.focus)
 	}
 
 	// Left at the very start leaves for the list the diff is showing, which
@@ -956,7 +969,8 @@ func TestCommitBufferLeftReturnsToTheActiveList(t *testing.T) {
 		t.Fatalf("focus = %v, want focusDiff", m.focus)
 	}
 	m.diff.moveTo(len(m.diff.lines) - 1)
-	m = drive(t, m, rkey("j"))
+	m = drive(t, m, rkey("j"))                     // the Amend checkbox
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyDown}) // the message buffer
 	if m.focus != focusCommit {
 		t.Fatalf("focus = %v, want focusCommit", m.focus)
 	}
@@ -1002,5 +1016,290 @@ func TestStatusMessageClearsOnTheNextKey(t *testing.T) {
 	m = drive(t, m, rkey("="))
 	if m.status == "" {
 		t.Error("the action's own message was cleared along with the old one")
+	}
+}
+
+// diffModel returns a model focused on the diff of a file with several
+// changed lines in one hunk.
+func diffModel(t *testing.T) Model {
+	t.Helper()
+	repo := testRepo(t)
+	writeFile(t, repo.Dir, "foo.txt", "one\nA\nB\nC\nfive\n")
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("1"))
+	for m.workdir.current() != nil && m.workdir.current().Path != "foo.txt" {
+		m = drive(t, m, rkey("j"))
+	}
+	m = drive(t, m, rkey("l"))
+	if m.focus != focusDiff {
+		t.Fatalf("focus = %v, want focusDiff", m.focus)
+	}
+	return m
+}
+
+// cursorTo puts the diff cursor on the first line of the given kind.
+func cursorTo(t *testing.T, m Model, kind byte) Model {
+	t.Helper()
+	for i, l := range m.diff.lines {
+		if l.Kind == kind {
+			m.diff.moveTo(i)
+			return m
+		}
+	}
+	t.Fatalf("no %c line in the diff", kind)
+	return m
+}
+
+func TestVisualStartsOnTheCurrentLine(t *testing.T) {
+	m := cursorTo(t, diffModel(t), '+')
+	at := m.diff.cursor
+
+	m = drive(t, m, rkey("V"))
+	if !m.diff.visual() {
+		t.Fatal("V did not start visual line selection")
+	}
+	if m.diff.anchor != at || m.diff.cursor != at {
+		t.Errorf("anchor/cursor = %d/%d, want both %d", m.diff.anchor, m.diff.cursor, at)
+	}
+	if !m.diff.inSelection(at) {
+		t.Error("the starting line should be selected")
+	}
+	// The hint line tells the user what is possible now.
+	view := m.View()
+	if !strings.Contains(view, "VISUAL LINE") {
+		t.Error("the status bar should announce visual line mode")
+	}
+	for _, want := range []string{"extend", "Space", "Esc"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the visual hint should mention %q", want)
+		}
+	}
+}
+
+func TestVisualExtendsWithUpAndDown(t *testing.T) {
+	m := cursorTo(t, diffModel(t), '+')
+	start := m.diff.cursor
+	m = drive(t, m, rkey("V"), rkey("j"), rkey("j"))
+	if m.diff.cursor != start+2 {
+		t.Fatalf("cursor = %d, want %d", m.diff.cursor, start+2)
+	}
+	for i := start; i <= start+2; i++ {
+		if !m.diff.inSelection(i) {
+			t.Errorf("line %d should be selected", i)
+		}
+	}
+	if m.diff.inSelection(start - 1) {
+		t.Error("the line above the anchor should not be selected")
+	}
+	// Arrow keys behave the same.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.diff.cursor != start+1 {
+		t.Errorf("after up, cursor = %d, want %d", m.diff.cursor, start+1)
+	}
+}
+
+func TestVisualDoesNotLeaveTheDiffPane(t *testing.T) {
+	m := diffModel(t)
+	m.diff.moveTo(len(m.diff.lines) - 1)
+	m = drive(t, m, rkey("V"), rkey("j"), rkey("j"))
+	if m.focus != focusDiff {
+		t.Errorf("focus = %v: running off the end abandoned the selection", m.focus)
+	}
+	if !m.diff.visual() {
+		t.Error("the selection was dropped")
+	}
+}
+
+func TestVisualCancels(t *testing.T) {
+	for _, k := range []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{"Esc", tea.KeyMsg{Type: tea.KeyEsc}},
+		{"V again", rkey("V")},
+	} {
+		t.Run(k.name, func(t *testing.T) {
+			m := drive(t, cursorTo(t, diffModel(t), '+'), rkey("V"))
+			if !m.diff.visual() {
+				t.Fatal("visual mode did not start")
+			}
+			m = drive(t, m, k.msg)
+			if m.diff.visual() {
+				t.Errorf("%s did not cancel visual mode", k.name)
+			}
+			if strings.Contains(m.View(), "VISUAL LINE") {
+				t.Error("the visual hint is still showing")
+			}
+		})
+	}
+}
+
+func TestVisualClearedByLeavingThePane(t *testing.T) {
+	m := drive(t, cursorTo(t, diffModel(t), '+'), rkey("V"))
+	m = drive(t, m, altKey("1"))
+	if m.diff.visual() {
+		t.Error("leaving the diff pane should drop the selection")
+	}
+}
+
+// Space stages the selection rather than the whole hunk while visual mode is
+// open, and the hunk when it is not.
+func TestSpaceStagesTheVisualSelection(t *testing.T) {
+	m := diffModel(t)
+	repo := m.repo
+
+	// Select the first added line only.
+	m = cursorTo(t, m, '+')
+	m = drive(t, m, rkey("V"))
+	m = drive(t, m, rkey(" "))
+	m = drive(t, m, New(repo).rescanCmd()())
+
+	staged, err := repo.Git("diff", "--cached")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(staged, "+A") {
+		t.Errorf("the selected line was not staged:\n%s", staged)
+	}
+	if strings.Contains(staged, "+B") || strings.Contains(staged, "+C") {
+		t.Errorf("more than the selection was staged:\n%s", staged)
+	}
+	if m.diff.visual() {
+		t.Error("visual mode should end once the selection is staged")
+	}
+}
+
+func TestSpaceStagesTheHunkWhenNotSelecting(t *testing.T) {
+	m := diffModel(t)
+	repo := m.repo
+	m = drive(t, m, rkey(" "))
+	m = drive(t, m, New(repo).rescanCmd()())
+
+	staged, err := repo.Git("diff", "--cached")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"+A", "+B", "+C"} {
+		if !strings.Contains(staged, want) {
+			t.Errorf("the whole hunk should be staged, missing %s:\n%s", want, staged)
+		}
+	}
+}
+
+func TestLStagesJustTheCursorLine(t *testing.T) {
+	m := diffModel(t)
+	repo := m.repo
+	m = cursorTo(t, m, '+')
+	m = drive(t, m, rkey("L"))
+	m = drive(t, m, New(repo).rescanCmd()())
+
+	staged, err := repo.Git("diff", "--cached")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(staged, "+A") {
+		t.Errorf("the cursor line was not staged:\n%s", staged)
+	}
+	if strings.Contains(staged, "+B") {
+		t.Errorf("L staged more than one line:\n%s", staged)
+	}
+}
+
+func TestTabReachesTheAmendCheckbox(t *testing.T) {
+	m := newTestModel(t)
+	// Tab walks every pane, including the checkbox, and comes back round.
+	want := []focusArea{focusIndex, focusDiff, focusAmend, focusCommit, focusWorkdir}
+	for i, expect := range want {
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyTab})
+		if m.focus != expect {
+			t.Fatalf("Tab %d: focus = %v, want %v", i+1, m.focus, expect)
+		}
+	}
+	// And Shift-Tab walks back.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.focus != focusCommit {
+		t.Errorf("Shift-Tab: focus = %v, want focusCommit", m.focus)
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.focus != focusAmend {
+		t.Errorf("Shift-Tab: focus = %v, want focusAmend", m.focus)
+	}
+}
+
+func TestAmendCheckboxTogglesWithSpaceAndEnter(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{"space", rkey(" ")},
+		{"enter", tea.KeyMsg{Type: tea.KeyEnter}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := newTestModel(t)
+			focused, _ := m.setFocus(focusAmend)
+			m = drive(t, focused.(Model))
+			if strings.Contains(m.View(), "[x] Amend Last Commit") {
+				t.Fatal("amend should start off")
+			}
+
+			m = drive(t, m, c.msg)
+			if !m.amend {
+				t.Fatalf("%s did not tick the checkbox", c.name)
+			}
+			if !strings.Contains(m.View(), "[x] Amend Last Commit") {
+				t.Error("the checkbox is not shown ticked")
+			}
+			if m.commit.Value() != "initial" {
+				t.Errorf("buffer = %q, want HEAD's message", m.commit.Value())
+			}
+			// Focus stays on the checkbox so it can be toggled straight back.
+			if m.focus != focusAmend {
+				t.Errorf("focus = %v, want to stay on focusAmend", m.focus)
+			}
+
+			m = drive(t, m, c.msg)
+			if m.amend {
+				t.Errorf("%s did not untick the checkbox", c.name)
+			}
+		})
+	}
+}
+
+func TestAmendCheckboxShowsItIsFocused(t *testing.T) {
+	m := newTestModel(t)
+	unfocused := m.View()
+
+	focused, _ := m.setFocus(focusAmend)
+	m = drive(t, focused.(Model))
+	if m.View() == unfocused {
+		t.Error("focusing the checkbox did not change how it is drawn")
+	}
+	if !strings.Contains(m.View(), "Amend Last Commit") {
+		t.Error("the checkbox label went missing")
+	}
+	if !strings.Contains(m.View(), "toggles Amend Last Commit") {
+		t.Error("the status bar should say what the checkbox does")
+	}
+}
+
+func TestAmendCheckboxArrowNavigation(t *testing.T) {
+	m := newTestModel(t)
+	focused, _ := m.setFocus(focusAmend)
+	m = drive(t, focused.(Model))
+
+	up := drive(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if up.focus != focusDiff {
+		t.Errorf("up: focus = %v, want focusDiff", up.focus)
+	}
+	down := drive(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if down.focus != focusCommit {
+		t.Errorf("down: focus = %v, want focusCommit", down.focus)
+	}
+	left := drive(t, m, tea.KeyMsg{Type: tea.KeyLeft})
+	if left.focus != focusWorkdir {
+		t.Errorf("left: focus = %v, want the list the diff is showing", left.focus)
 	}
 }

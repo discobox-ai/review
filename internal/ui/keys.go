@@ -44,7 +44,7 @@ type keyMap struct {
 	End      key.Binding
 
 	Mark      key.Binding
-	Select    key.Binding
+	Visual    key.Binding
 	StageLine key.Binding
 
 	Branch   key.Binding
@@ -96,8 +96,8 @@ func newKeyMap() keyMap {
 		End:      key.NewBinding(key.WithKeys("end", "G")),
 
 		Mark:      key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "mark file")),
-		Select:    key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "select lines")),
-		StageLine: key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "stage selected lines")),
+		Visual:    key.NewBinding(key.WithKeys("V"), key.WithHelp("V", "visual line select")),
+		StageLine: key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "stage this line")),
 
 		Branch:   key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("Ctrl-N", "create branch")),
 		Checkout: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("Ctrl-O", "checkout branch")),
