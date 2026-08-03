@@ -192,7 +192,7 @@ func TestRenderSyntaxLineKeepsWidth(t *testing.T) {
 			if !isCodeLine(l.Kind) {
 				continue
 			}
-			got := renderSyntaxLine(l.Text, spans[i], base, newSyntaxPalette(), width)
+			got := renderSyntaxLine(diffGutter(l.Kind), codeText(l.Text), spans[i], base, newSyntaxPalette(), width)
 			if w := lipgloss.Width(got); w != width {
 				t.Errorf("width %d: line %q rendered %d cells", width, l.Text, w)
 			}
@@ -207,8 +207,8 @@ func TestRenderSyntaxLineKeepsTheText(t *testing.T) {
 		if !isCodeLine(l.Kind) {
 			continue
 		}
-		got := renderSyntaxLine(l.Text, spans[i], base, newSyntaxPalette(), 200)
-		if !strings.Contains(got, strings.TrimSpace(l.Text)) {
+		got := renderSyntaxLine(diffGutter(l.Kind), codeText(l.Text), spans[i], base, newSyntaxPalette(), 200)
+		if !strings.Contains(got, strings.TrimSpace(codeText(l.Text))) {
 			t.Errorf("rendered line dropped its text: %q -> %q", l.Text, got)
 		}
 	}
@@ -221,11 +221,63 @@ func TestRenderSyntaxLineWithoutPaletteIsPlain(t *testing.T) {
 		if l.Kind != '+' {
 			continue
 		}
-		plain := renderSyntaxLine(l.Text, nil, base, nil, 60)
-		coloured := renderSyntaxLine(l.Text, spans[i], base, newSyntaxPalette(), 60)
+		gut, code := diffGutter(l.Kind), codeText(l.Text)
+		plain := renderSyntaxLine(gut, code, nil, base, nil, 60)
+		coloured := renderSyntaxLine(gut, code, spans[i], base, newSyntaxPalette(), 60)
 		if lipgloss.Width(plain) != lipgloss.Width(coloured) {
 			t.Error("highlighting changed the rendered width")
 		}
 		return
+	}
+}
+
+// The gutter gives each side its own column, so an addition always has a space
+// between its marker and the code.
+func TestDiffGutterColumns(t *testing.T) {
+	cases := []struct {
+		kind byte
+		want string
+	}{
+		{'+', "+ "},
+		{'-', " -"},
+		{' ', "  "},
+	}
+	for _, c := range cases {
+		if got := diffGutter(c.kind); got != c.want {
+			t.Errorf("diffGutter(%q) = %q, want %q", c.kind, got, c.want)
+		}
+		if len([]rune(diffGutter(c.kind))) != 2 {
+			t.Errorf("diffGutter(%q) is not two columns wide", c.kind)
+		}
+	}
+}
+
+// The rendered line reads "+ code", " -code" or "  code".
+func TestRenderedGutterLayout(t *testing.T) {
+	lines, spans := parseAndHighlight(t, "x.go", goDiff)
+	base := lipgloss.NewStyle()
+	seen := map[byte]string{}
+	for i, l := range lines {
+		if !isCodeLine(l.Kind) {
+			continue
+		}
+		if _, already := seen[l.Kind]; already {
+			continue // keep the first line of each kind
+		}
+		seen[l.Kind] = renderSyntaxLine(diffGutter(l.Kind), codeText(l.Text), spans[i], base, newSyntaxPalette(), 200)
+	}
+	for kind, want := range map[byte]string{
+		'+': "+ func shiny",
+		'-': " -func old",
+		' ': "  package main",
+	} {
+		got, ok := seen[kind]
+		if !ok {
+			t.Errorf("no %c line rendered", kind)
+			continue
+		}
+		if !strings.HasPrefix(got, want) {
+			t.Errorf("%c line = %q, want it to start with %q", kind, got, want)
+		}
 	}
 }

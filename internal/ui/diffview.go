@@ -234,7 +234,8 @@ func (d *diffView) view(st *styles, focused bool) string {
 			style = style.Background(colSelBG)
 		}
 		if isCodeLine(l.Kind) {
-			rows = append(rows, renderSyntaxLine(l.Text, d.spanAt(i), style, st.syntax, d.width))
+			rows = append(rows, renderSyntaxLine(diffGutter(l.Kind), codeText(l.Text),
+				d.spanAt(i), style, st.syntax, d.width))
 			continue
 		}
 		rows = append(rows, style.Render(pad(l.Text, d.width)))
@@ -253,23 +254,45 @@ func (d *diffView) spanAt(i int) []span {
 	return d.spans[i]
 }
 
-// renderSyntaxLine draws one diff line, colouring the runs the lexer
-// identified while keeping the line's own foreground everywhere else and its
-// background across the full pane width.
-func renderSyntaxLine(text string, spans []span, base lipgloss.Style, palette syntaxPalette, width int) string {
+// diffGutter is the two column marker in front of each line of code.
+//
+// A unified diff puts + and - in the same column, so an added line's code
+// starts immediately after the +. Giving each side a column of its own means
+// an addition always has a space between the marker and the code, which reads
+// more like the file itself; a deletion sits tight against its marker, which
+// matters less because deletions are the side you skim.
+//
+//	"+ added"
+//	" -removed"
+//	"  context"
+func diffGutter(kind byte) string {
+	switch kind {
+	case '+':
+		return "+ "
+	case '-':
+		return " -"
+	default:
+		return "  "
+	}
+}
+
+// renderSyntaxLine draws one diff line as its gutter followed by its code,
+// colouring the runs the lexer identified while keeping the line's own
+// foreground everywhere else and its background across the full pane width.
+func renderSyntaxLine(gutter, code string, spans []span, base lipgloss.Style, palette syntaxPalette, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	runes := []rune(text)
+	runes := []rune(gutter + code)
+	offset := len([]rune(gutter))
 	fg := make([]lipgloss.TerminalColor, len(runes))
 	for _, s := range spans {
 		value, ok := palette.color(s.token)
 		if !ok {
 			continue
 		}
-		// Spans are offsets into the code text, which starts one column in,
-		// after the +/-/space marker.
-		for at := max(s.start+1, 0); at < s.end+1 && at < len(runes); at++ {
+		// Spans are offsets into the code, which starts after the gutter.
+		for at := max(s.start+offset, 0); at < s.end+offset && at < len(runes); at++ {
 			fg[at] = value
 		}
 	}
