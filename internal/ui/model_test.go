@@ -967,3 +967,40 @@ func TestCommitBufferLeftReturnsToTheActiveList(t *testing.T) {
 		t.Errorf("focus = %v, want focusIndex (the list the diff came from)", m.focus)
 	}
 }
+
+func TestStatusMessageClearsOnTheNextKey(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+
+	// Changing the diff context reports it in the status bar.
+	m = drive(t, m, rkey("="))
+	if m.status == "" {
+		t.Fatal("changing the context set no status message")
+	}
+	if !strings.Contains(m.View(), m.status) {
+		t.Error("the status message is not on screen")
+	}
+	shown := m.status
+
+	// Any following key press clears it again.
+	m = drive(t, m, rkey("j"))
+	if m.status != "" {
+		t.Errorf("status = %q, want it cleared by the next key", m.status)
+	}
+	if strings.Contains(m.View(), shown) {
+		t.Error("the stale status message is still on screen")
+	}
+	// With nothing to report, the bar falls back to the key hints.
+	if !strings.Contains(m.View(), "hjkl/arrows move") {
+		t.Error("the status bar should fall back to the hints")
+	}
+
+	// Repeating the action still shows its own message.
+	m = drive(t, m, rkey("="))
+	if m.status == "" {
+		t.Error("the action's own message was cleared along with the old one")
+	}
+}

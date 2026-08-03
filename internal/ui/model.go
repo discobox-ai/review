@@ -410,6 +410,11 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// A status message lasts until the next key press. Clearing it here
+	// rather than after dispatch means an action that sets its own message
+	// still gets to show it.
+	m.clearStatus()
+
 	// Global accelerators, available regardless of focus.
 	switch {
 	case key.Matches(msg, m.keys.Quit):
@@ -1086,6 +1091,7 @@ func (m Model) doCreateBranch() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) clearStatus()      { m.status, m.statusOK, m.statusEr = "", false, false }
 func (m *Model) setOK(s string)    { m.status, m.statusOK, m.statusEr = s, true, false }
 func (m *Model) setError(s string) { m.status, m.statusOK, m.statusEr = s, false, true }
 
