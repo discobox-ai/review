@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -48,6 +49,17 @@ type Model struct {
 	files   []git.File
 	context int
 
+	// Cached repository facts, refreshed by each rescan: the view must not
+	// shell out to git while drawing a frame.
+	hasHEAD bool
+	merging bool
+
+	// The commit buffer is persisted to the git directory, the way git-gui
+	// does it. msgBackedUp is the buffer contents as of the last backup, so
+	// comparing against it stands in for Tk's "edit modified" flag.
+	msgBackedUp string
+	bckExists   bool
+
 	status   string
 	statusOK bool
 	statusEr bool
@@ -72,16 +84,70 @@ func New(repo *git.Repo) Model {
 		index:   newFileList(git.SideIndex),
 		diff:    newDiffView(),
 		commit:  ta,
-		focus:   focusCommit, // git-gui puts the cursor in the message buffer
+		// git-gui starts with the cursor in the message buffer; starting on
+		// the first unstaged file is friendlier in a terminal, where it also
+		// makes the single letter keys live straight away.
+		focus:   focusWorkdir,
 		context: defaultContext,
 	}
-	m.commit.Focus()
+	m.loadSavedMessage()
 	return m
+}
+
+// loadSavedMessage restores the commit buffer that a previous session left
+// behind. git-gui prefers its periodic backup, unless the message saved on a
+// clean exit is newer, in which case the stale backup is discarded and the
+// saved message is picked up by the first rescan.
+func (m *Model) loadSavedMessage() {
+	bck, ok := m.repo.ReadStateFile(git.BackupFile)
+	if !ok {
+		return
+	}
+	m.bckExists = true
+	if m.repo.StateFileExists(git.MsgFile) {
+		if m.repo.StateFileNewer(git.BackupFile, git.MsgFile) {
+			_ = m.repo.RemoveStateFile(git.MsgFile)
+		} else {
+			_ = m.repo.RemoveStateFile(git.BackupFile)
+			m.bckExists = false
+			return
+		}
+	}
+	m.setMessage(bck)
+}
+
+// setMessage replaces the commit buffer and marks it as already backed up.
+func (m *Model) setMessage(s string) {
+	m.commit.SetValue(normalizeMessage(s))
+	m.msgBackedUp = m.commit.Value()
+}
+
+// msgDirty reports whether the buffer changed since the last backup.
+func (m *Model) msgDirty() bool { return m.commit.Value() != m.msgBackedUp }
+
+// normalizeMessage strips trailing whitespace from every line and trims the
+// message, matching what git-gui writes out.
+func normalizeMessage(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, " \t\r")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 // Init starts the first rescan.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.rescanCmd(), textarea.Blink)
+	return tea.Batch(m.rescanCmd(), textarea.Blink, backupTick())
+}
+
+// backupInterval matches git-gui, which re-writes its crash backup every two
+// seconds while the buffer has unsaved edits.
+const backupInterval = 2 * time.Second
+
+type backupTickMsg struct{}
+
+func backupTick() tea.Cmd {
+	return tea.Tick(backupInterval, func(time.Time) tea.Msg { return backupTickMsg{} })
 }
 
 // ---------------------------------------------------------------------------
@@ -89,10 +155,12 @@ func (m Model) Init() tea.Cmd {
 // ---------------------------------------------------------------------------
 
 type rescanMsg struct {
-	files  []git.File
-	branch string
-	merge  string
-	err    error
+	files   []git.File
+	branch  string
+	merge   string
+	hasHEAD bool
+	merging bool
+	err     error
 }
 
 type diffMsg struct {
@@ -112,8 +180,14 @@ func (m Model) rescanCmd() tea.Cmd {
 	repo := m.repo
 	return func() tea.Msg {
 		files, err := repo.Status()
-		msg := rescanMsg{files: files, branch: repo.CurrentBranch(), err: err}
-		if repo.IsMerging() {
+		msg := rescanMsg{
+			files:   files,
+			branch:  repo.CurrentBranch(),
+			hasHEAD: repo.HasHEAD(),
+			merging: repo.IsMerging(),
+			err:     err,
+		}
+		if msg.merging {
 			msg.merge = repo.MergeMessage()
 		}
 		return msg
@@ -175,10 +249,64 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case backupTickMsg:
+		m.backupMessage()
+		return m, backupTick()
+
 	case tea.KeyMsg:
 		return m.onKey(msg)
 	}
 	return m, nil
+}
+
+// backupMessage writes the periodic crash backup of the commit buffer.
+func (m *Model) backupMessage() {
+	if !m.msgDirty() && !m.bckExists {
+		return
+	}
+	switch body := normalizeMessage(m.commit.Value()); {
+	case body == "":
+		if m.bckExists {
+			_ = m.repo.RemoveStateFile(git.BackupFile)
+			m.bckExists = false
+		}
+	case m.msgDirty():
+		if err := m.repo.WriteStateFile(git.BackupFile, body); err == nil {
+			m.bckExists = true
+		}
+	}
+	m.msgBackedUp = m.commit.Value()
+}
+
+// saveOnQuit stashes the commit buffer so the next session starts where this
+// one left off. An amend message is deliberately not kept: it belongs to a
+// commit that already exists.
+func (m *Model) saveOnQuit() {
+	switch {
+	case m.bckExists && !m.msgDirty():
+		// Nothing changed since the last backup, so promote it.
+		if err := m.repo.RenameStateFile(git.BackupFile, git.MsgFile); err == nil {
+			m.bckExists = false
+		}
+	case m.msgDirty():
+		body := normalizeMessage(m.commit.Value())
+		if !m.amend && body != "" {
+			_ = m.repo.WriteStateFile(git.MsgFile, body)
+		} else {
+			_ = m.repo.RemoveStateFile(git.MsgFile)
+		}
+	}
+	if m.bckExists {
+		_ = m.repo.RemoveStateFile(git.BackupFile)
+		m.bckExists = false
+	}
+}
+
+// doQuit saves the commit buffer on the way out.
+func (m Model) doQuit() (tea.Model, tea.Cmd) {
+	m.saveOnQuit()
+	m.quit = true
+	return m, tea.Quit
 }
 
 func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
@@ -188,6 +316,8 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 	}
 	m.branch = msg.branch
 	m.files = msg.files
+	m.hasHEAD = msg.hasHEAD
+	m.merging = msg.merging
 
 	var work, idx []git.File
 	for _, f := range msg.files {
@@ -201,12 +331,37 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 	m.workdir.setFiles(work)
 	m.index.setFiles(idx)
 
-	if msg.merge != "" && strings.TrimSpace(m.commit.Value()) == "" {
-		m.commit.SetValue(strings.TrimRight(msg.merge, "\n"))
-	}
+	m.loadMessageChain(msg.merge)
 
 	m.layout()
 	return m, m.refreshDiffCmd()
+}
+
+// loadMessageChain fills an untouched commit buffer from the first source
+// that has something, in git-gui's order: the message saved on the last exit,
+// then a merge, a squash, and finally commit.template.
+func (m *Model) loadMessageChain(mergeMsg string) {
+	if m.bckExists || m.amend {
+		return
+	}
+	if m.msgDirty() && strings.TrimSpace(m.commit.Value()) != "" {
+		return
+	}
+	if saved, ok := m.repo.ReadStateFile(git.MsgFile); ok {
+		m.setMessage(saved)
+		return
+	}
+	if mergeMsg != "" {
+		m.setMessage(mergeMsg)
+		return
+	}
+	if s := m.repo.SquashMessage(); s != "" {
+		m.setMessage(s)
+		return
+	}
+	if t := m.repo.CommitTemplate(); t != "" {
+		m.setMessage(t)
+	}
 }
 
 // refreshDiffCmd reloads the diff for whatever the active list points at.
@@ -250,8 +405,7 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Global accelerators, available regardless of focus.
 	switch {
 	case key.Matches(msg, m.keys.Quit):
-		m.quit = true
-		return m, tea.Quit
+		return m.doQuit()
 	case key.Matches(msg, m.keys.Rescan):
 		m.setOK("Rescanning…")
 		return m, m.rescanCmd()
@@ -310,8 +464,7 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Unmodified keys, only while a list or the diff has focus.
 	switch {
 	case key.Matches(msg, m.keys.QuitAlt):
-		m.quit = true
-		return m, tea.Quit
+		return m.doQuit()
 	case key.Matches(msg, m.keys.Help):
 		m.dialog = textDialog("difftui — keys", helpText())
 		return m, nil
@@ -771,7 +924,7 @@ func lastLineIsTrailer(msg string) bool {
 }
 
 func (m Model) toggleAmend() (tea.Model, tea.Cmd) {
-	if !m.repo.HasHEAD() {
+	if !m.hasHEAD {
 		m.setError("There is nothing to amend; no commit exists yet")
 		return m, nil
 	}
@@ -798,7 +951,7 @@ func (m Model) doCommit() (tea.Model, tea.Cmd) {
 				"- Remaining lines: Describe why this change is good.", true)
 		return m, nil
 	}
-	if !m.amend && len(m.index.files) == 0 && !m.repo.IsMerging() {
+	if !m.amend && len(m.index.files) == 0 && !m.merging {
 		m.dialog = messageDialog("Commit",
 			"No changes to commit.\n\nYou must stage at least 1 file before you can commit.", true)
 		return m, nil
@@ -816,11 +969,16 @@ func (m Model) doCommit() (tea.Model, tea.Cmd) {
 	m.commit.SetValue("")
 	m.amend = false
 	m.savedMsg = ""
+	m.msgBackedUp = m.commit.Value()
+	m.bckExists = false
 	return m, func() tea.Msg {
 		out, err := repo.Commit(msg, amend)
 		if err != nil {
 			return opMsg{text: "Commit", err: err}
 		}
+		// The message is now in the commit, so drop the stashed copies.
+		_ = repo.RemoveStateFile(git.MsgFile)
+		_ = repo.RemoveStateFile(git.BackupFile)
 		return opMsg{text: "Created commit: " + firstLine(out), rescan: true}
 	}
 }
@@ -852,7 +1010,7 @@ func (m Model) doPush() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) doMerge() (tea.Model, tea.Cmd) {
-	if m.repo.IsMerging() {
+	if m.merging {
 		repo := m.repo
 		m.dialog = confirmDialog("Abort Merge",
 			"Abort the merge in progress? Any resolved conflicts will be lost.",
@@ -1012,15 +1170,15 @@ func (m Model) viewCommitArea() string {
 	rightW := m.diff.width
 	label := "Commit Message:"
 	switch {
-	case m.amend && !m.repo.HasHEAD():
+	case m.amend && !m.hasHEAD:
 		label = "Amended Initial Commit Message:"
-	case m.amend && m.repo.IsMerging():
+	case m.amend && m.merging:
 		label = "Amended Merge Commit Message:"
 	case m.amend:
 		label = "Amended Commit Message:"
-	case m.repo.IsMerging():
+	case m.merging:
 		label = "Merge Commit Message:"
-	case !m.repo.HasHEAD():
+	case !m.hasHEAD:
 		label = "Initial Commit Message:"
 	}
 	check := "[ ] Amend Last Commit"
@@ -1152,6 +1310,11 @@ func helpText() string {
 		"  Ctrl-P  Push",
 		"",
 		"  Ctrl-Q, Ctrl-C  Quit  (q also quits from a list or the diff)",
+		"",
+		"The commit message is stashed in .git/GITGUI_MSG when you quit and",
+		"backed up to .git/GITGUI_BCK every couple of seconds, so reopening",
+		"picks up where you left off. Those are git gui's own files, so the",
+		"two tools share the buffer. Committing clears them.",
 		"",
 		"Ctrl-I and Ctrl-M cannot be told apart from Tab and Enter in a",
 		"terminal, so \"Stage Changed\" is bound to i and \"Local Merge\" to M.",

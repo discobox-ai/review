@@ -102,6 +102,10 @@ goes back to the bottom of the unstaged one. The same applies on the right,
 between the diff and the commit message. `←`/`→` cross between the two
 columns, pairing each left pane with the right pane beside it.
 
+On startup the first file in **Unstaged Changes** is focused with its diff
+already loaded, so the single letter keys are live immediately. (git gui starts
+in the message buffer instead; this is friendlier in a terminal.)
+
 In the commit message buffer only the arrow keys move out, and only from the
 very start of the text (`↑` on the first line, `←` at the first column) — so
 `h`/`j`/`k`/`l` stay typable there.
@@ -169,6 +173,36 @@ commit message buffer swallows them so you can type normally.
 Since a terminal has no right mouse button, git gui's diff context menu is on
 the keyboard: the hunk under the cursor is the one `Space`, `Ctrl-U` and `r`
 act on, and `v` starts the line selection that `S` stages.
+
+## Amending
+
+The `[ ] Amend Last Commit` checkbox in the commit message header is git gui's,
+and `Ctrl-E` toggles it. Turning it on loads HEAD's message into the buffer;
+turning it off puts back whatever you had been typing. Committing while it is
+ticked rewrites HEAD instead of adding a commit, and the label above the buffer
+changes to `Amended Commit Message:` so it is obvious which mode you are in.
+
+## Saved state
+
+difftui stashes the commit message buffer in the git directory, the way git gui
+does, so quitting and reopening does not lose what you were writing:
+
+| File | Written |
+| --- | --- |
+| `.git/GITGUI_MSG` | On a clean exit |
+| `.git/GITGUI_BCK` | Every two seconds while the buffer has unsaved edits |
+
+These are git gui's own filenames, so the two tools hand the buffer back and
+forth: type a message here, quit, open `git gui`, and it is still there.
+
+On startup the backup wins unless the saved message is newer, in which case the
+stale backup is dropped. A successful commit deletes both — the message lives in
+the commit now. An **amend** message is deliberately not saved on exit, since it
+belongs to a commit that already exists.
+
+When there is nothing stashed, the buffer is seeded from the first of
+`.git/MERGE_MSG`, `.git/SQUASH_MSG`, or `commit.template` that exists — git
+gui's order.
 
 ## Multi-file commands
 

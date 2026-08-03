@@ -14,7 +14,8 @@ import (
 
 // Repo is a handle on a working tree.
 type Repo struct {
-	Dir string // absolute path to the top level of the working tree
+	Dir    string // absolute path to the top level of the working tree
+	GitDir string // absolute path to the .git directory
 }
 
 // Open locates the working tree that contains dir.
@@ -27,7 +28,17 @@ func Open(dir string) (*Repo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("not a git repository: %s", abs)
 	}
-	return &Repo{Dir: strings.TrimSpace(out)}, nil
+	r := &Repo{Dir: strings.TrimSpace(out)}
+
+	gd, err := run(r.Dir, "rev-parse", "--git-dir")
+	if err != nil {
+		return nil, err
+	}
+	r.GitDir = strings.TrimSpace(gd)
+	if !filepath.IsAbs(r.GitDir) {
+		r.GitDir = filepath.Join(r.Dir, r.GitDir)
+	}
+	return r, nil
 }
 
 func run(dir string, args ...string) (string, error) {
@@ -232,33 +243,14 @@ func (r *Repo) HasHEAD() bool {
 
 // IsMerging reports whether a merge is in progress (MERGE_HEAD present).
 func (r *Repo) IsMerging() bool {
-	gitDir, err := run(r.Dir, "rev-parse", "--git-dir")
-	if err != nil {
-		return false
-	}
-	dir := strings.TrimSpace(gitDir)
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(r.Dir, dir)
-	}
-	_, err = os.Stat(filepath.Join(dir, "MERGE_HEAD"))
+	_, err := os.Stat(filepath.Join(r.GitDir, "MERGE_HEAD"))
 	return err == nil
 }
 
 // MergeMessage returns the prepared merge commit message, if any.
 func (r *Repo) MergeMessage() string {
-	gitDir, err := run(r.Dir, "rev-parse", "--git-dir")
-	if err != nil {
-		return ""
-	}
-	dir := strings.TrimSpace(gitDir)
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(r.Dir, dir)
-	}
-	b, err := os.ReadFile(filepath.Join(dir, "MERGE_MSG"))
-	if err != nil {
-		return ""
-	}
-	return string(b)
+	msg, _ := r.ReadStateFile("MERGE_MSG")
+	return msg
 }
 
 // Branches lists local branch names.
@@ -289,6 +281,99 @@ func (r *Repo) Remotes() ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// ---------------------------------------------------------------------------
+// Persisted commit buffer
+// ---------------------------------------------------------------------------
+
+// git-gui stashes the commit message buffer in the git directory so it
+// survives quitting: MsgFile is written on a clean exit, BackupFile is a
+// periodic crash backup. difftui reuses the same names, so a message typed in
+// one tool is picked up by the other.
+const (
+	MsgFile    = "GITGUI_MSG"
+	BackupFile = "GITGUI_BCK"
+)
+
+// ReadStateFile reads a file from the git directory.
+func (r *Repo) ReadStateFile(name string) (string, bool) {
+	b, err := os.ReadFile(filepath.Join(r.GitDir, name))
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+// WriteStateFile writes a file into the git directory.
+func (r *Repo) WriteStateFile(name, content string) error {
+	return os.WriteFile(filepath.Join(r.GitDir, name), []byte(content), 0o644)
+}
+
+// RemoveStateFile deletes a file from the git directory, ignoring a missing
+// file.
+func (r *Repo) RemoveStateFile(name string) error {
+	err := os.Remove(filepath.Join(r.GitDir, name))
+	if err != nil && os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+// RenameStateFile moves one git directory file over another.
+func (r *Repo) RenameStateFile(from, to string) error {
+	return os.Rename(filepath.Join(r.GitDir, from), filepath.Join(r.GitDir, to))
+}
+
+// StateFileNewer reports whether a is strictly newer than b. It is false when
+// either file is missing.
+func (r *Repo) StateFileNewer(a, b string) bool {
+	sa, err := os.Stat(filepath.Join(r.GitDir, a))
+	if err != nil {
+		return false
+	}
+	sb, err := os.Stat(filepath.Join(r.GitDir, b))
+	if err != nil {
+		return false
+	}
+	return sa.ModTime().After(sb.ModTime())
+}
+
+// StateFileExists reports whether a git directory file is present.
+func (r *Repo) StateFileExists(name string) bool {
+	_, err := os.Stat(filepath.Join(r.GitDir, name))
+	return err == nil
+}
+
+// SquashMessage returns .git/SQUASH_MSG, used after a squash merge.
+func (r *Repo) SquashMessage() string {
+	msg, _ := r.ReadStateFile("SQUASH_MSG")
+	return msg
+}
+
+// CommitTemplate returns the contents of commit.template, if one is set.
+func (r *Repo) CommitTemplate() string {
+	out, err := run(r.Dir, "config", "commit.template")
+	if err != nil {
+		return ""
+	}
+	path := strings.TrimSpace(out)
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, path[2:])
+		}
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(r.Dir, path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // ---------------------------------------------------------------------------

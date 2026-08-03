@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/obot-platform/difftui/internal/git"
@@ -507,5 +508,333 @@ func TestHJKLAreTypableInCommitBuffer(t *testing.T) {
 	}
 	if got.commit.Value() != "hjkl" {
 		t.Errorf("commit buffer = %q, want \"hjkl\"", got.commit.Value())
+	}
+}
+
+// step runs a single Update without draining the resulting commands. It is
+// used for the backup tick, whose command is a two second timer.
+func step(m Model, msg tea.Msg) Model {
+	next, _ := m.Update(msg)
+	return next.(Model)
+}
+
+func stateFile(t *testing.T, repo *git.Repo, name string) (string, bool) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(repo.GitDir, name))
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+func TestQuitSavesCommitBuffer(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m.commit.SetValue("a message in progress\n")
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlQ})
+	if !m.quit {
+		t.Fatal("Ctrl-Q did not quit")
+	}
+	got, ok := stateFile(t, repo, git.MsgFile)
+	if !ok {
+		t.Fatalf("%s was not written", git.MsgFile)
+	}
+	if got != "a message in progress" {
+		t.Errorf("saved message = %q", got)
+	}
+	// The crash backup must not be left behind after a clean exit.
+	if _, ok := stateFile(t, repo, git.BackupFile); ok {
+		t.Errorf("%s should have been removed on quit", git.BackupFile)
+	}
+
+	// A new session picks the message back up.
+	next := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	if next.commit.Value() != "a message in progress" {
+		t.Errorf("reopened buffer = %q, want the saved message", next.commit.Value())
+	}
+}
+
+func TestQuitWithEmptyBufferSavesNothing(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlQ})
+	if _, ok := stateFile(t, repo, git.MsgFile); ok {
+		t.Error("an empty buffer should not be saved")
+	}
+}
+
+func TestBackupTickWritesCrashBackup(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m.commit.SetValue("half typed  \n")
+
+	m = step(m, backupTickMsg{})
+	got, ok := stateFile(t, repo, git.BackupFile)
+	if !ok {
+		t.Fatalf("%s was not written", git.BackupFile)
+	}
+	if got != "half typed" {
+		t.Errorf("backup = %q, want trailing whitespace stripped", got)
+	}
+
+	// Clearing the buffer removes the backup again.
+	m.commit.SetValue("")
+	m = step(m, backupTickMsg{})
+	if _, ok := stateFile(t, repo, git.BackupFile); ok {
+		t.Error("backup should be removed once the buffer is empty")
+	}
+}
+
+func TestCrashBackupIsRestoredOnStartup(t *testing.T) {
+	repo := testRepo(t)
+	if err := repo.WriteStateFile(git.BackupFile, "recovered text"); err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	if m.commit.Value() != "recovered text" {
+		t.Errorf("buffer = %q, want the crash backup", m.commit.Value())
+	}
+}
+
+func TestNewerSavedMessageBeatsStaleBackup(t *testing.T) {
+	repo := testRepo(t)
+	if err := repo.WriteStateFile(git.BackupFile, "stale backup"); err != nil {
+		t.Fatal(err)
+	}
+	// Make the saved message strictly newer than the backup.
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(filepath.Join(repo.GitDir, git.BackupFile), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.WriteStateFile(git.MsgFile, "the newer saved message"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	if m.commit.Value() != "the newer saved message" {
+		t.Errorf("buffer = %q, want the newer saved message", m.commit.Value())
+	}
+	if _, ok := stateFile(t, repo, git.BackupFile); ok {
+		t.Error("the stale backup should have been discarded")
+	}
+}
+
+func TestCommitClearsSavedMessage(t *testing.T) {
+	repo := testRepo(t)
+	if err := repo.WriteStateFile(git.MsgFile, "left over"); err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	if m.commit.Value() != "left over" {
+		t.Fatalf("buffer = %q, want the saved message", m.commit.Value())
+	}
+	m.commit.SetValue("a real commit")
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c"), Alt: true})
+	if m.dialog != nil {
+		t.Fatalf("commit was refused: %s / %s", m.dialog.title, m.dialog.body)
+	}
+	if _, ok := stateFile(t, repo, git.MsgFile); ok {
+		t.Errorf("%s should be removed once the message is committed", git.MsgFile)
+	}
+	if m.commit.Value() != "" {
+		t.Errorf("buffer = %q, want it cleared after committing", m.commit.Value())
+	}
+}
+
+func TestMergeMessageSeedsBuffer(t *testing.T) {
+	repo := testRepo(t)
+	if err := repo.WriteStateFile("MERGE_HEAD", "0000000000000000000000000000000000000000\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.WriteStateFile("MERGE_MSG", "Merge branch 'other'"); err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	if m.commit.Value() != "Merge branch 'other'" {
+		t.Errorf("buffer = %q, want the merge message", m.commit.Value())
+	}
+	if !strings.Contains(m.View(), "Merge Commit Message:") {
+		t.Error("the buffer label should say Merge Commit Message")
+	}
+}
+
+func TestCommitTemplateSeedsBuffer(t *testing.T) {
+	repo := testRepo(t)
+	tmpl := filepath.Join(repo.Dir, ".gitmessage")
+	if err := os.WriteFile(tmpl, []byte("# describe your change"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Git("config", "commit.template", tmpl); err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	if m.commit.Value() != "# describe your change" {
+		t.Errorf("buffer = %q, want the commit template", m.commit.Value())
+	}
+}
+
+func TestAmendLoadsAndRestoresBuffer(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m.commit.SetValue("work in progress")
+
+	// Ctrl-E turns on amend and pulls in HEAD's message.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	if !m.amend {
+		t.Fatal("Ctrl-E did not turn on amend")
+	}
+	if m.commit.Value() != "initial" {
+		t.Errorf("buffer = %q, want HEAD's message", m.commit.Value())
+	}
+	if !strings.Contains(m.View(), "[x] Amend Last Commit") {
+		t.Error("the amend checkbox should be ticked")
+	}
+	if !strings.Contains(m.View(), "Amended Commit Message:") {
+		t.Error("the buffer label should say Amended Commit Message")
+	}
+
+	// Turning it back off restores what was being typed.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	if m.amend {
+		t.Fatal("Ctrl-E did not turn amend back off")
+	}
+	if m.commit.Value() != "work in progress" {
+		t.Errorf("buffer = %q, want the previous message back", m.commit.Value())
+	}
+}
+
+func TestAmendMessageIsNotSavedOnQuit(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	if !m.amend {
+		t.Fatal("amend was not enabled")
+	}
+	m.commit.SetValue("reworded HEAD")
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlQ})
+
+	if _, ok := stateFile(t, repo, git.MsgFile); ok {
+		t.Error("an amend message must not be stashed as the next commit message")
+	}
+}
+
+func TestAmendCommitRewritesHEAD(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	before, err := repo.Git("rev-list", "--count", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m.commit.SetValue("initial, reworded")
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c"), Alt: true})
+	if m.dialog != nil {
+		t.Fatalf("amend commit was refused: %s / %s", m.dialog.title, m.dialog.body)
+	}
+	if got := repo.LastCommitMessage(); got != "initial, reworded" {
+		t.Errorf("HEAD message = %q", got)
+	}
+	after, err := repo.Git("rev-list", "--count", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Errorf("amend changed the commit count from %s to %s", strings.TrimSpace(before), strings.TrimSpace(after))
+	}
+	if m.amend {
+		t.Error("amend should be switched off after committing")
+	}
+}
+
+func TestStartsFocusedOnFirstUnstagedFile(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	if m.focus != focusWorkdir {
+		t.Fatalf("focus = %v, want focusWorkdir", m.focus)
+	}
+	if m.workdir.cursor != 0 {
+		t.Errorf("cursor = %d, want the first file", m.workdir.cursor)
+	}
+	if m.workdir.current() == nil {
+		t.Fatal("no file under the cursor")
+	}
+	// The first file's diff should already be showing.
+	if m.diff.file == nil || m.diff.file.Path != m.workdir.current().Path {
+		t.Errorf("diff pane shows %v, want %s", m.diff.file, m.workdir.current().Path)
+	}
+	// Single letter keys are live immediately, rather than being typed into
+	// the message buffer.
+	got := drive(t, m, rkey("j"))
+	if got.workdir.cursor != 1 {
+		t.Errorf("j at startup moved to %d, want 1", got.workdir.cursor)
+	}
+	if got.commit.Value() != "" {
+		t.Errorf("keys leaked into the commit buffer: %q", got.commit.Value())
+	}
+}
+
+func TestStartupFocusWithNoUnstagedFiles(t *testing.T) {
+	repo := testRepo(t)
+	// Stage everything, so the unstaged list is empty at startup.
+	if err := repo.Stage([]string{"."}); err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	if len(m.workdir.files) != 0 {
+		t.Fatalf("expected an empty unstaged list, got %v", m.workdir.files)
+	}
+	if m.focus != focusWorkdir {
+		t.Errorf("focus = %v, want focusWorkdir", m.focus)
+	}
+	if strings.TrimSpace(m.View()) == "" {
+		t.Error("view is empty")
+	}
+	// Moving down out of the empty list still reaches the staged one.
+	got := drive(t, m, rkey("j"))
+	if got.focus != focusIndex {
+		t.Errorf("focus = %v, want focusIndex", got.focus)
 	}
 }
