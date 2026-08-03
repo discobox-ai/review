@@ -220,7 +220,19 @@ shape of the diff still reads at a glance.
 The `[ ] Amend Last Commit` checkbox in the commit message header is git gui's.
 `Ctrl-E` toggles it from anywhere, or `Tab` to it — it is a focus stop of its
 own, sitting between the diff and the message buffer where it is drawn, so
-`↑`/`↓` reach it too — and press `Space` or `Enter`. Turning it on loads HEAD's message into the buffer;
+`↑`/`↓` reach it too — and press `Space` or `Enter`.
+
+Switching to amend also changes what the file lists mean, the way git gui does
+it. git gui keeps a `PARENT` alongside `HEAD`: normally they are the same, but
+while amending `PARENT` becomes HEAD's *own* parent, and the staged list is the
+index measured against it. So **Staged Changes** shows everything the rewritten
+commit will contain — the original commit's files plus anything you add — rather
+than appearing empty. The staged diff and unstaging follow the same revision, so
+unstaging a file there drops it out of the amended commit instead of resetting
+it to the commit being rewritten.
+
+Toggling amend never touches the index; it only changes what the index is
+compared against, so anything staged beforehand survives the switch. Turning it on loads HEAD's message into the buffer;
 turning it off puts back whatever you had been typing. Committing while it is
 ticked rewrites HEAD instead of adding a commit, and the label above the buffer
 changes to `Amended Commit Message:` so it is obvious which mode you are in.
@@ -270,7 +282,7 @@ every marked file. With nothing marked they apply to the file under the cursor.
 | Path | Contents |
 | --- | --- |
 | `main.go` | Flag parsing and program startup |
-| `internal/git/git.go` | Every git invocation, and git gui's file state table |
+| `internal/git/git.go` | Every git invocation, the file state table and the scan |
 | `internal/git/patch.go` | Unified diff parsing, and building hunk/line patches |
 | `internal/ui/model.go` | The Bubble Tea model: layout, keys, actions |
 | `internal/ui/filelist.go` | The two file panes |

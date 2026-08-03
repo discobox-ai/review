@@ -54,7 +54,7 @@ func read(t *testing.T, r *Repo, name string) string {
 // stateOf finds a path in the scan result.
 func stateOf(t *testing.T, r *Repo, path string) State {
 	t.Helper()
-	files, err := r.Status()
+	files, err := r.Status(r.StatusParent(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestStatusStates(t *testing.T) {
 		t.Error("MM should appear in both file lists")
 	}
 
-	if err := r.Unstage([]string{"foo.txt"}); err != nil {
+	if err := r.Unstage([]string{"foo.txt"}, "HEAD"); err != nil {
 		t.Fatal(err)
 	}
 	if got := stateOf(t, r, "foo.txt"); got != "_M" {
@@ -116,7 +116,7 @@ func TestDiffUntracked(t *testing.T) {
 	r := testRepo(t)
 	write(t, r.Dir, "new.txt", "hello\nworld\n")
 	f := File{Path: "new.txt", State: "_O"}
-	out, err := r.Diff(f, SideWorkdir, 3)
+	out, err := r.Diff(f, SideWorkdir, 3, "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,11 +130,11 @@ func TestDiffContextLines(t *testing.T) {
 	write(t, r.Dir, "foo.txt", "one\ntwo\nthree\nFOUR\nfive\n")
 	f := File{Path: "foo.txt", State: "_M"}
 
-	narrow, err := r.Diff(f, SideWorkdir, 1)
+	narrow, err := r.Diff(f, SideWorkdir, 1, "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-	wide, err := r.Diff(f, SideWorkdir, 5)
+	wide, err := r.Diff(f, SideWorkdir, 5, "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestStageHunk(t *testing.T) {
 	write(t, r.Dir, "foo.txt", "ONE\ntwo\nthree\nfour\nFIVE\n")
 	f := File{Path: "foo.txt", State: "_M"}
 
-	raw, err := r.Diff(f, SideWorkdir, 1)
+	raw, err := r.Diff(f, SideWorkdir, 1, "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestUnstageHunkReverse(t *testing.T) {
 	}
 
 	f := File{Path: "foo.txt", State: "M_"}
-	raw, err := r.Diff(f, SideIndex, 1)
+	raw, err := r.Diff(f, SideIndex, 1, "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestStageLines(t *testing.T) {
 	write(t, r.Dir, "foo.txt", "one\ntwo\nA\nB\nthree\nfour\nfive\n")
 	f := File{Path: "foo.txt", State: "_M"}
 
-	raw, err := r.Diff(f, SideWorkdir, 3)
+	raw, err := r.Diff(f, SideWorkdir, 3, "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestRevertHunk(t *testing.T) {
 	write(t, r.Dir, "foo.txt", "ONE\ntwo\nthree\nfour\nFIVE\n")
 	f := File{Path: "foo.txt", State: "_M"}
 
-	raw, err := r.Diff(f, SideWorkdir, 1)
+	raw, err := r.Diff(f, SideWorkdir, 1, "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func TestUnstageWithNoHEAD(t *testing.T) {
 		t.Errorf("state = %s, want A_", got)
 	}
 	// The diff for the initial commit must work without a HEAD.
-	out, err := r.Diff(File{Path: "a.txt", State: "A_"}, SideIndex, 3)
+	out, err := r.Diff(File{Path: "a.txt", State: "A_"}, SideIndex, 3, r.StatusParent(false))
 	if err != nil {
 		t.Fatalf("staged diff without HEAD: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestUnstageWithNoHEAD(t *testing.T) {
 		t.Errorf("initial staged diff:\n%s", out)
 	}
 	// Unstaging without a HEAD has to fall back to rm --cached.
-	if err := r.Unstage([]string{"a.txt"}); err != nil {
+	if err := r.Unstage([]string{"a.txt"}, r.StatusParent(false)); err != nil {
 		t.Fatalf("unstage without HEAD: %v", err)
 	}
 	if got := stateOf(t, r, "a.txt"); got != "_O" {
@@ -429,5 +429,151 @@ func TestSignOff(t *testing.T) {
 	}
 	if got != "Signed-off-by: Test <test@example.com>" {
 		t.Errorf("SignOff = %q", got)
+	}
+}
+
+// While amending, "staged" means everything the rewritten commit will contain,
+// not just what was staged on top of it. git-gui gets this by scanning against
+// HEAD's parent rather than HEAD.
+func TestStatusWhileAmending(t *testing.T) {
+	r := testRepo(t)
+	// A second commit that touches two files.
+	write(t, r.Dir, "foo.txt", "one\nTWO\nthree\nfour\nfive\n")
+	write(t, r.Dir, "added.txt", "added by the commit\n")
+	if err := r.Stage([]string{"foo.txt", "added.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Commit("second", false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing is staged on top of it.
+	normal, err := r.Status(r.StatusParent(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range normal {
+		if f.State.Staged() {
+			t.Errorf("%s shows as staged against HEAD: %s", f.Path, f.State)
+		}
+	}
+
+	// Against the amend parent, the commit's own contents are staged.
+	amending, err := r.Status(r.StatusParent(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged := map[string]State{}
+	for _, f := range amending {
+		if f.State.Staged() {
+			staged[f.Path] = f.State
+		}
+	}
+	if got, ok := staged["foo.txt"]; !ok || got.Index() != 'M' {
+		t.Errorf("foo.txt while amending = %s (present=%v), want a staged modification", got, ok)
+	}
+	if got, ok := staged["added.txt"]; !ok || got.Index() != 'A' {
+		t.Errorf("added.txt while amending = %s (present=%v), want a staged addition", got, ok)
+	}
+}
+
+// The staged diff while amending has to be taken against the same parent.
+func TestDiffWhileAmending(t *testing.T) {
+	r := testRepo(t)
+	write(t, r.Dir, "foo.txt", "one\nTWO\nthree\nfour\nfive\n")
+	if err := r.Stage([]string{"foo.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Commit("second", false); err != nil {
+		t.Fatal(err)
+	}
+
+	f := File{Path: "foo.txt", State: "M_"}
+	against, err := r.Diff(f, SideIndex, 3, r.StatusParent(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(against, "+TWO") {
+		t.Errorf("the amend diff should show the commit's own change:\n%s", against)
+	}
+
+	// Against HEAD it is empty, which is what made the pane look wrong.
+	plain, err := r.Diff(f, SideIndex, 3, r.StatusParent(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "+TWO") {
+		t.Errorf("against HEAD the file should show no staged change:\n%s", plain)
+	}
+}
+
+// Unstaging while amending drops the file out of the rewritten commit,
+// restoring the parent's version rather than the one being rewritten.
+func TestUnstageWhileAmending(t *testing.T) {
+	r := testRepo(t)
+	write(t, r.Dir, "foo.txt", "one\nTWO\nthree\nfour\nfive\n")
+	write(t, r.Dir, "added.txt", "added by the commit\n")
+	if err := r.Stage([]string{"foo.txt", "added.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Commit("second", false); err != nil {
+		t.Fatal(err)
+	}
+
+	parent := r.StatusParent(true)
+	if err := r.Unstage([]string{"foo.txt"}, parent); err != nil {
+		t.Fatal(err)
+	}
+	// foo.txt is back to the parent's version in the index, so committing the
+	// amend would no longer carry that change.
+	staged, err := r.Git("diff", "--cached", parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(staged, "+TWO") {
+		t.Errorf("foo.txt should have dropped out of the amended commit:\n%s", staged)
+	}
+	if !strings.Contains(staged, "added by the commit") {
+		t.Errorf("added.txt should still be part of the amended commit:\n%s", staged)
+	}
+
+	// Amending now really does drop the change.
+	if _, err := r.Commit("second, without foo", true); err != nil {
+		t.Fatal(err)
+	}
+	head, err := r.Git("show", "--stat", "--format=", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(head, "foo.txt") {
+		t.Errorf("the amended commit still touches foo.txt:\n%s", head)
+	}
+	if !strings.Contains(head, "added.txt") {
+		t.Errorf("the amended commit lost added.txt:\n%s", head)
+	}
+}
+
+func TestStatusParentPicksTheRightRevision(t *testing.T) {
+	r := testRepo(t)
+	if got := r.StatusParent(false); got != "HEAD" {
+		t.Errorf("StatusParent(false) = %q, want HEAD", got)
+	}
+	// The repo has a single commit, so amending it compares against nothing.
+	if got := r.StatusParent(true); got != EmptyTree {
+		t.Errorf("amending the initial commit = %q, want the empty tree", got)
+	}
+	write(t, r.Dir, "foo.txt", "changed\n")
+	if err := r.Stage([]string{"foo.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Commit("second", false); err != nil {
+		t.Fatal(err)
+	}
+	first, err := r.Git("rev-parse", "HEAD^")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.StatusParent(true); got != strings.TrimSpace(first) {
+		t.Errorf("StatusParent(true) = %q, want %q", got, strings.TrimSpace(first))
 	}
 }

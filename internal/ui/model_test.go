@@ -1303,3 +1303,119 @@ func TestAmendCheckboxArrowNavigation(t *testing.T) {
 		t.Errorf("left: focus = %v, want the list the diff is showing", left.focus)
 	}
 }
+
+// Toggling amend has to rescan: the staged list means something different once
+// the index is being measured against HEAD's parent.
+func TestAmendRefreshesTheStagedList(t *testing.T) {
+	repo := testRepo(t)
+	// Commit the staged file so the working tree is otherwise settled.
+	if _, err := repo.Commit("second", false); err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	if len(m.index.files) != 0 {
+		t.Fatalf("nothing should be staged to begin with, got %v", m.index.files)
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	if !m.amend {
+		t.Fatal("amend did not turn on")
+	}
+	// The commit being amended touched bar.txt, so it is now staged.
+	var staged []string
+	for _, f := range m.index.files {
+		staged = append(staged, f.Path)
+	}
+	if len(staged) == 0 {
+		t.Fatal("switching to amend did not refresh the staged list")
+	}
+	found := false
+	for _, p := range staged {
+		if p == "bar.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("staged list = %v, want it to contain bar.txt", staged)
+	}
+
+	// Switching back returns the lists to the plain view.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	if m.amend {
+		t.Fatal("amend did not turn off")
+	}
+	if len(m.index.files) != 0 {
+		t.Errorf("staged list = %v, want it empty again", m.index.files)
+	}
+}
+
+// The diff shown for a staged file follows the same parent.
+func TestAmendRefreshesTheStagedDiff(t *testing.T) {
+	repo := testRepo(t)
+	if _, err := repo.Commit("second", false); err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = drive(t, m, altKey("2"))
+	if m.focus != focusIndex {
+		t.Fatalf("focus = %v, want focusIndex", m.focus)
+	}
+	if m.diff.file == nil {
+		t.Fatal("no diff loaded for the staged file")
+	}
+	var text []string
+	for _, l := range m.diff.lines {
+		text = append(text, l.Text)
+	}
+	joined := strings.Join(text, "\n")
+	if !strings.Contains(joined, "beta") {
+		t.Errorf("the amend diff should show the commit's own content:\n%s", joined)
+	}
+}
+
+// Toggling amend only changes what the index is compared against. It must
+// never touch the index itself, or work staged before the toggle would be
+// silently rewritten.
+func TestAmendToggleLeavesTheIndexAlone(t *testing.T) {
+	repo := testRepo(t)
+	if _, err := repo.Commit("second", false); err != nil {
+		t.Fatal(err)
+	}
+	// Stage something new on top of that commit.
+	writeFile(t, repo.Dir, "foo.txt", "one\nTHREE\nthree\nfour\nfive\n")
+	if err := repo.Stage([]string{"foo.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := repo.Git("diff", "--cached", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(before, "+THREE") {
+		t.Fatalf("setup failed, nothing staged:\n%s", before)
+	}
+
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	if m.amend {
+		t.Fatal("amend should be off again")
+	}
+
+	after, err := repo.Git("diff", "--cached", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Errorf("toggling amend changed the index:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}

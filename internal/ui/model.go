@@ -179,9 +179,11 @@ type opMsg struct {
 }
 
 func (m Model) rescanCmd() tea.Cmd {
-	repo := m.repo
+	repo, amend := m.repo, m.amend
 	return func() tea.Msg {
-		files, err := repo.Status()
+		// git-gui's PARENT: while amending, the index is measured against
+		// HEAD's parent, so the staged list shows the whole amended commit.
+		files, err := repo.Status(repo.StatusParent(amend))
 		msg := rescanMsg{
 			files:   files,
 			branch:  repo.CurrentBranch(),
@@ -197,9 +199,9 @@ func (m Model) rescanCmd() tea.Cmd {
 }
 
 func (m Model) diffCmd(f git.File, side git.Side) tea.Cmd {
-	repo, ctx := m.repo, m.context
+	repo, ctx, amend := m.repo, m.context, m.amend
 	return func() tea.Msg {
-		text, err := repo.Diff(f, side, ctx)
+		text, err := repo.Diff(f, side, ctx, repo.StatusParent(amend))
 		return diffMsg{file: f, side: side, text: text, err: err}
 	}
 }
@@ -816,8 +818,9 @@ func (m Model) doUnstage() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	list.clearMarks()
+	repo, amend := m.repo, m.amend
 	return m, op(fmt.Sprintf("Unstaged %s", plural(len(paths), "file", "files")), true,
-		func() error { return m.repo.Unstage(paths) })
+		func() error { return repo.Unstage(paths, repo.StatusParent(amend)) })
 }
 
 // doHunk stages or unstages the hunk under the diff cursor.

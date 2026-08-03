@@ -173,33 +173,159 @@ func (s State) Describe() string {
 	return "Unknown state " + string(s)
 }
 
-// Status scans the working tree. It is the equivalent of git-gui's rescan.
-func (r *Repo) Status() ([]File, error) {
-	out, err := run(r.Dir, "status", "--porcelain", "-z", "--untracked-files=all")
+// Status scans the working tree, comparing the index against parent.
+//
+// This is git-gui's rescan, and parent is its PARENT: the commit the index is
+// measured against. Normally that is HEAD, but while amending it is HEAD's own
+// parent, so the staged list shows everything the amended commit will contain
+// rather than only what was added on top of it. Use AmendParent to pick it.
+//
+// The scan is assembled the way git-gui assembles it, from three commands: the
+// index side, the working directory side, and the untracked files. A single
+// "git status" cannot express it, because status always measures the index
+// against HEAD.
+func (r *Repo) Status(parent string) ([]File, error) {
+	if parent == "" {
+		parent = "HEAD"
+	}
+	states := map[string]*[2]byte{}
+	froms := map[string]string{}
+	at := func(path string) *[2]byte {
+		if s, ok := states[path]; ok {
+			return s
+		}
+		s := &[2]byte{'_', '_'}
+		states[path] = s
+		return s
+	}
+
+	// The index side: HEAD (or the amend parent) versus the index.
+	out, err := run(r.Dir, "diff-index", "--cached", "-M",
+		"--ignore-submodules=dirty", "-z", parent)
 	if err != nil {
 		return nil, err
 	}
-	fields := strings.Split(out, "\x00")
-	var files []File
-	for i := 0; i < len(fields); i++ {
-		rec := fields[i]
-		if len(rec) < 4 {
+	parseRawDiff(out, func(status byte, path, from string) {
+		at(path)[0] = status
+		if from != "" {
+			froms[path] = from
+		}
+	})
+
+	// The working directory side: the index versus the files on disk. This is
+	// the same whether or not we are amending.
+	out, err = run(r.Dir, "diff-files", "--ignore-submodules=dirty", "-z")
+	if err != nil {
+		return nil, err
+	}
+	parseRawDiff(out, func(status byte, path, _ string) {
+		at(path)[1] = status
+	})
+
+	// Untracked files show as 'O' on the working directory side.
+	out, err = run(r.Dir, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range splitZ(out) {
+		at(path)[1] = 'O'
+	}
+
+	// Unmerged paths override both sides.
+	out, err = run(r.Dir, "ls-files", "--unmerged", "-z")
+	if err != nil {
+		return nil, err
+	}
+	for _, rec := range splitZ(out) {
+		// "<mode> <sha> <stage>\t<path>"
+		if i := strings.IndexByte(rec, '\t'); i >= 0 {
+			s := at(rec[i+1:])
+			s[0], s[1] = 'U', 'U'
+		}
+	}
+
+	files := make([]File, 0, len(states))
+	for path, s := range states {
+		state := mapState(s[0], s[1])
+		if state == "__" {
 			continue
 		}
-		x, y := rec[0], rec[1]
-		path := rec[3:]
-		var from string
-		if x == 'R' || x == 'C' {
-			// Rename/copy records are followed by the original path.
-			if i+1 < len(fields) {
-				i++
-				from = fields[i]
-			}
-		}
-		files = append(files, File{Path: path, From: from, State: mapState(x, y)})
+		files = append(files, File{Path: path, From: froms[path], State: state})
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, nil
+}
+
+// splitZ splits NUL terminated output into its records.
+func splitZ(out string) []string {
+	var records []string
+	for _, rec := range strings.Split(out, "\x00") {
+		if rec != "" {
+			records = append(records, rec)
+		}
+	}
+	return records
+}
+
+// parseRawDiff walks the raw -z output of diff-index and diff-files, whose
+// records are ":<srcmode> <dstmode> <srcsha> <dstsha> <status>" followed by the
+// path, or by the source and destination paths for a rename or copy.
+func parseRawDiff(out string, fn func(status byte, path, from string)) {
+	fields := strings.Split(out, "\x00")
+	for i := 0; i < len(fields); i++ {
+		header := fields[i]
+		if !strings.HasPrefix(header, ":") {
+			continue
+		}
+		parts := strings.Fields(header)
+		if len(parts) == 0 {
+			continue
+		}
+		status := parts[len(parts)-1]
+		if status == "" {
+			continue
+		}
+		// A rename or copy carries a similarity score, "R100", and two paths.
+		if (status[0] == 'R' || status[0] == 'C') && i+2 < len(fields) {
+			from, path := fields[i+1], fields[i+2]
+			i += 2
+			fn(status[0], path, from)
+			continue
+		}
+		if i+1 >= len(fields) {
+			return
+		}
+		i++
+		fn(status[0], fields[i], "")
+	}
+}
+
+// StatusParent returns the revision Status should compare the index against:
+// HEAD normally, HEAD's own parent while amending, and the empty tree when
+// there is no commit yet.
+func (r *Repo) StatusParent(amend bool) string {
+	if !r.HasHEAD() {
+		return EmptyTree
+	}
+	if amend {
+		return r.AmendParent()
+	}
+	return "HEAD"
+}
+
+// AmendParent returns the revision the index should be compared against while
+// amending: HEAD's first parent, or the empty tree when HEAD is the initial
+// commit and there is nothing before it.
+func (r *Repo) AmendParent() string {
+	out, err := run(r.Dir, "rev-list", "--parents", "-n", "1", "HEAD")
+	if err != nil {
+		return EmptyTree
+	}
+	fields := strings.Fields(strings.TrimSpace(out))
+	if len(fields) < 2 {
+		return EmptyTree
+	}
+	return fields[1]
 }
 
 // mapState converts porcelain XY codes into git-gui's state characters.
@@ -392,25 +518,24 @@ const (
 
 // Diff produces the unified diff git-gui shows for a file, with the given
 // number of context lines.
-func (r *Repo) Diff(f File, side Side, context int) (string, error) {
+//
+// parent is the revision the index is measured against, as in Status: the
+// staged diff of a file while amending has to be taken against HEAD's parent,
+// or it shows only what was staged on top of the commit being amended.
+func (r *Repo) Diff(f File, side Side, context int, parent string) (string, error) {
 	ctx := fmt.Sprintf("-U%d", context)
 
 	if f.State == "_O" {
 		// Untracked: git-gui shows the whole file as an addition.
 		return r.untrackedDiff(f.Path, ctx)
 	}
+	if parent == "" {
+		parent = r.StatusParent(false)
+	}
 
 	args := []string{"diff", "--no-color", "--no-ext-diff", ctx}
 	if side == SideIndex {
-		args = append(args, "--cached")
-		if !r.HasHEAD() {
-			args = append(args, "--", f.Path)
-			// Against the empty tree so the initial commit shows content.
-			args = []string{"diff", "--no-color", "--no-ext-diff", ctx, "--cached",
-				emptyTree, "--", f.Path}
-		} else {
-			args = append(args, "HEAD", "--", f.Path)
-		}
+		args = append(args, "--cached", parent, "--", f.Path)
 	} else {
 		args = append(args, "--", f.Path)
 	}
@@ -424,8 +549,9 @@ func (r *Repo) Diff(f File, side Side, context int) (string, error) {
 	return out, nil
 }
 
-// emptyTree is the well known hash of git's empty tree object.
-const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+// EmptyTree is the well known hash of git's empty tree object. It stands in
+// for the parent of an initial commit.
+const EmptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 func (r *Repo) untrackedDiff(path, ctx string) (string, error) {
 	info, err := os.Stat(filepath.Join(r.Dir, path))
@@ -465,17 +591,27 @@ func (r *Repo) StageChanged() error {
 	return err
 }
 
-// Unstage removes paths from the index ("Unstage From Commit").
-func (r *Repo) Unstage(paths []string) error {
+// Unstage removes paths from the index ("Unstage From Commit"), restoring
+// their entries from parent.
+//
+// While amending, parent is HEAD's parent, so unstaging a file drops it out of
+// the amended commit entirely rather than resetting it to the very commit
+// being rewritten. git-gui does this by feeding update-index the PARENT entry
+// it recorded during the scan; resetting the paths to that revision is the
+// same thing.
+func (r *Repo) Unstage(paths []string, parent string) error {
 	if len(paths) == 0 {
 		return nil
+	}
+	if parent == "" {
+		parent = r.StatusParent(false)
 	}
 	if !r.HasHEAD() {
 		args := append([]string{"rm", "--cached", "-r", "-q", "--"}, paths...)
 		_, err := run(r.Dir, args...)
 		return err
 	}
-	args := append([]string{"reset", "-q", "HEAD", "--"}, paths...)
+	args := append([]string{"reset", "-q", parent, "--"}, paths...)
 	_, err := run(r.Dir, args...)
 	return err
 }
