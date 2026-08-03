@@ -248,6 +248,37 @@ Two details make it read well rather than just colourful:
 Everything a token does not cover keeps the line's add/remove colour, so the
 shape of the diff still reads at a glance.
 
+### Line numbers, tabs and the changed part
+
+Each line is numbered on its own side — the old number for a removal, the new
+one for an addition — in a column sized to the largest number in the diff so it
+does not jitter. The numbers sit outside the code but inside the cursor
+highlight, since they are not part of the file but are part of the row.
+
+Tabs are expanded to four columns before anything measures, tokenises or
+highlights a line, so the syntax offsets, the emphasis offsets and the padding
+all count the same columns. It also stops a tab under the cursor rendering as
+an unstyled gap in the highlight.
+
+When a run of removed lines is followed by an equally long run of added ones,
+that is an edit of those lines in order, and the part that actually changed is
+shown in bold within each:
+
+```
+  6  -    const prefix = "hello, "
+  6 +     const prefix = "greetings, "
+```
+
+Anything else is a pure insertion or deletion, where there is no counterpart to
+compare against and nothing to mark. The highlight is also dropped when more
+than half the line changed — at that point the whole line is the change, and
+marking it says nothing.
+
+Emphasis is rendered bold rather than as a background band. A band would read
+well in a static diff, but here the background already means "the cursor is
+here" and "these lines are selected", which are interactions the pane cannot
+give up.
+
 ### The gutter
 
 A unified diff puts `+` and `-` in the same column, so an added line's code

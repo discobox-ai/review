@@ -1579,3 +1579,75 @@ func TestGitGuiCtrlKeysStillWorkOutsideTheBuffer(t *testing.T) {
 		t.Error("Ctrl-E should still toggle amend outside the message buffer")
 	}
 }
+
+func TestDiffShowsLineNumbers(t *testing.T) {
+	repo := testRepo(t)
+	// A file long enough that the numbers are not all single digits.
+	var lines []string
+	for i := 1; i <= 12; i++ {
+		lines = append(lines, "line "+itoa(i))
+	}
+	writeFile(t, repo.Dir, "foo.txt", strings.Join(lines, "\n")+"\n")
+	gitRun(t, repo.Dir, "add", "foo.txt")
+	gitRun(t, repo.Dir, "commit", "-qm", "long file")
+	lines[9] = "line ten, edited"
+	writeFile(t, repo.Dir, "foo.txt", strings.Join(lines, "\n")+"\n")
+
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 140, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("1"))
+	for m.workdir.current() != nil && m.workdir.current().Path != "foo.txt" {
+		m = drive(t, m, rkey("j"))
+	}
+	if m.diff.file == nil || m.diff.file.Path != "foo.txt" {
+		t.Fatalf("diff shows %v, want foo.txt", m.diff.file)
+	}
+
+	// The changed line is line 10 on both sides.
+	var changed *git.DiffLine
+	for i := range m.diff.lines {
+		if m.diff.lines[i].Kind == '+' {
+			changed = &m.diff.lines[i]
+		}
+	}
+	if changed == nil {
+		t.Fatal("no added line in the diff")
+	}
+	if changed.New != 10 {
+		t.Errorf("the added line is numbered %d, want 10", changed.New)
+	}
+
+	view := m.View()
+	if !strings.Contains(view, " 10 + line ten, edited") {
+		t.Errorf("the view should show the numbered line:\n%s", view)
+	}
+	if m.diff.numW < minNumberWidth {
+		t.Errorf("number column width = %d, want at least %d", m.diff.numW, minNumberWidth)
+	}
+}
+
+func TestRescanClearsItsOwnStatus(t *testing.T) {
+	m := newTestModel(t)
+	// F5 announces the scan, then clears the note once it lands.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyF5})
+	if m.status != "" {
+		t.Errorf("status = %q, want it cleared once the rescan finished", m.status)
+	}
+	if m.rescanning {
+		t.Error("the model still thinks a rescan is running")
+	}
+	if !strings.Contains(m.View(), "hjkl/arrows move") {
+		t.Error("the status bar should be back to the key hints")
+	}
+}
+
+// A command's own message survives the rescan it triggers.
+func TestCommandStatusSurvivesItsRescan(t *testing.T) {
+	m := newTestModel(t)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	if !strings.Contains(m.status, "Staged") {
+		t.Errorf("status = %q, want the staging result to survive the rescan", m.status)
+	}
+}

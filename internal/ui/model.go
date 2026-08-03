@@ -68,6 +68,11 @@ type Model struct {
 
 	dialog *dialog
 	quit   bool
+
+	// rescanning marks the transient "Rescanning…" status so it can be
+	// cleared when the scan lands, rather than sitting there looking like
+	// work still in progress.
+	rescanning bool
 }
 
 // New builds the initial model for a repository.
@@ -322,6 +327,15 @@ func (m Model) doQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
+	// Clear the transient "Rescanning…" note now the scan has landed. A
+	// message from a command that triggered the rescan, such as "Staged 1
+	// file", is left alone: it is reporting the command, not the scan.
+	if m.rescanning {
+		m.rescanning = false
+		if m.status == "Rescanning…" {
+			m.clearStatus()
+		}
+	}
 	if msg.err != nil {
 		m.setError(firstLine(msg.err.Error()))
 		return m, nil
@@ -430,6 +444,7 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, m.keys.Rescan):
 		m.setOK("Rescanning…")
+		m.rescanning = true
 		return m, m.rescanCmd()
 	case key.Matches(msg, m.keys.FocusWorkdir):
 		return m.setFocus(focusWorkdir)

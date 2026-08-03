@@ -16,8 +16,11 @@ type diffView struct {
 	side  git.Side
 	patch *git.Patch
 	lines []git.DiffLine
-	spans [][]span // syntax highlighting, parallel to lines
-	text  string   // shown instead of a patch for messages such as "no differences"
+	texts []string   // code text with tabs expanded, parallel to lines
+	spans [][]span   // syntax highlighting, parallel to lines
+	emph  []emphasis // the changed part of a modified line, parallel to lines
+	numW  int        // width of the line number column
+	text  string     // shown instead of a patch for messages such as "no differences"
 
 	cursor int
 	offset int
@@ -30,12 +33,14 @@ type diffView struct {
 func newDiffView() *diffView { return &diffView{anchor: -1} }
 
 func (d *diffView) clear() {
-	d.file, d.patch, d.lines, d.text, d.spans = nil, nil, nil, "", nil
+	d.file, d.patch, d.lines, d.text = nil, nil, nil, ""
+	d.texts, d.spans, d.emph, d.numW = nil, nil, nil, 0
 	d.cursor, d.offset, d.anchor = 0, 0, -1
 }
 
 func (d *diffView) setMessage(msg string) {
-	d.patch, d.lines, d.spans = nil, nil, nil
+	d.patch, d.lines, d.spans, d.emph, d.texts = nil, nil, nil, nil, nil
+	d.numW = 0
 	d.text = msg
 	d.cursor, d.offset, d.anchor = 0, 0, -1
 }
@@ -44,7 +49,20 @@ func (d *diffView) setPatch(f *git.File, side git.Side, raw string) {
 	d.file, d.side, d.text = f, side, ""
 	d.patch = git.ParsePatch(raw)
 	d.lines = d.patch.Render()
-	d.spans = highlightLines(f.Path, d.lines)
+
+	// Tabs are expanded first, so the syntax spans, the emphasis span and the
+	// padding all count the same columns.
+	d.texts = make([]string, len(d.lines))
+	for i, l := range d.lines {
+		if isCodeLine(l.Kind) {
+			d.texts[i] = expandTabs(codeText(l.Text))
+		} else {
+			d.texts[i] = l.Text
+		}
+	}
+	d.spans = highlightLines(f.Path, d.lines, d.texts)
+	d.emph = pairEmphasis(d.lines, d.texts)
+	d.numW = numberWidth(d.lines)
 	d.cursor, d.offset, d.anchor = 0, 0, -1
 	// Start on the first hunk header so the first stage-hunk does the
 	// obvious thing.
@@ -234,11 +252,23 @@ func (d *diffView) view(st *styles, focused bool) string {
 			style = style.Background(colSelBG)
 		}
 		if isCodeLine(l.Kind) {
-			rows = append(rows, renderSyntaxLine(diffGutter(l.Kind), codeText(l.Text),
-				d.spanAt(i), style, st.syntax, d.width))
+			rows = append(rows, renderDiffRow(diffRow{
+				number:  lineNumber(l),
+				numW:    d.numW,
+				gutter:  diffGutter(l.Kind),
+				code:    d.texts[i],
+				spans:   d.spanAt(i),
+				emph:    d.emphAt(i),
+				base:    style,
+				numFg:   colDim,
+				palette: st.syntax,
+				width:   d.width,
+			}))
 			continue
 		}
-		rows = append(rows, style.Render(pad(l.Text, d.width)))
+		// Metadata lines are indented past the number column so the code stays
+		// in one straight edge.
+		rows = append(rows, style.Render(pad(strings.Repeat(" ", d.numW+1)+l.Text, d.width)))
 	}
 	for len(rows) < d.height {
 		rows = append(rows, strings.Repeat(" ", max(d.width, 0)))
@@ -253,6 +283,37 @@ func (d *diffView) spanAt(i int) []span {
 	}
 	return d.spans[i]
 }
+
+// emphAt returns the changed range within a rendered line, if any.
+func (d *diffView) emphAt(i int) emphasis {
+	if i < 0 || i >= len(d.emph) {
+		return emphasis{}
+	}
+	return d.emph[i]
+}
+
+// lineNumber is the number shown for a line: its own side's, since that is the
+// one it exists on.
+func lineNumber(l git.DiffLine) int {
+	if l.Kind == '-' {
+		return l.Old
+	}
+	return l.New
+}
+
+// numberWidth sizes the line number column to the largest number the diff will
+// print, so the numbers do not jitter between files.
+func numberWidth(lines []git.DiffLine) int {
+	largest := 0
+	for _, l := range lines {
+		largest = max(largest, max(l.Old, l.New))
+	}
+	width := len(itoa(largest))
+	return max(width, minNumberWidth)
+}
+
+// minNumberWidth keeps the column steady for short files.
+const minNumberWidth = 3
 
 // diffGutter is the two column marker in front of each line of code.
 //
@@ -276,18 +337,60 @@ func diffGutter(kind byte) string {
 	}
 }
 
-// renderSyntaxLine draws one diff line as its gutter followed by its code,
-// colouring the runs the lexer identified while keeping the line's own
-// foreground everywhere else and its background across the full pane width.
-func renderSyntaxLine(gutter, code string, spans []span, base lipgloss.Style, palette syntaxPalette, width int) string {
-	if width <= 0 {
+// diffRow is everything needed to draw one line of code in the diff pane.
+type diffRow struct {
+	number  int    // line number, 0 to leave the column blank
+	numW    int    // width of the number column
+	gutter  string // the two column +/- marker
+	code    string // the line's text, tabs already expanded
+	spans   []span
+	emph    emphasis
+	base    lipgloss.Style
+	numFg   lipgloss.TerminalColor
+	palette syntaxPalette
+	width   int
+}
+
+// renderDiffRow draws one line as
+//
+//	[number][ ][gutter][code, padded to the pane width]
+//
+// resolving three independent channels at each position: the line's own
+// add/remove colour, the syntax colour of the token under it, and whether this
+// is the part of the line that actually changed. The first two are colours and
+// combine; the third is rendered bold rather than as a background, because the
+// background is already spoken for by the cursor and the visual selection.
+func renderDiffRow(r diffRow) string {
+	if r.width <= 0 {
 		return ""
 	}
-	runes := []rune(gutter + code)
-	offset := len([]rune(gutter))
+
+	// The number sits in the line's own background so the cursor highlight
+	// covers the whole row, but in a quiet foreground: it is not part of the
+	// file.
+	var b strings.Builder
+	used := 0
+	if r.numW > 0 {
+		numText := strings.Repeat(" ", r.numW)
+		if r.number > 0 {
+			n := itoa(r.number)
+			if len(n) < r.numW {
+				n = strings.Repeat(" ", r.numW-len(n)) + n
+			}
+			numText = n
+		}
+		b.WriteString(r.base.Foreground(r.numFg).Render(numText + " "))
+		used = runewidth.StringWidth(numText) + 1
+		if used >= r.width {
+			return truncateANSI(b.String(), r.width)
+		}
+	}
+
+	runes := []rune(r.gutter + r.code)
+	offset := len([]rune(r.gutter))
 	fg := make([]lipgloss.TerminalColor, len(runes))
-	for _, s := range spans {
-		value, ok := palette.color(s.token)
+	for _, s := range r.spans {
+		value, ok := r.palette.color(s.token)
 		if !ok {
 			continue
 		}
@@ -296,43 +399,56 @@ func renderSyntaxLine(gutter, code string, spans []span, base lipgloss.Style, pa
 			fg[at] = value
 		}
 	}
+	bold := make([]bool, len(runes))
+	if !r.emph.empty() {
+		for at := max(r.emph.start+offset, 0); at < r.emph.end+offset && at < len(runes); at++ {
+			bold[at] = true
+		}
+	}
 
-	var b strings.Builder
+	type appearance struct {
+		fg   lipgloss.TerminalColor
+		bold bool
+	}
 	var buf []rune
-	var current lipgloss.TerminalColor
+	var current appearance
 	flush := func() {
 		if len(buf) == 0 {
 			return
 		}
-		style := base
-		if current != nil {
-			style = style.Foreground(current)
+		style := r.base
+		if current.fg != nil {
+			style = style.Foreground(current.fg)
+		}
+		if current.bold {
+			style = style.Bold(true)
 		}
 		b.WriteString(style.Render(string(buf)))
 		buf = buf[:0]
 	}
 
-	used, truncated := 0, false
-	for at, r := range runes {
-		w := runewidth.RuneWidth(r)
-		if used+w > width {
+	truncated := false
+	for at, ch := range runes {
+		w := runewidth.RuneWidth(ch)
+		if used+w > r.width {
 			truncated = true
 			break
 		}
-		if fg[at] != current {
+		next := appearance{fg: fg[at], bold: bold[at]}
+		if next != current {
 			flush()
-			current = fg[at]
+			current = next
 		}
-		buf = append(buf, r)
+		buf = append(buf, ch)
 		used += w
 	}
 	flush()
-	if truncated && used < width {
-		b.WriteString(base.Render("…"))
+	if truncated && used < r.width {
+		b.WriteString(r.base.Render("…"))
 		used++
 	}
-	if used < width {
-		b.WriteString(base.Render(strings.Repeat(" ", width-used)))
+	if used < r.width {
+		b.WriteString(r.base.Render(strings.Repeat(" ", r.width-used)))
 	}
 	return b.String()
 }

@@ -27,6 +27,12 @@ type DiffLine struct {
 	Kind byte // ' ', '+', '-', '\\', '@' for hunk headers, 'h' for the preamble
 	Hunk int  // index into Patch.Hunks, or -1
 	Line int  // index into Hunk.Lines, or -1
+
+	// Old and New are the line's number on each side of the diff, counted
+	// from the hunk header. A line that exists on only one side has 0 for the
+	// other, and metadata lines have neither.
+	Old int
+	New int
 }
 
 // ParsePatch splits a unified diff into its preamble and hunks.
@@ -103,12 +109,28 @@ func (p *Patch) Render() []DiffLine {
 	}
 	for hi, h := range p.Hunks {
 		out = append(out, DiffLine{Text: h.Header, Kind: '@', Hunk: hi, Line: -1})
+		// Line numbers run from the hunk header: the old side counts context
+		// and removed lines, the new side context and added lines.
+		oldNo, newNo := h.OldStart, h.NewStart
 		for li, l := range h.Lines {
 			kind := byte(' ')
 			if l != "" {
 				kind = l[0]
 			}
-			out = append(out, DiffLine{Text: l, Kind: kind, Hunk: hi, Line: li})
+			d := DiffLine{Text: l, Kind: kind, Hunk: hi, Line: li}
+			switch kind {
+			case ' ':
+				d.Old, d.New = oldNo, newNo
+				oldNo++
+				newNo++
+			case '-':
+				d.Old = oldNo
+				oldNo++
+			case '+':
+				d.New = newNo
+				newNo++
+			}
+			out = append(out, d)
 		}
 	}
 	return out

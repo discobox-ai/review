@@ -185,3 +185,37 @@ func TestMapState(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderLineNumbers(t *testing.T) {
+	lines := ParsePatch(sample).Render()
+	type want struct {
+		text     string
+		old, new int
+	}
+	// The sample's first hunk starts at 1/1, the second at 10/11.
+	expect := []want{
+		{" one", 1, 1},
+		{"-two", 2, 0},
+		{"+TWO", 0, 2},
+		{"+two and a half", 0, 3},
+		{" three", 3, 4},
+		{" ten", 10, 11},
+		{"-eleven", 11, 0},
+		{"+ELEVEN", 0, 12},
+	}
+	var got []want
+	for _, l := range lines {
+		if l.Kind == '@' || l.Kind == 'h' {
+			continue
+		}
+		got = append(got, want{l.Text, l.Old, l.New})
+	}
+	if len(got) != len(expect) {
+		t.Fatalf("got %d code lines, want %d: %v", len(got), len(expect), got)
+	}
+	for i, w := range expect {
+		if got[i] != w {
+			t.Errorf("line %d = %+v, want %+v", i, got[i], w)
+		}
+	}
+}

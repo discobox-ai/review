@@ -41,7 +41,7 @@ func lexerFor(path string) chroma.Lexer {
 // strings, raw strings) is coloured as though it began where it did not.
 // Feeding it a whole side keeps that state right within the hunk, which is as
 // much context as a diff has.
-func highlightLines(path string, lines []git.DiffLine) [][]span {
+func highlightLines(path string, lines []git.DiffLine, texts []string) [][]span {
 	out := make([][]span, len(lines))
 	lexer := lexerFor(path)
 	if lexer == nil {
@@ -64,17 +64,17 @@ func highlightLines(path string, lines []git.DiffLine) [][]span {
 	for _, h := range order {
 		for _, side := range []byte{'-', '+'} {
 			var indexes []int
-			var texts []string
+			var sideTexts []string
 			for _, i := range byHunk[h] {
 				if k := lines[i].Kind; k == ' ' || k == side {
 					indexes = append(indexes, i)
-					texts = append(texts, codeText(lines[i].Text))
+					sideTexts = append(sideTexts, texts[i])
 				}
 			}
 			if len(indexes) == 0 {
 				continue
 			}
-			spans := tokeniseLines(lexer, texts)
+			spans := tokeniseLines(lexer, sideTexts)
 			for offset, i := range indexes {
 				// A context line belongs to both sides and is tokenised
 				// twice; the two agree, so the second pass overwrites the

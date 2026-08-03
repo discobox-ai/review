@@ -38,7 +38,15 @@ func inCategory(token, want chroma.TokenType) bool {
 func parseAndHighlight(t *testing.T, path, raw string) ([]git.DiffLine, [][]span) {
 	t.Helper()
 	lines := git.ParsePatch(raw).Render()
-	return lines, highlightLines(path, lines)
+	texts := make([]string, len(lines))
+	for i, l := range lines {
+		if isCodeLine(l.Kind) {
+			texts[i] = expandTabs(codeText(l.Text))
+		} else {
+			texts[i] = l.Text
+		}
+	}
+	return lines, highlightLines(path, lines, texts)
 }
 
 const goDiff = `diff --git a/x.go b/x.go
@@ -192,7 +200,10 @@ func TestRenderSyntaxLineKeepsWidth(t *testing.T) {
 			if !isCodeLine(l.Kind) {
 				continue
 			}
-			got := renderSyntaxLine(diffGutter(l.Kind), codeText(l.Text), spans[i], base, newSyntaxPalette(), width)
+			got := renderDiffRow(diffRow{number: lineNumber(l), numW: 3,
+				gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
+				spans: spans[i], base: base, numFg: colDim,
+				palette: newSyntaxPalette(), width: width})
 			if w := lipgloss.Width(got); w != width {
 				t.Errorf("width %d: line %q rendered %d cells", width, l.Text, w)
 			}
@@ -207,7 +218,10 @@ func TestRenderSyntaxLineKeepsTheText(t *testing.T) {
 		if !isCodeLine(l.Kind) {
 			continue
 		}
-		got := renderSyntaxLine(diffGutter(l.Kind), codeText(l.Text), spans[i], base, newSyntaxPalette(), 200)
+		got := renderDiffRow(diffRow{number: lineNumber(l), numW: 3,
+			gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
+			spans: spans[i], base: base, numFg: colDim,
+			palette: newSyntaxPalette(), width: 200})
 		if !strings.Contains(got, strings.TrimSpace(codeText(l.Text))) {
 			t.Errorf("rendered line dropped its text: %q -> %q", l.Text, got)
 		}
@@ -221,9 +235,11 @@ func TestRenderSyntaxLineWithoutPaletteIsPlain(t *testing.T) {
 		if l.Kind != '+' {
 			continue
 		}
-		gut, code := diffGutter(l.Kind), codeText(l.Text)
-		plain := renderSyntaxLine(gut, code, nil, base, nil, 60)
-		coloured := renderSyntaxLine(gut, code, spans[i], base, newSyntaxPalette(), 60)
+		row := diffRow{number: lineNumber(l), numW: 3, gutter: diffGutter(l.Kind),
+			code: expandTabs(codeText(l.Text)), base: base, numFg: colDim, width: 60}
+		plain := renderDiffRow(row)
+		row.spans, row.palette = spans[i], newSyntaxPalette()
+		coloured := renderDiffRow(row)
 		if lipgloss.Width(plain) != lipgloss.Width(coloured) {
 			t.Error("highlighting changed the rendered width")
 		}
@@ -264,7 +280,10 @@ func TestRenderedGutterLayout(t *testing.T) {
 		if _, already := seen[l.Kind]; already {
 			continue // keep the first line of each kind
 		}
-		seen[l.Kind] = renderSyntaxLine(diffGutter(l.Kind), codeText(l.Text), spans[i], base, newSyntaxPalette(), 200)
+		seen[l.Kind] = renderDiffRow(diffRow{numW: 0,
+			gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
+			spans: spans[i], base: base, numFg: colDim,
+			palette: newSyntaxPalette(), width: 200})
 	}
 	for kind, want := range map[byte]string{
 		'+': "+ func shiny",
