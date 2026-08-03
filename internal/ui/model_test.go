@@ -344,6 +344,11 @@ func TestQuitKeys(t *testing.T) {
 // key builds a plain rune key message.
 func rkey(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
 
+// altKey builds an Alt-modified rune key message.
+func altKey(s string) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s), Alt: true}
+}
+
 func newTestModel(t *testing.T) Model {
 	t.Helper()
 	repo := testRepo(t)
@@ -415,15 +420,15 @@ func TestLeftRightCrossColumns(t *testing.T) {
 		want  focusArea
 	}{
 		{"unstaged right to diff", focusWorkdir, "l", focusDiff},
-		{"staged right to commit", focusIndex, "l", focusCommit},
-		{"diff left to unstaged", focusDiff, "h", focusWorkdir},
+		{"staged right to diff", focusIndex, "l", focusDiff},
 		{"unstaged left stays", focusWorkdir, "h", focusWorkdir},
 		{"staged left stays", focusIndex, "h", focusIndex},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			m, _ := base.setFocus(c.start)
+			m, cmd := base.setFocus(c.start)
 			got := drive(t, m.(Model), rkey(c.key))
+			_ = cmd
 			if got.focus != c.want {
 				t.Errorf("focus = %v, want %v", got.focus, c.want)
 			}
@@ -477,10 +482,12 @@ func TestCommitBufferEdgeNavigation(t *testing.T) {
 		t.Errorf("up at the top of the buffer: focus = %v, want focusDiff", got.focus)
 	}
 
-	// Left at the very start leaves for the staged list.
+	// Left at the very start leaves for the list the diff is showing, which
+	// at startup is the unstaged one. TestCommitBufferLeftReturnsToTheActiveList
+	// covers the staged case.
 	got = drive(t, mm, tea.KeyMsg{Type: tea.KeyLeft})
-	if got.focus != focusIndex {
-		t.Errorf("left at the start of the buffer: focus = %v, want focusIndex", got.focus)
+	if got.focus != focusWorkdir {
+		t.Errorf("left at the start of the buffer: focus = %v, want focusWorkdir", got.focus)
 	}
 
 	// But not from the middle of the text.
@@ -734,6 +741,39 @@ func TestAmendLoadsAndRestoresBuffer(t *testing.T) {
 	}
 }
 
+// A backup tick while amending used to leave the amend text on disk, because
+// the quit path promoted the backup without checking for amend.
+func TestAmendMessageIsNotSavedOnQuitAfterABackup(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	if !m.amend {
+		t.Fatal("amend was not enabled")
+	}
+	m.commit.SetValue("initial, reworded")
+
+	// The periodic backup fires, and then nothing else is typed, so the
+	// buffer is clean with respect to the backup.
+	m = step(m, backupTickMsg{})
+	if !m.bckExists {
+		t.Fatal("the backup tick did not write a backup")
+	}
+	if m.msgDirty() {
+		t.Fatal("the buffer should be clean right after a backup")
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlQ})
+	if got, ok := stateFile(t, repo, git.MsgFile); ok {
+		t.Errorf("an amend message was stashed as the next commit message: %q", got)
+	}
+	if _, ok := stateFile(t, repo, git.BackupFile); ok {
+		t.Error("the backup should be removed on quit")
+	}
+}
+
 func TestAmendMessageIsNotSavedOnQuit(t *testing.T) {
 	repo := testRepo(t)
 	m := drive(t, New(repo),
@@ -836,5 +876,94 @@ func TestStartupFocusWithNoUnstagedFiles(t *testing.T) {
 	got := drive(t, m, rkey("j"))
 	if got.focus != focusIndex {
 		t.Errorf("focus = %v, want focusIndex", got.focus)
+	}
+}
+
+// The diff pane remembers which list it is showing, so leaving it and coming
+// straight back lands on the same file rather than snapping to the other list.
+func TestDiffRemembersWhichListItIsShowing(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		start focusArea
+		focus tea.KeyMsg
+		side  git.Side
+	}{
+		{"unstaged", focusWorkdir, altKey("1"), git.SideWorkdir},
+		{"staged", focusIndex, altKey("2"), git.SideIndex},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			repo := testRepo(t)
+			m := drive(t, New(repo),
+				tea.WindowSizeMsg{Width: 120, Height: 40},
+				New(repo).rescanCmd()(),
+			)
+			m = drive(t, m, c.focus)
+			if m.focus != c.start {
+				t.Fatalf("focus = %v, want %v", m.focus, c.start)
+			}
+			list := m.workdir
+			if c.start == focusIndex {
+				list = m.index
+			}
+			want := list.currentPath()
+			if want == "" {
+				t.Fatal("no file selected")
+			}
+
+			// Right into the diff: it must be showing this list's side.
+			m = drive(t, m, rkey("l"))
+			if m.focus != focusDiff {
+				t.Fatalf("focus = %v, want focusDiff", m.focus)
+			}
+			if m.diff.side != c.side {
+				t.Errorf("diff side = %v, want %v", m.diff.side, c.side)
+			}
+			if m.diff.file == nil || m.diff.file.Path != want {
+				t.Errorf("diff shows %v, want %s", m.diff.file, want)
+			}
+
+			// Left again: back to the same list, same selection.
+			m = drive(t, m, rkey("h"))
+			if m.focus != c.start {
+				t.Errorf("focus = %v, want to return to %v", m.focus, c.start)
+			}
+			back := m.workdir
+			if c.start == focusIndex {
+				back = m.index
+			}
+			if got := back.currentPath(); got != want {
+				t.Errorf("selection = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// Left out of the commit buffer follows the same rule.
+func TestCommitBufferLeftReturnsToTheActiveList(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	// Select in the staged list, then walk right and down into the commit
+	// buffer the way a user would.
+	m = drive(t, m, altKey("2"))
+	if m.focus != focusIndex {
+		t.Fatalf("focus = %v, want focusIndex", m.focus)
+	}
+	m = drive(t, m, rkey("l"))
+	if m.focus != focusDiff {
+		t.Fatalf("focus = %v, want focusDiff", m.focus)
+	}
+	m.diff.moveTo(len(m.diff.lines) - 1)
+	m = drive(t, m, rkey("j"))
+	if m.focus != focusCommit {
+		t.Fatalf("focus = %v, want focusCommit", m.focus)
+	}
+	m.commit.SetValue("")
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyLeft})
+	if m.focus != focusIndex {
+		t.Errorf("focus = %v, want focusIndex (the list the diff came from)", m.focus)
 	}
 }

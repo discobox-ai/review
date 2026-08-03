@@ -99,8 +99,13 @@ Staged   │ Commit
 Moving down past the last file in **Unstaged Changes** carries on into
 **Staged Changes** at its first row; moving up from the top of the staged list
 goes back to the bottom of the unstaged one. The same applies on the right,
-between the diff and the commit message. `←`/`→` cross between the two
-columns, pairing each left pane with the right pane beside it.
+between the diff and the commit message.
+
+`→` from **either** file list goes to the diff. The diff remembers which list it
+is showing — git gui tracks the same thing as `current_diff_side` — so `←` comes
+back to *that* list with the same file still selected. Select something staged,
+go right to read it, come back left, and you are still on it; likewise for
+unstaged. `←` out of the commit message follows the same rule.
 
 On startup the first file in **Unstaged Changes** is focused with its diff
 already loaded, so the single letter keys are live immediately. (git gui starts
@@ -129,7 +134,7 @@ very start of the text (`↑` on the first line, `←` at the first column) — 
 | Key | Action |
 | --- | --- |
 | `↑`/`↓`, `k`/`j` | Move, loading the diff as you go; leaves the pane at the ends |
-| `←`/`→`, `h`/`l` | Cross to the other column |
+| `←`/`→`, `h`/`l` | `→` to the diff; `←` from the diff returns here |
 | `Space` | Stage from the unstaged list, unstage from the staged list |
 | `m` | Mark a file, so a command acts on several at once |
 | `D` | Delete untracked files |

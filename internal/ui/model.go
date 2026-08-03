@@ -282,6 +282,15 @@ func (m *Model) backupMessage() {
 // one left off. An amend message is deliberately not kept: it belongs to a
 // commit that already exists.
 func (m *Model) saveOnQuit() {
+	if m.amend {
+		// git-gui only applies this check when the buffer changed since its
+		// last backup, so quitting mid-amend can promote the backup into the
+		// next session's message. Applying it uniformly is the small fix.
+		_ = m.repo.RemoveStateFile(git.MsgFile)
+		_ = m.repo.RemoveStateFile(git.BackupFile)
+		m.bckExists = false
+		return
+	}
 	switch {
 	case m.bckExists && !m.msgDirty():
 		// Nothing changed since the last backup, so promote it.
@@ -289,8 +298,7 @@ func (m *Model) saveOnQuit() {
 			m.bckExists = false
 		}
 	case m.msgDirty():
-		body := normalizeMessage(m.commit.Value())
-		if !m.amend && body != "" {
+		if body := normalizeMessage(m.commit.Value()); body != "" {
 			_ = m.repo.WriteStateFile(git.MsgFile, body)
 		} else {
 			_ = m.repo.RemoveStateFile(git.MsgFile)
@@ -453,7 +461,9 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "left":
 			if atFirstLine && info.ColumnOffset == 0 {
-				return m.enterPane(focusIndex, entryKeep)
+				if t, ok := m.paneLeft(focusCommit); ok {
+					return m.enterPane(t, entryKeep)
+				}
 			}
 		}
 		var cmd tea.Cmd
@@ -515,22 +525,27 @@ func paneBelow(f focusArea) (focusArea, bool) {
 	return f, false
 }
 
-func paneLeft(f focusArea) (focusArea, bool) {
+// paneLeft returns to whichever file list owns the diff currently on show,
+// rather than to a fixed pane. git-gui tracks the same thing as
+// current_diff_side, so leaving the diff and coming back keeps you on the file
+// you were looking at.
+func (m *Model) paneLeft(f focusArea) (focusArea, bool) {
 	switch f {
-	case focusDiff:
+	case focusDiff, focusCommit:
+		if _, side := m.activeList(); side == git.SideIndex {
+			return focusIndex, true
+		}
 		return focusWorkdir, true
-	case focusCommit:
-		return focusIndex, true
 	}
 	return f, false
 }
 
+// paneRight sends both lists to the diff: it is the pane you want next from
+// either one. The commit buffer is below the diff, reached with down.
 func paneRight(f focusArea) (focusArea, bool) {
 	switch f {
-	case focusWorkdir:
+	case focusWorkdir, focusIndex:
 		return focusDiff, true
-	case focusIndex:
-		return focusCommit, true
 	}
 	return f, false
 }
@@ -609,7 +624,7 @@ func (m Model) listKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		list.move(1)
 	case key.Matches(msg, m.keys.Left):
-		if t, ok := paneLeft(m.focus); ok {
+		if t, ok := m.paneLeft(m.focus); ok {
 			return m.enterPane(t, entryKeep)
 		}
 		return m, nil
@@ -664,7 +679,7 @@ func (m Model) diffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.diff.move(1)
 	case key.Matches(msg, m.keys.Left):
-		if t, ok := paneLeft(m.focus); ok {
+		if t, ok := m.paneLeft(m.focus); ok {
 			return m.enterPane(t, entryKeep)
 		}
 		return m, nil
@@ -1275,9 +1290,11 @@ func helpText() string {
 		"      Staged   │ Commit",
 		"",
 		"  Up or down past the end of a list carries on into the pane above",
-		"  or below it, and left/right cross between the two columns. In the",
-		"  commit message buffer only the arrow keys move out, and only from",
-		"  the very start of the text, so h/j/k/l stay typable.",
+		"  or below it. Right from either list goes to the diff, and left",
+		"  comes back to whichever list the diff is showing, with the same",
+		"  file still selected. In the commit message buffer only the arrow",
+		"  keys move out, and only from the very start of the text, so",
+		"  h/j/k/l stay typable.",
 		"",
 		"Commit",
 		"  F5, Ctrl-R   Rescan",
