@@ -9,11 +9,11 @@ with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and
 Current Branch: main                                        difftui · F1 help · Ctrl-Q quit
  Unstaged Changes               2 files │ Modified, not staged   File: foo.txt        hunk 1/2
   ✎ foo.txt                             │@@ -1,5 +1,5 @@
-  + new.txt                             │ one
-                                        │-two
-                                        │+TWO
-                                        │ three
- Staged Changes (Will Commit)    1 file │ four
+  + new.txt                             │  one
+                                        │ -two
+                                        │+ TWO
+                                        │  three
+ Staged Changes (Will Commit)    1 file │  four
   ✔ bar.txt                             │
                                         │Commit Message:              [ ] Amend Last Commit
                                         │[ Rescan        F5 ] the commit message goes here
@@ -247,6 +247,23 @@ Two details make it read well rather than just colourful:
 
 Everything a token does not cover keeps the line's add/remove colour, so the
 shape of the diff still reads at a glance.
+
+### The gutter
+
+A unified diff puts `+` and `-` in the same column, so an added line's code
+starts immediately after its marker. difftui gives each side a column of its
+own:
+
+```
+  context
+ -removed
++ added
+```
+
+An addition always has a space between the marker and the code, so the line
+reads like the file itself rather than like a patch. A deletion sits tight
+against its marker instead — which costs little, since the removed side is the
+one you skim.
 
 ## Amending
 
