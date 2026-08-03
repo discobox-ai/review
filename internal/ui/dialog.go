@@ -6,6 +6,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 type dialogKind int
@@ -196,6 +197,10 @@ func (d *dialog) view(st *styles, width, height int) string {
 }
 
 // wrap performs a simple word wrap that also honours existing newlines.
+//
+// A line that already fits is passed through untouched, so text laid out in
+// columns — the help screen — keeps its alignment instead of being reflowed
+// into a single spaced run.
 func wrap(s string, width int) []string {
 	if width < 4 {
 		width = 4
@@ -204,6 +209,10 @@ func wrap(s string, width int) []string {
 	for _, para := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
 		if para == "" {
 			out = append(out, "")
+			continue
+		}
+		if runewidth.StringWidth(para) <= width {
+			out = append(out, para)
 			continue
 		}
 		line := ""

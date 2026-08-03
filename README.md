@@ -80,6 +80,28 @@ The status icons follow git gui's bitmap table:
 
 difftui keeps git gui's accelerators wherever a terminal can deliver them.
 
+### One rule
+
+Every command is **one letter**. Press it in a file list or the diff, or
+**Alt + that same letter** anywhere — including while typing a commit message,
+where a bare letter would just be text.
+
+| | | | |
+| --- | --- | --- | --- |
+| `s` | stage | `u` | unstage |
+| `a` | stage all changed | `v` | revert changes |
+| `c` | commit | `e` | amend last commit |
+| `o` | sign off | `R` | rescan (also `F5`) |
+| `P` | push | `M` | local merge / abort merge |
+| `N` | new branch | `K` | checkout branch |
+| `-` | less diff context | `=` | more diff context |
+
+`Ctrl-Enter` also commits. `Ctrl-C` or `q` quits. `F1` or `?` shows the keys.
+
+**Ctrl is left alone entirely.** No command uses it, so the commit message keeps
+every readline key: `Ctrl-A`, `Ctrl-E`, `Ctrl-K`, `Ctrl-U`, `Ctrl-W`, `Ctrl-D`,
+`Ctrl-B`, `Ctrl-F`, `Ctrl-N`, `Ctrl-P`, `Ctrl-T`.
+
 ### Panes
 
 | Key | Action |
@@ -87,6 +109,9 @@ difftui keeps git gui's accelerators wherever a terminal can deliver them.
 | `Alt-1` … `Alt-4` | Focus unstaged / staged / diff / commit message |
 | `Tab`, `Shift-Tab` | Cycle focus, including the Amend checkbox |
 | `←` `↓` `↑` `→`, `h` `j` `k` `l` | Move, crossing into the neighbouring pane at the edges |
+
+On startup the first file in **Unstaged Changes** is focused with its diff
+already loaded, so the letters are live immediately.
 
 The four panes form a grid, and navigation walks it:
 
@@ -103,198 +128,62 @@ between the diff and the commit message.
 
 `→` from **either** file list goes to the diff. The diff remembers which list it
 is showing — git gui tracks the same thing as `current_diff_side` — so `←` comes
-back to *that* list with the same file still selected. Select something staged,
-go right to read it, come back left, and you are still on it; likewise for
-unstaged. `←` out of the commit message follows the same rule.
-
-On startup the first file in **Unstaged Changes** is focused with its diff
-already loaded, so the single letter keys are live immediately. (git gui starts
-in the message buffer instead; this is friendlier in a terminal.)
+back to *that* list with the same file still selected.
 
 In the commit message buffer only the arrow keys move out, and only from the
 very start of the text (`↑` on the first line, `←` at the first column) — so
 `h`/`j`/`k`/`l` stay typable there.
 
-### Commands
-
-These work **everywhere, including while you are typing a commit message**, so
-you never have to leave the buffer to run one.
-
-| Key | git gui command |
-| --- | --- |
-| `F5`, `Ctrl-R` | Rescan |
-| `Ctrl-T` | Stage To Commit |
-| `Alt-I` | Stage Changed Files To Commit |
-| `Alt-U` | Unstage From Commit |
-| `Ctrl-J` | Revert Changes |
-| `Ctrl-S` | Sign Off |
-| `Alt-E` | Amend Last Commit |
-| `Alt-C`, `Ctrl-Enter` | Commit |
-| `Alt-P` | Push |
-| `Alt-M` | Local Merge / Abort Merge |
-| `Alt-B` | Create Branch |
-| `Ctrl-O` | Checkout Branch |
-| `Alt--` / `Alt-=` | Show Less / More Context |
-
-### Why not all Ctrl keys
-
-The commit message buffer is a real text field with readline editing, and most
-of git gui's accelerators collide with it: `Ctrl-E` is end-of-line, `Ctrl-U`
-kills to the start of the line, `Ctrl-P`/`Ctrl-N` move by line, `Ctrl-A`,
-`Ctrl-K`, `Ctrl-W`, `Ctrl-D`, `Ctrl-B` and `Ctrl-F` are all editing too. A
-command layer built purely on Ctrl would quietly break typing.
-
-So the keys are layered:
-
-1. **Commands** avoid every key the buffer binds for editing, and are live
-   everywhere. That is why "stage changed" is `Alt-I` rather than `Ctrl-I`.
-2. **git gui's own Ctrl accelerators** — `Ctrl-U` unstage, `Ctrl-E` amend,
-   `Ctrl-P` push, `Ctrl-N` create branch — stay bound everywhere *except*
-   inside the message buffer, where the editing meaning wins.
-3. **Unmodified letters** act on a pane's cursor, so they are live only while a
-   list or the diff has focus. In the buffer they are simply typed.
-
-Inside the buffer, `Ctrl-A`, `Ctrl-E`, `Ctrl-K`, `Ctrl-U`, `Ctrl-W`, `Ctrl-D`,
-`Ctrl-B`, `Ctrl-F`, `Ctrl-N`, `Ctrl-P` and the `Alt` word motions all edit the
-message exactly as you would expect. There is one deliberate exception:
-`Ctrl-T`, which the textarea uses to transpose two characters, stays git gui's
-Stage To Commit — transposing characters is not something anyone reaches for in
-a commit message.
-
-### File lists
+### On a file
 
 | Key | Action |
 | --- | --- |
-| `↑`/`↓`, `k`/`j` | Move, loading the diff as you go; leaves the pane at the ends |
-| `←`/`→`, `h`/`l` | `→` to the diff; `←` from the diff returns here |
-| `Space` | Stage from the unstaged list, unstage from the staged list |
+| `Space` | Stage, or unstage from the staged list |
 | `m` | Mark a file, so a command acts on several at once |
 | `D` | Delete untracked files |
 
-### Diff pane
-
-| Key | git gui command |
-| --- | --- |
-| `Space`, `Ctrl-T` | Stage Hunk For Commit |
-| `Ctrl-U` | Unstage Hunk From Commit |
-| `V` | Visual line select (see below) |
-| `L` | Stage / Unstage Line — just the one under the cursor |
-| `r` | Revert Hunk |
-| `n` / `p` | Next / previous hunk |
-| `↑`/`↓`, `k`/`j` | Move by line; `↓` past the end enters the commit message |
-
-### Branch and remote
+### In the diff
 
 | Key | Action |
 | --- | --- |
-| `Alt-B`, `Ctrl-N` | Create Branch |
-| `Ctrl-O` | Checkout Branch |
-| `Alt-M`, `M` | Local Merge, or Abort Merge when one is in progress |
-| `Alt-P`, `Ctrl-P` | Push |
-| `F1`, `?` | Help |
-| `Ctrl-Q`, `Ctrl-C` | Quit (`q` also quits from a list or the diff) |
+| `Space` | Stage the hunk under the cursor |
+| `V` | Visual line select (see below) |
+| `L` | Stage just the line under the cursor |
+| `r` | Revert the hunk |
+| `n` / `p` | Next / previous hunk |
 
-### Deliberate differences
+On the staged side each of these unstages instead.
 
-Three of git gui's accelerators cannot survive a terminal, so they moved:
+#### Visual line select
 
-- **`Ctrl-I`** (Stage Changed Files To Commit) is byte-identical to `Tab`. It
-  is `Alt-I`, or `i` on the lists and the diff pane.
-- **`Ctrl-M`** (Local Merge) is byte-identical to `Enter`. It is `Alt-M`, or
-  `M` on the lists and the diff pane.
-- **`Ctrl-Q`** is XON on terminals that still have flow control enabled, so
-  `Ctrl-C` quits as well.
+`V` behaves like vim's visual line mode. It starts with the current line
+selected; `↑`/`↓` (or `k`/`j`) extend the selection; `V` again or `Esc` cancels.
+`Space` or `Enter` then stages the selected lines — the same key that stages in
+the file lists.
 
-Single letter keys are only live while a list or the diff has focus — the
-commit message buffer swallows them so you can type normally.
+While a selection is open the status bar switches to say so, counting the lines,
+and the cursor stays inside the diff rather than running off into the next pane.
 
-Since a terminal has no right mouse button, git gui's diff context menu is on
-the keyboard: the hunk under the cursor is the one `Space`, `Ctrl-U` and `r`
-act on.
+### Why Alt, and not git gui's Ctrl keys
 
-### Visual line select
+A terminal cannot deliver most of them:
 
-`V` in the diff behaves like vim's visual line mode. It starts with the current
-line selected; `↑`/`↓` (or `k`/`j`) extend the selection; `V` again or `Esc`
-cancels. `Space` or `Enter` then stages the selected lines — the same keys that
-stage in the file lists — or unstages them when the diff is showing the staged
-side.
+- **`Ctrl-I`** is byte-identical to `Tab`.
+- **`Ctrl-M`** is byte-identical to `Enter`.
+- **`Ctrl-Enter`** arrives as **`Ctrl-J`** — which is why `Ctrl-J` commits here.
+- **`Ctrl-A`, `-E`, `-K`, `-U`, `-W`, `-D`, `-B`, `-F`, `-N`, `-P`, `-T`** are
+  all readline editing keys in the message buffer.
 
-While a selection is open the status bar switches to say so, counting the lines
-and listing what you can do, and the cursor stays inside the diff rather than
-running off into the next pane.
+Honouring some and silently breaking the others is worse than moving them all,
+so every command is a letter, with Alt as the modifier for reaching it from
+inside the message buffer.
 
-`L` stages just the line under the cursor, without entering visual mode.
-
-## Syntax highlighting
-
-Diffs are syntax highlighted, using [chroma](https://github.com/alecthomas/chroma)
-to pick a lexer from the file's name. Files chroma does not recognise are shown
-plain, rather than run through a fallback lexer that would colour nothing.
-
-Two details make it read well rather than just colourful:
-
-- **Each side of a hunk is lexed as one text** — context plus removed lines for
-  the old side, context plus added lines for the new one. A lexer is a state
-  machine, so fed one line at a time it restarts on every line and anything
-  spanning lines (block comments, raw strings) gets coloured as though it began
-  where it did not. A hunk is as much context as a diff has.
-- **The palette is short and deliberately quiet.** Keywords, types, literals and
-  comments are coloured; plain identifiers and punctuation are left in the
-  line's own foreground, because colouring everything emphasises nothing. The
-  colours also stay clear of the diff's own green and red, so a string never
-  lands green-on-green.
-
-Everything a token does not cover keeps the line's add/remove colour, so the
-shape of the diff still reads at a glance.
-
-### Line numbers, tabs and the changed part
-
-Each line is numbered on its own side — the old number for a removal, the new
-one for an addition — in a column sized to the largest number in the diff so it
-does not jitter. The numbers sit outside the code but inside the cursor
-highlight, since they are not part of the file but are part of the row.
-
-Tabs are expanded to four columns before anything measures, tokenises or
-highlights a line, so the syntax offsets, the emphasis offsets and the padding
-all count the same columns. It also stops a tab under the cursor rendering as
-an unstyled gap in the highlight.
-
-When a run of removed lines is followed by an equally long run of added ones,
-that is an edit of those lines in order, and the part that actually changed is
-shown in bold within each:
-
-```
-  6  -    const prefix = "hello, "
-  6 +     const prefix = "greetings, "
-```
-
-Anything else is a pure insertion or deletion, where there is no counterpart to
-compare against and nothing to mark. The highlight is also dropped when more
-than half the line changed — at that point the whole line is the change, and
-marking it says nothing.
-
-Emphasis is rendered bold rather than as a background band. A band would read
-well in a static diff, but here the background already means "the cursor is
-here" and "these lines are selected", which are interactions the pane cannot
-give up.
-
-### The gutter
-
-A unified diff puts `+` and `-` in the same column, so an added line's code
-starts immediately after its marker. difftui gives each side a column of its
-own:
-
-```
-  context
- -removed
-+ added
-```
-
-An addition always has a space between the marker and the code, so the line
-reads like the file itself rather than like a patch. A deletion sits tight
-against its marker instead — which costs little, since the removed side is the
-one you skim.
+**On macOS**, Option is not Meta by default, so `Alt-S` may arrive as `ß` rather
+than a command. Either turn it on — Terminal.app: Settings → Profiles →
+Keyboard → *Use Option as Meta Key*; iTerm2: Settings → Profiles → Keys → Left
+Option key → *Esc+* — or simply use the bare letters, which need no modifier at
+all. Option never maps to Cmd, and Cmd is intercepted by the terminal itself, so
+it cannot be used for bindings.
 
 ## Amending
 

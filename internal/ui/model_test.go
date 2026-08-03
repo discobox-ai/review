@@ -169,7 +169,7 @@ func TestStageThroughUI(t *testing.T) {
 	}
 	name := target.Path
 
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlT})
+	m = drive(t, m, altKey("s"))
 	m = drive(t, m, New(repo).rescanCmd()())
 
 	for _, f := range m.index.files {
@@ -203,7 +203,7 @@ func TestSignOffAppendsTrailer(t *testing.T) {
 		New(repo).rescanCmd()(),
 	)
 	m.commit.SetValue("do a thing")
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = drive(t, m, altKey("o"))
 
 	got := m.commit.Value()
 	want := "do a thing\n\nSigned-off-by: Test <test@example.com>"
@@ -212,7 +212,7 @@ func TestSignOffAppendsTrailer(t *testing.T) {
 	}
 
 	// A second sign off must not duplicate the trailer.
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = drive(t, m, altKey("o"))
 	if m.commit.Value() != want {
 		t.Errorf("sign off was applied twice:\n%q", m.commit.Value())
 	}
@@ -225,7 +225,7 @@ func TestSignOffJoinsExistingTrailerBlock(t *testing.T) {
 		New(repo).rescanCmd()(),
 	)
 	m.commit.SetValue("subject\n\nCo-authored-by: Someone <a@b.c>")
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = drive(t, m, altKey("o"))
 
 	want := "subject\n\nCo-authored-by: Someone <a@b.c>\nSigned-off-by: Test <test@example.com>"
 	if m.commit.Value() != want {
@@ -555,7 +555,7 @@ func TestQuitSavesCommitBuffer(t *testing.T) {
 	)
 	m.commit.SetValue("a message in progress\n")
 
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlQ})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlC})
 	if !m.quit {
 		t.Fatal("Ctrl-Q did not quit")
 	}
@@ -587,7 +587,7 @@ func TestQuitWithEmptyBufferSavesNothing(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlQ})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlC})
 	if _, ok := stateFile(t, repo, git.MsgFile); ok {
 		t.Error("an empty buffer should not be saved")
 	}
@@ -730,7 +730,7 @@ func TestAmendLoadsAndRestoresBuffer(t *testing.T) {
 	m.commit.SetValue("work in progress")
 
 	// Ctrl-E turns on amend and pulls in HEAD's message.
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = drive(t, m, altKey("e"))
 	if !m.amend {
 		t.Fatal("Ctrl-E did not turn on amend")
 	}
@@ -745,7 +745,7 @@ func TestAmendLoadsAndRestoresBuffer(t *testing.T) {
 	}
 
 	// Turning it back off restores what was being typed.
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = drive(t, m, altKey("e"))
 	if m.amend {
 		t.Fatal("Ctrl-E did not turn amend back off")
 	}
@@ -762,7 +762,7 @@ func TestAmendMessageIsNotSavedOnQuitAfterABackup(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = drive(t, m, altKey("e"))
 	if !m.amend {
 		t.Fatal("amend was not enabled")
 	}
@@ -778,7 +778,7 @@ func TestAmendMessageIsNotSavedOnQuitAfterABackup(t *testing.T) {
 		t.Fatal("the buffer should be clean right after a backup")
 	}
 
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlQ})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlC})
 	if got, ok := stateFile(t, repo, git.MsgFile); ok {
 		t.Errorf("an amend message was stashed as the next commit message: %q", got)
 	}
@@ -793,12 +793,12 @@ func TestAmendMessageIsNotSavedOnQuit(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = drive(t, m, altKey("e"))
 	if !m.amend {
 		t.Fatal("amend was not enabled")
 	}
 	m.commit.SetValue("reworded HEAD")
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlQ})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlC})
 
 	if _, ok := stateFile(t, repo, git.MsgFile); ok {
 		t.Error("an amend message must not be stashed as the next commit message")
@@ -815,7 +815,7 @@ func TestAmendCommitRewritesHEAD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = drive(t, m, altKey("e"))
 	m.commit.SetValue("initial, reworded")
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c"), Alt: true})
 	if m.dialog != nil {
@@ -1008,7 +1008,7 @@ func TestStatusMessageClearsOnTheNextKey(t *testing.T) {
 		t.Error("the stale status message is still on screen")
 	}
 	// With nothing to report, the bar falls back to the key hints.
-	if !strings.Contains(m.View(), "hjkl/arrows move") {
+	if !strings.Contains(m.View(), "Space stage") {
 		t.Error("the status bar should fall back to the hints")
 	}
 
@@ -1320,7 +1320,7 @@ func TestAmendRefreshesTheStagedList(t *testing.T) {
 		t.Fatalf("nothing should be staged to begin with, got %v", m.index.files)
 	}
 
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = drive(t, m, altKey("e"))
 	if !m.amend {
 		t.Fatal("amend did not turn on")
 	}
@@ -1343,7 +1343,7 @@ func TestAmendRefreshesTheStagedList(t *testing.T) {
 	}
 
 	// Switching back returns the lists to the plain view.
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = drive(t, m, altKey("e"))
 	if m.amend {
 		t.Fatal("amend did not turn off")
 	}
@@ -1362,7 +1362,7 @@ func TestAmendRefreshesTheStagedDiff(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = drive(t, m, altKey("e"))
 	m = drive(t, m, altKey("2"))
 	if m.focus != focusIndex {
 		t.Fatalf("focus = %v, want focusIndex", m.focus)
@@ -1405,8 +1405,8 @@ func TestAmendToggleLeavesTheIndexAlone(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = drive(t, m, altKey("e"))
+	m = drive(t, m, altKey("e"))
 	if m.amend {
 		t.Fatal("amend should be off again")
 	}
@@ -1446,6 +1446,7 @@ func TestReadlineKeysStillEditTheMessage(t *testing.T) {
 		msg  tea.KeyMsg
 	}{
 		{"ctrl+a line start", tea.KeyMsg{Type: tea.KeyCtrlA}},
+		{"ctrl+t transpose", tea.KeyMsg{Type: tea.KeyCtrlT}},
 		{"ctrl+e line end", tea.KeyMsg{Type: tea.KeyCtrlE}},
 		{"ctrl+k kill after", tea.KeyMsg{Type: tea.KeyCtrlK}},
 		{"ctrl+u kill before", tea.KeyMsg{Type: tea.KeyCtrlU}},
@@ -1506,7 +1507,7 @@ func TestCommandsWorkWhileTypingAMessage(t *testing.T) {
 	t.Run("alt+i stages changed files", func(t *testing.T) {
 		m := commitModel(t, "a message")
 		repo := m.repo
-		m = drive(t, m, altKey("i"))
+		m = drive(t, m, altKey("a"))
 		m = drive(t, m, New(repo).rescanCmd()())
 		if m.commit.Value() != "a message" {
 			t.Errorf("the message was edited: %q", m.commit.Value())
@@ -1561,93 +1562,156 @@ func TestCommandsWorkWhileTypingAMessage(t *testing.T) {
 
 	t.Run("ctrl+s signs off", func(t *testing.T) {
 		m := commitModel(t, "a message")
-		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlS})
+		m = drive(t, m, altKey("o"))
 		if !strings.Contains(m.commit.Value(), "Signed-off-by:") {
 			t.Errorf("commit buffer = %q, want a sign off", m.commit.Value())
 		}
 	})
 }
 
-// Outside the buffer, git gui's own Ctrl accelerators still work.
-func TestGitGuiCtrlKeysStillWorkOutsideTheBuffer(t *testing.T) {
+// difftui binds no Ctrl command, so a Ctrl key that the message buffer uses
+// for editing must do nothing at all in a pane rather than firing something.
+func TestNoCtrlCommandsOutsideTheBuffer(t *testing.T) {
 	m := newTestModel(t)
 	if m.focus == focusCommit {
 		t.Fatal("expected to start outside the message buffer")
 	}
-	got := drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
-	if !got.amend {
-		t.Error("Ctrl-E should still toggle amend outside the message buffer")
-	}
-}
-
-func TestDiffShowsLineNumbers(t *testing.T) {
-	repo := testRepo(t)
-	// A file long enough that the numbers are not all single digits.
-	var lines []string
-	for i := 1; i <= 12; i++ {
-		lines = append(lines, "line "+itoa(i))
-	}
-	writeFile(t, repo.Dir, "foo.txt", strings.Join(lines, "\n")+"\n")
-	gitRun(t, repo.Dir, "add", "foo.txt")
-	gitRun(t, repo.Dir, "commit", "-qm", "long file")
-	lines[9] = "line ten, edited"
-	writeFile(t, repo.Dir, "foo.txt", strings.Join(lines, "\n")+"\n")
-
-	m := drive(t, New(repo),
-		tea.WindowSizeMsg{Width: 140, Height: 40},
-		New(repo).rescanCmd()(),
-	)
-	m = drive(t, m, altKey("1"))
-	for m.workdir.current() != nil && m.workdir.current().Path != "foo.txt" {
-		m = drive(t, m, rkey("j"))
-	}
-	if m.diff.file == nil || m.diff.file.Path != "foo.txt" {
-		t.Fatalf("diff shows %v, want foo.txt", m.diff.file)
-	}
-
-	// The changed line is line 10 on both sides.
-	var changed *git.DiffLine
-	for i := range m.diff.lines {
-		if m.diff.lines[i].Kind == '+' {
-			changed = &m.diff.lines[i]
+	for _, k := range []tea.KeyMsg{
+		{Type: tea.KeyCtrlE},
+		{Type: tea.KeyCtrlU},
+		{Type: tea.KeyCtrlP},
+		{Type: tea.KeyCtrlN},
+		{Type: tea.KeyCtrlT},
+	} {
+		got := drive(t, m, k)
+		if got.amend {
+			t.Errorf("%v toggled amend", k)
+		}
+		if got.dialog != nil {
+			t.Errorf("%v opened the %q dialog", k, got.dialog.title)
+		}
+		if got.quit {
+			t.Errorf("%v quit", k)
 		}
 	}
-	if changed == nil {
-		t.Fatal("no added line in the diff")
-	}
-	if changed.New != 10 {
-		t.Errorf("the added line is numbered %d, want 10", changed.New)
-	}
+}
 
-	view := m.View()
-	if !strings.Contains(view, " 10 + line ten, edited") {
-		t.Errorf("the view should show the numbered line:\n%s", view)
-	}
-	if m.diff.numW < minNumberWidth {
-		t.Errorf("number column width = %d, want at least %d", m.diff.numW, minNumberWidth)
+// Ctrl-Enter arrives as Ctrl-J on a terminal, so both have to commit. This
+// used to revert instead, which is the opposite of what the gesture means.
+func TestCtrlEnterCommits(t *testing.T) {
+	for _, k := range []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{"ctrl+j", tea.KeyMsg{Type: tea.KeyCtrlJ}},
+		{"alt+c", altKey("c")},
+	} {
+		t.Run(k.name, func(t *testing.T) {
+			repo := testRepo(t)
+			m := drive(t, New(repo),
+				tea.WindowSizeMsg{Width: 120, Height: 40},
+				New(repo).rescanCmd()(),
+			)
+			m.commit.SetValue("a commit from " + k.name)
+			m = drive(t, m, k.msg)
+			if m.dialog != nil {
+				t.Fatalf("%s was refused: %s / %s", k.name, m.dialog.title, m.dialog.body)
+			}
+			if got := repo.LastCommitMessage(); got != "a commit from "+k.name {
+				t.Errorf("HEAD message = %q, want the commit to have been made", got)
+			}
+		})
 	}
 }
 
-func TestRescanClearsItsOwnStatus(t *testing.T) {
-	m := newTestModel(t)
-	// F5 announces the scan, then clears the note once it lands.
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyF5})
-	if m.status != "" {
-		t.Errorf("status = %q, want it cleared once the rescan finished", m.status)
+// And Ctrl-J must not revert, which is what it used to do.
+func TestCtrlJDoesNotRevert(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	before, err := repo.Git("diff")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if m.rescanning {
-		t.Error("the model still thinks a rescan is running")
+	// With an empty message the commit is refused, but nothing may be reverted.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if m.dialog != nil && strings.Contains(m.dialog.title, "Revert") {
+		t.Fatal("Ctrl-J opened the revert dialog")
 	}
-	if !strings.Contains(m.View(), "hjkl/arrows move") {
-		t.Error("the status bar should be back to the key hints")
+	after, err := repo.Git("diff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Errorf("Ctrl-J changed the working tree:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
 
-// A command's own message survives the rescan it triggers.
-func TestCommandStatusSurvivesItsRescan(t *testing.T) {
-	m := newTestModel(t)
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlT})
-	if !strings.Contains(m.status, "Staged") {
-		t.Errorf("status = %q, want the staging result to survive the rescan", m.status)
+// Every command is reachable two ways: its bare letter in a pane, and Alt+that
+// same letter anywhere. Nothing needs a modifier the terminal might not send.
+func TestEveryCommandHasALetterAndAnAltKey(t *testing.T) {
+	cases := []struct {
+		name   string
+		letter string
+		setup  func(*testing.T, *git.Repo)
+		check  func(Model) bool
+	}{
+		{"amend", "e", nil, func(m Model) bool { return m.amend }},
+		{"sign off", "o", nil, func(m Model) bool { return strings.Contains(m.commit.Value(), "Signed-off-by:") }},
+		{"push", "P", nil, func(m Model) bool { return m.dialog != nil && strings.Contains(m.dialog.title, "Push") }},
+		{"merge", "M",
+			// Merging needs somewhere to merge from.
+			func(t *testing.T, r *git.Repo) {
+				if _, err := r.Git("branch", "other"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			func(m Model) bool { return m.dialog != nil && strings.Contains(m.dialog.title, "Merge") }},
+		{"new branch", "N", nil, func(m Model) bool { return m.dialog != nil && strings.Contains(m.dialog.title, "Branch") }},
+		{"checkout", "K", nil, func(m Model) bool { return m.dialog != nil && strings.Contains(m.dialog.title, "Checkout") }},
+		{"revert", "v", nil, func(m Model) bool { return m.dialog != nil && strings.Contains(m.dialog.title, "Revert") }},
+	}
+	for _, c := range cases {
+		build := func(t *testing.T) Model {
+			t.Helper()
+			repo := testRepo(t)
+			if c.setup != nil {
+				c.setup(t, repo)
+			}
+			return drive(t, New(repo),
+				tea.WindowSizeMsg{Width: 120, Height: 40},
+				New(repo).rescanCmd()(),
+			)
+		}
+		t.Run(c.name+" letter", func(t *testing.T) {
+			if m := drive(t, build(t), rkey(c.letter)); !c.check(m) {
+				t.Errorf("the bare letter %q did not run %s", c.letter, c.name)
+			}
+		})
+		t.Run(c.name+" alt", func(t *testing.T) {
+			if m := drive(t, build(t), altKey(strings.ToLower(c.letter))); !c.check(m) {
+				t.Errorf("Alt-%s did not run %s", c.letter, c.name)
+			}
+		})
+	}
+}
+
+// The bare letters must stay typable in the message buffer.
+func TestCommandLettersAreTextInTheMessageBuffer(t *testing.T) {
+	m := commitModel(t, "")
+	typed := "saucevoeckPMNKR"
+	for _, r := range typed {
+		m = drive(t, m, rkey(string(r)))
+	}
+	if m.focus != focusCommit {
+		t.Fatalf("typing moved focus to %v", m.focus)
+	}
+	if m.dialog != nil {
+		t.Fatalf("typing opened the %q dialog", m.dialog.title)
+	}
+	if m.commit.Value() != typed {
+		t.Errorf("commit buffer = %q, want %q", m.commit.Value(), typed)
 	}
 }

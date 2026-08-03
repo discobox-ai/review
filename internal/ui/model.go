@@ -433,9 +433,8 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// still gets to show it.
 	m.clearStatus()
 
-	// Repository commands. These work everywhere, including while a commit
-	// message is being typed, so they avoid every key the message buffer
-	// binds for readline style editing.
+	// Commands. Alt+letter, live everywhere including while typing, because
+	// none of them collide with the message buffer's editing keys.
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m.doQuit()
@@ -461,7 +460,7 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Stage):
 		return m.doStage()
 	case key.Matches(msg, m.keys.StageChanged):
-		return m, op("Stage Changed", true, m.repo.StageChanged)
+		return m, op("Staged all changed files", true, m.repo.StageChanged)
 	case key.Matches(msg, m.keys.Unstage):
 		return m.doUnstage()
 	case key.Matches(msg, m.keys.Revert):
@@ -484,22 +483,6 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.changeContext(-1)
 	case key.Matches(msg, m.keys.MoreContext):
 		return m.changeContext(+1)
-	}
-
-	// git-gui's accelerators for four of those commands are also readline
-	// editing keys, so they are live everywhere except inside the message
-	// buffer, where Ctrl-U, Ctrl-E, Ctrl-P and Ctrl-N have to keep editing.
-	if m.focus != focusCommit {
-		switch {
-		case key.Matches(msg, m.keys.UnstageCtrl):
-			return m.doUnstage()
-		case key.Matches(msg, m.keys.AmendCtrl):
-			return m.toggleAmend()
-		case key.Matches(msg, m.keys.PushCtrl):
-			return m.doPush()
-		case key.Matches(msg, m.keys.BranchCtrl):
-			return m.doCreateBranch()
-		}
 	}
 
 	if m.focus == focusCommit {
@@ -526,19 +509,42 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Unmodified keys. These act on a pane's cursor, so they are only live
-	// while a list or the diff has focus; in the message buffer they are
+	// Pane keys. These act on the focused pane's cursor, so they are live
+	// only in the file lists and the diff; in the message buffer they are
 	// just text.
 	switch {
-	case key.Matches(msg, m.keys.QuitAlt):
+	case key.Matches(msg, m.keys.QuitKey):
 		return m.doQuit()
-	case msg.String() == "?":
+	case key.Matches(msg, m.keys.HelpKey):
 		m.dialog = textDialog("difftui — keys", helpText())
 		return m, nil
+	// Each command's own letter, so nothing here needs Alt at all.
+	case key.Matches(msg, m.keys.StageKey):
+		return m.doStage()
 	case key.Matches(msg, m.keys.StageChangedKey):
-		return m, op("Stage Changed", true, m.repo.StageChanged)
+		return m, op("Staged all changed files", true, m.repo.StageChanged)
+	case key.Matches(msg, m.keys.UnstageKey):
+		return m.doUnstage()
+	case key.Matches(msg, m.keys.RevertKey):
+		return m.doRevert()
+	case key.Matches(msg, m.keys.SignOffKey):
+		return m.doSignOff()
+	case key.Matches(msg, m.keys.AmendKey):
+		return m.toggleAmend()
+	case key.Matches(msg, m.keys.CommitKey):
+		return m.doCommit()
+	case key.Matches(msg, m.keys.PushKey):
+		return m.doPush()
 	case key.Matches(msg, m.keys.MergeKey):
 		return m.doMerge()
+	case key.Matches(msg, m.keys.BranchKey):
+		return m.doCreateBranch()
+	case key.Matches(msg, m.keys.CheckoutKey):
+		return m.doCheckout()
+	case key.Matches(msg, m.keys.RescanKey):
+		m.setOK("Rescanning…")
+		m.rescanning = true
+		return m, m.rescanCmd()
 	case key.Matches(msg, m.keys.Delete):
 		return m.doDelete()
 	case key.Matches(msg, m.keys.LessContextKey):
@@ -811,12 +817,12 @@ func (m Model) diffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Toggle):
 		return m.doStage()
 	}
-	switch msg.String() {
-	case "n":
+	switch {
+	case key.Matches(msg, m.keys.NextHunk):
 		m.diff.jumpHunk(1)
-	case "p":
+	case key.Matches(msg, m.keys.PrevHunk):
 		m.diff.jumpHunk(-1)
-	case "r":
+	case key.Matches(msg, m.keys.RevertHunk):
 		return m.doRevertHunk()
 	}
 	return m, nil
@@ -1380,92 +1386,90 @@ func (m Model) viewStatusBar() string {
 func (m Model) hints() string {
 	switch m.focus {
 	case focusWorkdir:
-		return "hjkl/arrows move · Space stage · Ctrl-J revert · m mark · i stage changed"
+		return "Space stage · m mark · D delete · Alt-A stage all · Alt-C commit · F1 keys"
 	case focusIndex:
-		return "hjkl/arrows move · Space unstage · Ctrl-U unstage · m mark · i stage changed"
+		return "Space unstage · m mark · Alt-A stage all · Alt-C commit · F1 keys"
 	case focusDiff:
 		if m.diff.visual() {
 			n := 1 + max(m.diff.cursor, m.diff.anchor) - min(m.diff.cursor, m.diff.anchor)
-			return fmt.Sprintf("VISUAL LINE  %s · ↑/↓ extend · Space stage/unstage · V or Esc cancel",
+			return fmt.Sprintf("VISUAL LINE  %s · ↑/↓ extend · Space stage · V or Esc cancel",
 				plural(n, "line", "lines"))
 		}
-		return "Space stage hunk · V select lines · L stage line · r revert hunk · n/p hunk · -/= context"
+		return "Space stage hunk · V select lines · L stage line · r revert · n/p hunk · -/= context"
 	case focusAmend:
-		return "Space/Enter toggles Amend Last Commit · ↑/↓ diff and message · Tab next"
+		return "Space or Enter toggles Amend Last Commit · ↑/↓ diff and message · F1 keys"
 	default:
-		return "Alt-C commit · Ctrl-S sign off · Alt-E amend · Alt-I stage changed · F1 help"
+		return "Alt-C commit · Alt-O sign off · Alt-E amend · Alt-A stage all · F1 keys"
 	}
 }
 
 func helpText() string {
 	return strings.Join([]string{
-		"Panes",
-		"  Alt-1  Unstaged Changes      Alt-2  Staged Changes",
-		"  Alt-3  Diff                  Alt-4  Commit Message",
-		"  Tab / Shift-Tab  cycle panes, including the Amend checkbox",
+		"Every command is one letter. Press it in a file list or the diff,",
+		"or Alt+that letter anywhere — including while typing a message,",
+		"where a bare letter would just be text.",
 		"",
-		"  The panes form a grid, and the arrow keys (or h/j/k/l) walk it:",
+		"    s  stage              u  unstage",
+		"    a  stage all changed  v  revert changes",
+		"    c  commit             e  amend last commit",
+		"    o  sign off           R  rescan          (also F5)",
+		"    P  push               M  local merge / abort merge",
+		"    N  new branch         K  checkout branch",
+		"    -  less diff context  =  more diff context",
+		"",
+		"  Ctrl-Enter also commits. Ctrl-C or q quits. F1 or ? shows this.",
+		"",
+		"  Ctrl is left alone entirely, so the commit message keeps every",
+		"  readline key: Ctrl-A, Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W and the rest.",
+		"",
+		"───────────────────────────────────────────────────────────────",
+		"Panes",
+		"",
+		"  Alt-1 unstaged   Alt-2 staged   Alt-3 diff   Alt-4 message",
+		"  Tab / Shift-Tab  cycle, including the Amend checkbox",
+		"",
+		"  Arrows or h/j/k/l move. The panes are a grid, and moving off",
+		"  the edge of one enters the next:",
 		"",
 		"      Unstaged │ Diff",
 		"      ─────────┼────────",
 		"      Staged   │ Commit",
 		"",
-		"  Up or down past the end of a list carries on into the pane above",
-		"  or below it. Right from either list goes to the diff, and left",
-		"  comes back to whichever list the diff is showing, with the same",
-		"  file still selected. In the commit message buffer only the arrow",
-		"  keys move out, and only from the very start of the text, so",
-		"  h/j/k/l stay typable.",
+		"  Right from either list opens the diff; left comes back to",
+		"  whichever list the diff is showing, still on the same file.",
 		"",
-		"Commands  (these work everywhere, including while typing a message)",
-		"  F5, Ctrl-R   Rescan",
-		"  Ctrl-T       Stage To Commit",
-		"  Alt-I        Stage Changed Files To Commit",
-		"  Alt-U        Unstage From Commit",
-		"  Ctrl-J       Revert Changes",
-		"  Ctrl-S       Sign Off",
-		"  Alt-E        Amend Last Commit (or Tab to the checkbox and press",
-		"               Space or Enter)",
-		"  Alt-C, Ctrl-Enter   Commit",
-		"  Alt-P        Push          Alt-M  Local Merge",
-		"  Alt-B        Create Branch Ctrl-O Checkout Branch",
-		"  Alt-- / Alt-=  Show less / more diff context",
+		"───────────────────────────────────────────────────────────────",
+		"On a file, beyond the commands above",
 		"",
-		"  Outside the message buffer, git gui's own keys work too:",
-		"  Ctrl-U unstage, Ctrl-E amend, Ctrl-P push, Ctrl-N create branch,",
-		"  and the plain letters i, M, D, - and =. Inside the buffer those",
-		"  keys stay with the text: Ctrl-A, Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W,",
-		"  Ctrl-D, Ctrl-B, Ctrl-F, Ctrl-N, Ctrl-P and the Alt word motions",
-		"  all edit the message as usual.",
+		"  Space   stage, or unstage from the staged list",
+		"  m       mark a file, so a command acts on several at once",
+		"  D       delete untracked files",
 		"",
-		"File lists",
-		"  Up/Down, j/k  move (loads the diff)",
-		"  Space         stage from the unstaged list, unstage from the staged list",
-		"  m             mark a file so commands act on several at once",
-		"  D             delete untracked files",
+		"───────────────────────────────────────────────────────────────",
+		"In the diff, beyond the commands above",
 		"",
-		"Diff pane",
-		"  Space, Ctrl-T stage the hunk under the cursor",
-		"  Ctrl-U        unstage the hunk under the cursor",
-		"  V             visual line select, like vim: V again or Esc cancels,",
-		"                up/down extend, Space or Enter stages the selection",
-		"  L             stage or unstage just the line under the cursor",
-		"  r             revert the hunk (unstaged side only)",
-		"  n / p         next / previous hunk",
+		"  Space   stage the hunk under the cursor",
+		"  V       select whole lines, like vim: up/down extend, Space",
+		"          stages them, V or Esc cancels",
+		"  L       stage just the line under the cursor",
+		"  r       revert the hunk        n / p  next / previous hunk",
 		"",
-		"Branch and remote",
-		"  Alt-B, Ctrl-N  Create Branch    Ctrl-O  Checkout Branch",
-		"  Alt-M, M       Local Merge / Abort Merge",
-		"  Alt-P, Ctrl-P  Push",
+		"  On the staged side each of these unstages instead.",
 		"",
-		"  Ctrl-Q, Ctrl-C  Quit  (q also quits from a list or the diff)",
+		"───────────────────────────────────────────────────────────────",
+		"Why Alt, and not git gui's Ctrl keys",
 		"",
-		"The commit message is stashed in .git/GITGUI_MSG when you quit and",
-		"backed up to .git/GITGUI_BCK every couple of seconds, so reopening",
-		"picks up where you left off. Those are git gui's own files, so the",
-		"two tools share the buffer. Committing clears them.",
+		"  A terminal cannot deliver most of them. Ctrl-I is Tab, Ctrl-M is",
+		"  Enter, and Ctrl-Enter arrives as Ctrl-J. The rest — Ctrl-A, -E,",
+		"  -K, -U, -W, -D, -B, -F, -N, -P, -T — all edit text in the message",
+		"  buffer, so a Ctrl command layer would break typing.",
 		"",
-		"Ctrl-I and Ctrl-M cannot be told apart from Tab and Enter in a",
-		"terminal, which is why those two commands live on Alt-I and Alt-M.",
+		"  On macOS, Option is not Meta by default, so Alt may arrive as an",
+		"  accented character. Either turn it on — Terminal.app: Settings >",
+		"  Profiles > Keyboard > Use Option as Meta Key; iTerm2: Settings >",
+		"  Profiles > Keys > Left Option key > Esc+ — or just use the bare",
+		"  letters, which need no modifier at all.",
+		"",
+		"  Press Esc to close.",
 	}, "\n")
 }
