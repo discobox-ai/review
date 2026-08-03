@@ -288,6 +288,20 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.focus == focusCommit {
+		// Only the arrow keys leave the message buffer, and only from the
+		// very edge of the text: h/j/k/l have to stay typable here.
+		info := m.commit.LineInfo()
+		atFirstLine := m.commit.Line() == 0 && info.RowOffset == 0
+		switch msg.String() {
+		case "up":
+			if atFirstLine {
+				return m.enterPane(focusDiff, entryBottom)
+			}
+		case "left":
+			if atFirstLine && info.ColumnOffset == 0 {
+				return m.enterPane(focusIndex, entryKeep)
+			}
+		}
 		var cmd tea.Cmd
 		m.commit, cmd = m.commit.Update(msg)
 		return m, cmd
@@ -319,6 +333,91 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.listKey(msg)
 }
 
+// Panes are laid out as a two by two grid, so moving off the edge of one lands
+// on its neighbour:
+//
+//	unstaged │ diff
+//	─────────┼────────
+//	staged   │ commit
+//
+// paneAbove and friends return the neighbour in a direction, or false when
+// there is nothing there.
+func paneAbove(f focusArea) (focusArea, bool) {
+	switch f {
+	case focusIndex:
+		return focusWorkdir, true
+	case focusCommit:
+		return focusDiff, true
+	}
+	return f, false
+}
+
+func paneBelow(f focusArea) (focusArea, bool) {
+	switch f {
+	case focusWorkdir:
+		return focusIndex, true
+	case focusDiff:
+		return focusCommit, true
+	}
+	return f, false
+}
+
+func paneLeft(f focusArea) (focusArea, bool) {
+	switch f {
+	case focusDiff:
+		return focusWorkdir, true
+	case focusCommit:
+		return focusIndex, true
+	}
+	return f, false
+}
+
+func paneRight(f focusArea) (focusArea, bool) {
+	switch f {
+	case focusWorkdir:
+		return focusDiff, true
+	case focusIndex:
+		return focusCommit, true
+	}
+	return f, false
+}
+
+// entry says where the cursor lands when navigation moves into a pane.
+type entry int
+
+const (
+	entryKeep entry = iota
+	entryTop
+	entryBottom
+)
+
+// enterPane focuses a neighbouring pane, placing its cursor at the edge the
+// move arrived from so that continuing to hold the key keeps going the same
+// way.
+func (m Model) enterPane(f focusArea, e entry) (tea.Model, tea.Cmd) {
+	switch f {
+	case focusWorkdir, focusIndex:
+		l := m.workdir
+		if f == focusIndex {
+			l = m.index
+		}
+		switch e {
+		case entryTop:
+			l.moveTo(0)
+		case entryBottom:
+			l.moveTo(len(l.files) - 1)
+		}
+	case focusDiff:
+		switch e {
+		case entryTop:
+			m.diff.moveTo(0)
+		case entryBottom:
+			m.diff.moveTo(len(m.diff.lines) - 1)
+		}
+	}
+	return m.setFocus(f)
+}
+
 func (m Model) setFocus(f focusArea) (tea.Model, tea.Cmd) {
 	m.focus = f
 	if f == focusCommit {
@@ -340,9 +439,32 @@ func (m Model) listKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	moved := true
 	switch {
 	case key.Matches(msg, m.keys.Up):
+		// At the top of a list, carry on into the pane above.
+		if list.cursor <= 0 {
+			if t, ok := paneAbove(m.focus); ok {
+				return m.enterPane(t, entryBottom)
+			}
+			return m, nil
+		}
 		list.move(-1)
 	case key.Matches(msg, m.keys.Down):
+		if list.cursor >= len(list.files)-1 {
+			if t, ok := paneBelow(m.focus); ok {
+				return m.enterPane(t, entryTop)
+			}
+			return m, nil
+		}
 		list.move(1)
+	case key.Matches(msg, m.keys.Left):
+		if t, ok := paneLeft(m.focus); ok {
+			return m.enterPane(t, entryKeep)
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.Right):
+		if t, ok := paneRight(m.focus); ok {
+			return m.enterPane(t, entryKeep)
+		}
+		return m, nil
 	case key.Matches(msg, m.keys.PageUp):
 		list.move(-max(list.height-1, 1))
 	case key.Matches(msg, m.keys.PageDown):
@@ -373,9 +495,31 @@ func (m Model) listKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) diffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Up):
+		if m.diff.cursor <= 0 {
+			if t, ok := paneAbove(m.focus); ok {
+				return m.enterPane(t, entryBottom)
+			}
+			return m, nil
+		}
 		m.diff.move(-1)
 	case key.Matches(msg, m.keys.Down):
+		if m.diff.cursor >= len(m.diff.lines)-1 {
+			if t, ok := paneBelow(m.focus); ok {
+				return m.enterPane(t, entryTop)
+			}
+			return m, nil
+		}
 		m.diff.move(1)
+	case key.Matches(msg, m.keys.Left):
+		if t, ok := paneLeft(m.focus); ok {
+			return m.enterPane(t, entryKeep)
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.Right):
+		if t, ok := paneRight(m.focus); ok {
+			return m.enterPane(t, entryKeep)
+		}
+		return m, nil
 	case key.Matches(msg, m.keys.PageUp):
 		m.diff.move(-max(m.diff.height-1, 1))
 	case key.Matches(msg, m.keys.PageDown):
@@ -949,9 +1093,9 @@ func (m Model) viewStatusBar() string {
 func (m Model) hints() string {
 	switch m.focus {
 	case focusWorkdir:
-		return "Space stage · Ctrl-T stage · Ctrl-J revert · m mark · i stage changed · Tab next pane"
+		return "hjkl/arrows move · Space stage · Ctrl-J revert · m mark · i stage changed"
 	case focusIndex:
-		return "Space unstage · Ctrl-U unstage · m mark · Tab next pane"
+		return "hjkl/arrows move · Space unstage · Ctrl-U unstage · m mark"
 	case focusDiff:
 		return "Space stage hunk · v select lines · S stage lines · r revert hunk · n/p hunk · -/= context"
 	default:
@@ -965,6 +1109,17 @@ func helpText() string {
 		"  Alt-1  Unstaged Changes      Alt-2  Staged Changes",
 		"  Alt-3  Diff                  Alt-4  Commit Message",
 		"  Tab / Shift-Tab  cycle panes",
+		"",
+		"  The panes form a grid, and the arrow keys (or h/j/k/l) walk it:",
+		"",
+		"      Unstaged │ Diff",
+		"      ─────────┼────────",
+		"      Staged   │ Commit",
+		"",
+		"  Up or down past the end of a list carries on into the pane above",
+		"  or below it, and left/right cross between the two columns. In the",
+		"  commit message buffer only the arrow keys move out, and only from",
+		"  the very start of the text, so h/j/k/l stay typable.",
 		"",
 		"Commit",
 		"  F5, Ctrl-R   Rescan",

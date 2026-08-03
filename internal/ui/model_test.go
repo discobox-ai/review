@@ -339,3 +339,173 @@ func TestQuitKeys(t *testing.T) {
 		t.Errorf("commit buffer = %q, want \"q\"", inCommit.commit.Value())
 	}
 }
+
+// key builds a plain rune key message.
+func rkey(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+
+func newTestModel(t *testing.T) Model {
+	t.Helper()
+	repo := testRepo(t)
+	return drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+}
+
+func TestDownAtEndOfListEntersPaneBelow(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1"), Alt: true})
+	if len(m.workdir.files) < 2 {
+		t.Fatalf("need at least 2 unstaged files, got %d", len(m.workdir.files))
+	}
+
+	// Walk to the bottom of the unstaged list; it should not leave yet.
+	for i := 0; i < len(m.workdir.files)-1; i++ {
+		m = drive(t, m, rkey("j"))
+		if m.focus != focusWorkdir {
+			t.Fatalf("left the unstaged list early, at row %d", i+1)
+		}
+	}
+	// One more crosses into the staged list, landing at its top.
+	m = drive(t, m, rkey("j"))
+	if m.focus != focusIndex {
+		t.Fatalf("focus = %v, want focusIndex", m.focus)
+	}
+	if m.index.cursor != 0 {
+		t.Errorf("entered the staged list at row %d, want 0", m.index.cursor)
+	}
+	// The diff should now be showing the staged file.
+	if m.diff.file == nil || m.diff.side != git.SideIndex {
+		t.Error("moving into the staged list did not load its diff")
+	}
+}
+
+func TestUpAtTopOfStagedListEntersPaneAbove(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2"), Alt: true})
+	if m.focus != focusIndex {
+		t.Fatalf("focus = %v, want focusIndex", m.focus)
+	}
+	m = drive(t, m, rkey("k"))
+	if m.focus != focusWorkdir {
+		t.Fatalf("focus = %v, want focusWorkdir", m.focus)
+	}
+	// Coming up from below lands on the last row.
+	if want := len(m.workdir.files) - 1; m.workdir.cursor != want {
+		t.Errorf("entered the unstaged list at row %d, want %d", m.workdir.cursor, want)
+	}
+}
+
+func TestUpAtTopOfUnstagedListStays(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1"), Alt: true})
+	m = drive(t, m, rkey("k"), rkey("k"))
+	if m.focus != focusWorkdir {
+		t.Errorf("focus = %v, want to stay on focusWorkdir", m.focus)
+	}
+	if m.workdir.cursor != 0 {
+		t.Errorf("cursor = %d, want 0", m.workdir.cursor)
+	}
+}
+
+func TestLeftRightCrossColumns(t *testing.T) {
+	base := newTestModel(t)
+	cases := []struct {
+		name  string
+		start focusArea
+		key   string
+		want  focusArea
+	}{
+		{"unstaged right to diff", focusWorkdir, "l", focusDiff},
+		{"staged right to commit", focusIndex, "l", focusCommit},
+		{"diff left to unstaged", focusDiff, "h", focusWorkdir},
+		{"unstaged left stays", focusWorkdir, "h", focusWorkdir},
+		{"staged left stays", focusIndex, "h", focusIndex},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m, _ := base.setFocus(c.start)
+			got := drive(t, m.(Model), rkey(c.key))
+			if got.focus != c.want {
+				t.Errorf("focus = %v, want %v", got.focus, c.want)
+			}
+		})
+	}
+}
+
+func TestArrowKeysNavigateLikeHJKL(t *testing.T) {
+	base := newTestModel(t)
+	m, _ := base.setFocus(focusWorkdir)
+	got := drive(t, m.(Model), tea.KeyMsg{Type: tea.KeyRight})
+	if got.focus != focusDiff {
+		t.Errorf("right arrow: focus = %v, want focusDiff", got.focus)
+	}
+	got = drive(t, got, tea.KeyMsg{Type: tea.KeyLeft})
+	if got.focus != focusWorkdir {
+		t.Errorf("left arrow: focus = %v, want focusWorkdir", got.focus)
+	}
+	got = drive(t, got, tea.KeyMsg{Type: tea.KeyDown})
+	if got.workdir.cursor != 1 {
+		t.Errorf("down arrow: cursor = %d, want 1", got.workdir.cursor)
+	}
+}
+
+func TestDiffPaneDownAtEndEntersCommit(t *testing.T) {
+	base := newTestModel(t)
+	m, _ := base.setFocus(focusWorkdir)
+	mm := drive(t, m.(Model), rkey("l"))
+	if mm.focus != focusDiff {
+		t.Fatalf("focus = %v, want focusDiff", mm.focus)
+	}
+	if len(mm.diff.lines) == 0 {
+		t.Fatal("diff pane is empty")
+	}
+	mm.diff.moveTo(len(mm.diff.lines) - 1)
+	mm = drive(t, mm, rkey("j"))
+	if mm.focus != focusCommit {
+		t.Errorf("focus = %v, want focusCommit", mm.focus)
+	}
+}
+
+func TestCommitBufferEdgeNavigation(t *testing.T) {
+	base := newTestModel(t)
+
+	// Up on the first line leaves for the diff pane.
+	m, _ := base.setFocus(focusCommit)
+	mm := m.(Model)
+	mm.commit.SetValue("")
+	got := drive(t, mm, tea.KeyMsg{Type: tea.KeyUp})
+	if got.focus != focusDiff {
+		t.Errorf("up at the top of the buffer: focus = %v, want focusDiff", got.focus)
+	}
+
+	// Left at the very start leaves for the staged list.
+	got = drive(t, mm, tea.KeyMsg{Type: tea.KeyLeft})
+	if got.focus != focusIndex {
+		t.Errorf("left at the start of the buffer: focus = %v, want focusIndex", got.focus)
+	}
+
+	// But not from the middle of the text.
+	mid := mm
+	mid.commit.SetValue("line one\nline two")
+	got = drive(t, mid, tea.KeyMsg{Type: tea.KeyUp})
+	if got.focus != focusCommit {
+		t.Errorf("up from the second line left the buffer: focus = %v", got.focus)
+	}
+	got = drive(t, mid, tea.KeyMsg{Type: tea.KeyLeft})
+	if got.focus != focusCommit {
+		t.Errorf("left from mid-text left the buffer: focus = %v", got.focus)
+	}
+}
+
+func TestHJKLAreTypableInCommitBuffer(t *testing.T) {
+	base := newTestModel(t)
+	m, _ := base.setFocus(focusCommit)
+	got := m.(Model)
+	for _, r := range "hjkl" {
+		got = drive(t, got, rkey(string(r)))
+	}
+	if got.focus != focusCommit {
+		t.Errorf("typing hjkl changed focus to %v", got.focus)
+	}
+	if got.commit.Value() != "hjkl" {
+		t.Errorf("commit buffer = %q, want \"hjkl\"", got.commit.Value())
+	}
+}

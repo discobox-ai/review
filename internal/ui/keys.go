@@ -36,6 +36,8 @@ type keyMap struct {
 
 	Up       key.Binding
 	Down     key.Binding
+	Left     key.Binding
+	Right    key.Binding
 	PageUp   key.Binding
 	PageDown key.Binding
 	Home     key.Binding
@@ -86,6 +88,8 @@ func newKeyMap() keyMap {
 
 		Up:       key.NewBinding(key.WithKeys("up", "k")),
 		Down:     key.NewBinding(key.WithKeys("down", "j")),
+		Left:     key.NewBinding(key.WithKeys("left", "h")),
+		Right:    key.NewBinding(key.WithKeys("right", "l")),
 		PageUp:   key.NewBinding(key.WithKeys("pgup", "ctrl+b")),
 		PageDown: key.NewBinding(key.WithKeys("pgdown", "ctrl+f")),
 		Home:     key.NewBinding(key.WithKeys("home", "g")),

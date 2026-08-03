@@ -86,6 +86,25 @@ difftui keeps git gui's accelerators wherever a terminal can deliver them.
 | --- | --- |
 | `Alt-1` … `Alt-4` | Focus unstaged / staged / diff / commit message |
 | `Tab`, `Shift-Tab` | Cycle panes |
+| `←` `↓` `↑` `→`, `h` `j` `k` `l` | Move, crossing into the neighbouring pane at the edges |
+
+The four panes form a grid, and navigation walks it:
+
+```
+Unstaged │ Diff
+─────────┼────────
+Staged   │ Commit
+```
+
+Moving down past the last file in **Unstaged Changes** carries on into
+**Staged Changes** at its first row; moving up from the top of the staged list
+goes back to the bottom of the unstaged one. The same applies on the right,
+between the diff and the commit message. `←`/`→` cross between the two
+columns, pairing each left pane with the right pane beside it.
+
+In the commit message buffer only the arrow keys move out, and only from the
+very start of the text (`↑` on the first line, `←` at the first column) — so
+`h`/`j`/`k`/`l` stay typable there.
 
 ### Commit menu
 
@@ -105,7 +124,8 @@ difftui keeps git gui's accelerators wherever a terminal can deliver them.
 
 | Key | Action |
 | --- | --- |
-| `↑`/`↓`, `k`/`j` | Move, loading the diff as you go |
+| `↑`/`↓`, `k`/`j` | Move, loading the diff as you go; leaves the pane at the ends |
+| `←`/`→`, `h`/`l` | Cross to the other column |
 | `Space` | Stage from the unstaged list, unstage from the staged list |
 | `m` | Mark a file, so a command acts on several at once |
 | `D` | Delete untracked files |
@@ -120,6 +140,7 @@ difftui keeps git gui's accelerators wherever a terminal can deliver them.
 | `S` | Stage / Unstage Lines |
 | `r` | Revert Hunk |
 | `n` / `p` | Next / previous hunk |
+| `↑`/`↓`, `k`/`j` | Move by line; `↓` past the end enters the commit message |
 
 ### Branch and remote
 
