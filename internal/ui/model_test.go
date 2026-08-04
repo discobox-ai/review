@@ -169,7 +169,7 @@ func TestStageThroughUI(t *testing.T) {
 	}
 	name := target.Path
 
-	m = drive(t, m, altKey("s"))
+	m = drive(t, m, rkey("s"))
 	m = drive(t, m, New(repo).rescanCmd()())
 
 	for _, f := range m.index.files {
@@ -203,7 +203,7 @@ func TestSignOffAppendsTrailer(t *testing.T) {
 		New(repo).rescanCmd()(),
 	)
 	m.commit.SetValue("do a thing")
-	m = drive(t, m, altKey("o"))
+	m = drive(t, m, rkey("o"))
 
 	got := m.commit.Value()
 	want := "do a thing\n\nSigned-off-by: Test <test@example.com>"
@@ -212,7 +212,7 @@ func TestSignOffAppendsTrailer(t *testing.T) {
 	}
 
 	// A second sign off must not duplicate the trailer.
-	m = drive(t, m, altKey("o"))
+	m = drive(t, m, rkey("o"))
 	if m.commit.Value() != want {
 		t.Errorf("sign off was applied twice:\n%q", m.commit.Value())
 	}
@@ -225,7 +225,7 @@ func TestSignOffJoinsExistingTrailerBlock(t *testing.T) {
 		New(repo).rescanCmd()(),
 	)
 	m.commit.SetValue("subject\n\nCo-authored-by: Someone <a@b.c>")
-	m = drive(t, m, altKey("o"))
+	m = drive(t, m, rkey("o"))
 
 	want := "subject\n\nCo-authored-by: Someone <a@b.c>\nSigned-off-by: Test <test@example.com>"
 	if m.commit.Value() != want {
@@ -240,7 +240,7 @@ func TestCommitWithEmptyMessageIsRefused(t *testing.T) {
 		New(repo).rescanCmd()(),
 	)
 	m.commit.SetValue("   ")
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c"), Alt: true})
+	m = drive(t, m, rkey("c"))
 	if m.dialog == nil {
 		t.Fatal("expected a dialog complaining about the empty message")
 	}
@@ -671,7 +671,7 @@ func TestCommitClearsSavedMessage(t *testing.T) {
 		t.Fatalf("buffer = %q, want the saved message", m.commit.Value())
 	}
 	m.commit.SetValue("a real commit")
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c"), Alt: true})
+	m = drive(t, m, rkey("c"))
 	if m.dialog != nil {
 		t.Fatalf("commit was refused: %s / %s", m.dialog.title, m.dialog.body)
 	}
@@ -730,7 +730,7 @@ func TestAmendLoadsAndRestoresBuffer(t *testing.T) {
 	m.commit.SetValue("work in progress")
 
 	// Ctrl-E turns on amend and pulls in HEAD's message.
-	m = drive(t, m, altKey("e"))
+	m = drive(t, m, rkey("e"))
 	if !m.amend {
 		t.Fatal("Ctrl-E did not turn on amend")
 	}
@@ -745,7 +745,7 @@ func TestAmendLoadsAndRestoresBuffer(t *testing.T) {
 	}
 
 	// Turning it back off restores what was being typed.
-	m = drive(t, m, altKey("e"))
+	m = drive(t, m, rkey("e"))
 	if m.amend {
 		t.Fatal("Ctrl-E did not turn amend back off")
 	}
@@ -762,7 +762,7 @@ func TestAmendMessageIsNotSavedOnQuitAfterABackup(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, altKey("e"))
+	m = drive(t, m, rkey("e"))
 	if !m.amend {
 		t.Fatal("amend was not enabled")
 	}
@@ -793,7 +793,7 @@ func TestAmendMessageIsNotSavedOnQuit(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, altKey("e"))
+	m = drive(t, m, rkey("e"))
 	if !m.amend {
 		t.Fatal("amend was not enabled")
 	}
@@ -815,9 +815,9 @@ func TestAmendCommitRewritesHEAD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m = drive(t, m, altKey("e"))
+	m = drive(t, m, rkey("e"))
 	m.commit.SetValue("initial, reworded")
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c"), Alt: true})
+	m = drive(t, m, rkey("c"))
 	if m.dialog != nil {
 		t.Fatalf("amend commit was refused: %s / %s", m.dialog.title, m.dialog.body)
 	}
@@ -1320,7 +1320,7 @@ func TestAmendRefreshesTheStagedList(t *testing.T) {
 		t.Fatalf("nothing should be staged to begin with, got %v", m.index.files)
 	}
 
-	m = drive(t, m, altKey("e"))
+	m = drive(t, m, rkey("e"))
 	if !m.amend {
 		t.Fatal("amend did not turn on")
 	}
@@ -1343,7 +1343,7 @@ func TestAmendRefreshesTheStagedList(t *testing.T) {
 	}
 
 	// Switching back returns the lists to the plain view.
-	m = drive(t, m, altKey("e"))
+	m = drive(t, m, rkey("e"))
 	if m.amend {
 		t.Fatal("amend did not turn off")
 	}
@@ -1362,7 +1362,7 @@ func TestAmendRefreshesTheStagedDiff(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, altKey("e"))
+	m = drive(t, m, rkey("e"))
 	m = drive(t, m, altKey("2"))
 	if m.focus != focusIndex {
 		t.Fatalf("focus = %v, want focusIndex", m.focus)
@@ -1405,8 +1405,8 @@ func TestAmendToggleLeavesTheIndexAlone(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, altKey("e"))
-	m = drive(t, m, altKey("e"))
+	m = drive(t, m, rkey("e"))
+	m = drive(t, m, rkey("e"))
 	if m.amend {
 		t.Fatal("amend should be off again")
 	}
@@ -1502,69 +1502,39 @@ func TestCtrlEEditsInTheMessageBuffer(t *testing.T) {
 	}
 }
 
-// The command layer is reachable from the message buffer.
-func TestCommandsWorkWhileTypingAMessage(t *testing.T) {
-	t.Run("alt+i stages changed files", func(t *testing.T) {
+// From inside the message buffer, Ctrl-Enter commits and nothing else fires:
+// a letter is text there, and Tab is how you reach a command.
+func TestOnlyCommitIsReachableWhileTyping(t *testing.T) {
+	t.Run("ctrl+enter commits", func(t *testing.T) {
+		m := commitModel(t, "typed then committed")
+		repo := m.repo
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		if m.dialog != nil {
+			t.Fatalf("commit refused: %s / %s", m.dialog.title, m.dialog.body)
+		}
+		if got := repo.LastCommitMessage(); got != "typed then committed" {
+			t.Errorf("HEAD message = %q", got)
+		}
+	})
+
+	t.Run("tab then a letter runs the command", func(t *testing.T) {
 		m := commitModel(t, "a message")
 		repo := m.repo
-		m = drive(t, m, altKey("a"))
-		m = drive(t, m, New(repo).rescanCmd()())
-		if m.commit.Value() != "a message" {
-			t.Errorf("the message was edited: %q", m.commit.Value())
+		// Tab out of the buffer, then the letter works.
+		for m.focus != focusWorkdir {
+			m = drive(t, m, tea.KeyMsg{Type: tea.KeyTab})
 		}
+		m = drive(t, m, rkey("a"))
+		m = drive(t, m, New(repo).rescanCmd()())
 		staged := map[string]bool{}
 		for _, f := range m.index.files {
 			staged[f.Path] = true
 		}
 		if !staged["foo.txt"] {
-			t.Errorf("Alt-I did not stage the modified file; staged = %v", staged)
-		}
-	})
-
-	t.Run("alt+e toggles amend", func(t *testing.T) {
-		m := commitModel(t, "a message")
-		m = drive(t, m, altKey("e"))
-		if !m.amend {
-			t.Error("Alt-E did not switch to amend")
-		}
-	})
-
-	t.Run("alt+u unstages", func(t *testing.T) {
-		m := commitModel(t, "a message")
-		repo := m.repo
-		// bar.txt is staged by the fixture; focus the staged list first.
-		m = drive(t, m, altKey("2"))
-		m = drive(t, m, altKey("4"))
-		m = drive(t, m, altKey("u"))
-		m = drive(t, m, New(repo).rescanCmd()())
-		for _, f := range m.index.files {
-			if f.Path == "bar.txt" {
-				t.Error("Alt-U did not unstage bar.txt")
-			}
-		}
-	})
-
-	t.Run("alt+- and alt+= change context", func(t *testing.T) {
-		m := commitModel(t, "a message")
-		start := m.context
-		m = drive(t, m, altKey("="))
-		if m.context != start+1 {
-			t.Errorf("context = %d, want %d", m.context, start+1)
-		}
-		m = drive(t, m, altKey("-"))
-		if m.context != start {
-			t.Errorf("context = %d, want %d", m.context, start)
+			t.Errorf("the letter did not stage after tabbing out; staged = %v", staged)
 		}
 		if m.commit.Value() != "a message" {
-			t.Errorf("the message was edited: %q", m.commit.Value())
-		}
-	})
-
-	t.Run("ctrl+s signs off", func(t *testing.T) {
-		m := commitModel(t, "a message")
-		m = drive(t, m, altKey("o"))
-		if !strings.Contains(m.commit.Value(), "Signed-off-by:") {
-			t.Errorf("commit buffer = %q, want a sign off", m.commit.Value())
+			t.Errorf("the message was disturbed: %q", m.commit.Value())
 		}
 	})
 }
@@ -1604,7 +1574,7 @@ func TestCtrlEnterCommits(t *testing.T) {
 		msg  tea.KeyMsg
 	}{
 		{"ctrl+j", tea.KeyMsg{Type: tea.KeyCtrlJ}},
-		{"alt+c", altKey("c")},
+		{"alt+c", rkey("c")},
 	} {
 		t.Run(k.name, func(t *testing.T) {
 			repo := testRepo(t)
@@ -1649,9 +1619,8 @@ func TestCtrlJDoesNotRevert(t *testing.T) {
 	}
 }
 
-// Every command is reachable two ways: its bare letter in a pane, and Alt+that
-// same letter anywhere. Nothing needs a modifier the terminal might not send.
-func TestEveryCommandHasALetterAndAnAltKey(t *testing.T) {
+// Every command is reachable by its own letter, with no modifier at all.
+func TestEveryCommandHasALetter(t *testing.T) {
 	cases := []struct {
 		name   string
 		letter string
@@ -1690,11 +1659,7 @@ func TestEveryCommandHasALetterAndAnAltKey(t *testing.T) {
 				t.Errorf("the bare letter %q did not run %s", c.letter, c.name)
 			}
 		})
-		t.Run(c.name+" alt", func(t *testing.T) {
-			if m := drive(t, build(t), altKey(strings.ToLower(c.letter))); !c.check(m) {
-				t.Errorf("Alt-%s did not run %s", c.letter, c.name)
-			}
-		})
+
 	}
 }
 

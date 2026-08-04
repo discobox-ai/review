@@ -2,46 +2,30 @@ package ui
 
 import "github.com/charmbracelet/bubbles/key"
 
-// keyMap follows one rule, so there is nothing to memorise per command:
+// keyMap follows one rule:
 //
-//	Alt+letter   a command. Works everywhere, including while typing a
-//	             commit message.
-//	plain key    acts on the focused pane's cursor. Live only in the file
-//	             lists and the diff, where it is not text.
-//	Ctrl         edits text. difftui binds no Ctrl command at all, so the
-//	             message buffer keeps every readline key.
+//	a letter   runs a command, in the file lists and the diff.
+//	Ctrl       edits text, and is never a command.
 //
-// There are exactly three exceptions, all forced by the terminal:
+// In the commit message a letter is text, so commands are not reachable there
+// — press Tab to leave the buffer first. The one exception is Ctrl-Enter,
+// which commits, because that is the whole reason you were in the buffer. A
+// terminal sends it as 0x0A, byte-identical to Ctrl-J, so both are bound.
 //
-//   - Ctrl-C and Ctrl-Q quit, because every terminal program does.
-//   - Ctrl-J commits. A terminal sends Ctrl-Enter as 0x0A, which is
-//     byte-identical to Ctrl-J, and Ctrl-Enter is the gesture people reach
-//     for. Binding Ctrl-J to anything else makes Ctrl-Enter do that instead.
-//   - F1 shows help and F5 rescans, as they do in git-gui.
+// Alt is used only to jump straight to a pane (Alt-1 to Alt-4); Tab does the
+// same thing without it, which matters on macOS where Option is not Meta
+// unless the terminal is configured for it.
 //
-// git-gui's own accelerators are mostly Ctrl, and a terminal cannot honour
+// git-gui's own accelerators are mostly Ctrl and a terminal cannot honour
 // them: Ctrl-I is Tab, Ctrl-M is Enter, Ctrl-Enter is Ctrl-J, and Ctrl-A,
 // Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W, Ctrl-D, Ctrl-B, Ctrl-F, Ctrl-N, Ctrl-P and
-// Ctrl-T are all readline editing keys in the message buffer. Rather than
-// honour some and quietly break others, every command moved to Alt.
+// Ctrl-T all edit text in the message buffer.
 type keyMap struct {
-	// Commands. Live everywhere.
-	Help         key.Binding
-	Quit         key.Binding
-	Rescan       key.Binding
-	Stage        key.Binding
-	StageChanged key.Binding
-	Unstage      key.Binding
-	Revert       key.Binding
-	SignOff      key.Binding
-	Amend        key.Binding
-	Commit       key.Binding
-	Push         key.Binding
-	Merge        key.Binding
-	Branch       key.Binding
-	Checkout     key.Binding
-	LessContext  key.Binding
-	MoreContext  key.Binding
+	// Live everywhere, including the commit message.
+	Quit   key.Binding
+	Help   key.Binding
+	Commit key.Binding
+	Rescan key.Binding
 
 	FocusWorkdir key.Binding
 	FocusIndex   key.Binding
@@ -50,12 +34,7 @@ type keyMap struct {
 	NextPane     key.Binding
 	PrevPane     key.Binding
 
-	// Pane keys. Live only in the file lists and the diff.
-	//
-	// Every command also has a plain letter here, the same letter as its Alt
-	// binding. Alt is only strictly needed inside the message buffer, where a
-	// letter is text — and on macOS, where Option is not Meta unless the
-	// terminal is configured for it.
+	// Commands. A letter each, live in the file lists and the diff.
 	StageKey        key.Binding
 	StageChangedKey key.Binding
 	UnstageKey      key.Binding
@@ -68,19 +47,18 @@ type keyMap struct {
 	BranchKey       key.Binding
 	CheckoutKey     key.Binding
 	RescanKey       key.Binding
-
-	HelpKey        key.Binding
-	QuitKey        key.Binding
-	Toggle         key.Binding
-	Mark           key.Binding
-	Visual         key.Binding
-	StageLine      key.Binding
-	Delete         key.Binding
-	RevertHunk     key.Binding
-	NextHunk       key.Binding
-	PrevHunk       key.Binding
-	LessContextKey key.Binding
-	MoreContextKey key.Binding
+	HelpKey         key.Binding
+	QuitKey         key.Binding
+	Toggle          key.Binding
+	Mark            key.Binding
+	Visual          key.Binding
+	StageLine       key.Binding
+	Delete          key.Binding
+	RevertHunk      key.Binding
+	NextHunk        key.Binding
+	PrevHunk        key.Binding
+	LessContextKey  key.Binding
+	MoreContextKey  key.Binding
 
 	Up       key.Binding
 	Down     key.Binding
@@ -97,24 +75,13 @@ type keyMap struct {
 
 func newKeyMap() keyMap {
 	return keyMap{
-		Help:   key.NewBinding(key.WithKeys("f1", "alt+h"), key.WithHelp("F1", "help")),
-		Quit:   key.NewBinding(key.WithKeys("ctrl+c", "ctrl+q"), key.WithHelp("Ctrl-C", "quit")),
-		Rescan: key.NewBinding(key.WithKeys("f5", "alt+r"), key.WithHelp("F5", "rescan")),
-
-		Stage:        key.NewBinding(key.WithKeys("alt+s"), key.WithHelp("Alt-S", "stage")),
-		StageChanged: key.NewBinding(key.WithKeys("alt+a"), key.WithHelp("Alt-A", "stage all changed")),
-		Unstage:      key.NewBinding(key.WithKeys("alt+u"), key.WithHelp("Alt-U", "unstage")),
-		Revert:       key.NewBinding(key.WithKeys("alt+v"), key.WithHelp("Alt-V", "revert changes")),
-		SignOff:      key.NewBinding(key.WithKeys("alt+o"), key.WithHelp("Alt-O", "sign off")),
-		Amend:        key.NewBinding(key.WithKeys("alt+e"), key.WithHelp("Alt-E", "amend last commit")),
-		// Ctrl-J is what a terminal sends for Ctrl-Enter.
-		Commit:      key.NewBinding(key.WithKeys("alt+c", "ctrl+j", "ctrl+enter"), key.WithHelp("Alt-C", "commit")),
-		Push:        key.NewBinding(key.WithKeys("alt+p"), key.WithHelp("Alt-P", "push")),
-		Merge:       key.NewBinding(key.WithKeys("alt+m"), key.WithHelp("Alt-M", "local merge")),
-		Branch:      key.NewBinding(key.WithKeys("alt+n"), key.WithHelp("Alt-N", "new branch")),
-		Checkout:    key.NewBinding(key.WithKeys("alt+k"), key.WithHelp("Alt-K", "checkout branch")),
-		LessContext: key.NewBinding(key.WithKeys("alt+-", "alt+_"), key.WithHelp("Alt--", "less context")),
-		MoreContext: key.NewBinding(key.WithKeys("alt+=", "alt++"), key.WithHelp("Alt-=", "more context")),
+		Quit: key.NewBinding(key.WithKeys("ctrl+c", "ctrl+q"), key.WithHelp("Ctrl-C", "quit")),
+		Help: key.NewBinding(key.WithKeys("f1"), key.WithHelp("F1", "help")),
+		// Ctrl-J is what a terminal sends for Ctrl-Enter. This is the only
+		// command reachable from inside the message buffer, and the only one
+		// worth reaching from there.
+		Commit: key.NewBinding(key.WithKeys("ctrl+j", "ctrl+enter"), key.WithHelp("Ctrl-Enter", "commit")),
+		Rescan: key.NewBinding(key.WithKeys("f5"), key.WithHelp("F5", "rescan")),
 
 		FocusWorkdir: key.NewBinding(key.WithKeys("alt+1"), key.WithHelp("Alt-1", "unstaged")),
 		FocusIndex:   key.NewBinding(key.WithKeys("alt+2"), key.WithHelp("Alt-2", "staged")),

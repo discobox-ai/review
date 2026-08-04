@@ -433,14 +433,15 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// still gets to show it.
 	m.clearStatus()
 
-	// Commands. Alt+letter, live everywhere including while typing, because
-	// none of them collide with the message buffer's editing keys.
+	// The only keys that work everywhere, message buffer included.
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m.doQuit()
 	case key.Matches(msg, m.keys.Help):
 		m.dialog = textDialog("difftui — keys", helpText())
 		return m, nil
+	case key.Matches(msg, m.keys.Commit):
+		return m.doCommit()
 	case key.Matches(msg, m.keys.Rescan):
 		m.setOK("Rescanning…")
 		m.rescanning = true
@@ -457,32 +458,6 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.setFocus((m.focus + 1) % focusCount)
 	case key.Matches(msg, m.keys.PrevPane):
 		return m.setFocus((m.focus + focusCount - 1) % focusCount)
-	case key.Matches(msg, m.keys.Stage):
-		return m.doStage()
-	case key.Matches(msg, m.keys.StageChanged):
-		return m, op("Staged all changed files", true, m.repo.StageChanged)
-	case key.Matches(msg, m.keys.Unstage):
-		return m.doUnstage()
-	case key.Matches(msg, m.keys.Revert):
-		return m.doRevert()
-	case key.Matches(msg, m.keys.SignOff):
-		return m.doSignOff()
-	case key.Matches(msg, m.keys.Amend):
-		return m.toggleAmend()
-	case key.Matches(msg, m.keys.Commit):
-		return m.doCommit()
-	case key.Matches(msg, m.keys.Push):
-		return m.doPush()
-	case key.Matches(msg, m.keys.Merge):
-		return m.doMerge()
-	case key.Matches(msg, m.keys.Branch):
-		return m.doCreateBranch()
-	case key.Matches(msg, m.keys.Checkout):
-		return m.doCheckout()
-	case key.Matches(msg, m.keys.LessContext):
-		return m.changeContext(-1)
-	case key.Matches(msg, m.keys.MoreContext):
-		return m.changeContext(+1)
 	}
 
 	if m.focus == focusCommit {
@@ -509,16 +484,15 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Pane keys. These act on the focused pane's cursor, so they are live
-	// only in the file lists and the diff; in the message buffer they are
-	// just text.
+	// Commands. A letter each, live in the file lists and the diff. In the
+	// message buffer a letter is text, so these are not reachable there:
+	// press Tab to leave the buffer first.
 	switch {
 	case key.Matches(msg, m.keys.QuitKey):
 		return m.doQuit()
 	case key.Matches(msg, m.keys.HelpKey):
 		m.dialog = textDialog("difftui — keys", helpText())
 		return m, nil
-	// Each command's own letter, so nothing here needs Alt at all.
 	case key.Matches(msg, m.keys.StageKey):
 		return m.doStage()
 	case key.Matches(msg, m.keys.StageChangedKey):
@@ -533,6 +507,10 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.toggleAmend()
 	case key.Matches(msg, m.keys.CommitKey):
 		return m.doCommit()
+	case key.Matches(msg, m.keys.LessContextKey):
+		return m.changeContext(-1)
+	case key.Matches(msg, m.keys.MoreContextKey):
+		return m.changeContext(+1)
 	case key.Matches(msg, m.keys.PushKey):
 		return m.doPush()
 	case key.Matches(msg, m.keys.MergeKey):
@@ -547,10 +525,6 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.rescanCmd()
 	case key.Matches(msg, m.keys.Delete):
 		return m.doDelete()
-	case key.Matches(msg, m.keys.LessContextKey):
-		return m.changeContext(-1)
-	case key.Matches(msg, m.keys.MoreContextKey):
-		return m.changeContext(+1)
 	}
 
 	if m.focus == focusDiff {
@@ -1386,9 +1360,9 @@ func (m Model) viewStatusBar() string {
 func (m Model) hints() string {
 	switch m.focus {
 	case focusWorkdir:
-		return "Space stage · m mark · D delete · Alt-A stage all · Alt-C commit · F1 keys"
+		return "Space stage · s stage · a stage all · v revert · m mark · c commit · ? keys"
 	case focusIndex:
-		return "Space unstage · m mark · Alt-A stage all · Alt-C commit · F1 keys"
+		return "Space unstage · u unstage · a stage all · m mark · c commit · ? keys"
 	case focusDiff:
 		if m.diff.visual() {
 			n := 1 + max(m.diff.cursor, m.diff.anchor) - min(m.diff.cursor, m.diff.anchor)
@@ -1399,15 +1373,13 @@ func (m Model) hints() string {
 	case focusAmend:
 		return "Space or Enter toggles Amend Last Commit · ↑/↓ diff and message · F1 keys"
 	default:
-		return "Alt-C commit · Alt-O sign off · Alt-E amend · Alt-A stage all · F1 keys"
+		return "Ctrl-Enter commits · Tab leaves the message to run a command · F1 keys"
 	}
 }
 
 func helpText() string {
 	return strings.Join([]string{
-		"Every command is one letter. Press it in a file list or the diff,",
-		"or Alt+that letter anywhere — including while typing a message,",
-		"where a bare letter would just be text.",
+		"Every command is one letter, pressed in a file list or the diff.",
 		"",
 		"    s  stage              u  unstage",
 		"    a  stage all changed  v  revert changes",
@@ -1417,16 +1389,18 @@ func helpText() string {
 		"    N  new branch         K  checkout branch",
 		"    -  less diff context  =  more diff context",
 		"",
-		"  Ctrl-Enter also commits. Ctrl-C or q quits. F1 or ? shows this.",
+		"In the commit message a letter is just text, so press Tab to leave",
+		"the buffer first. Ctrl-Enter commits from anywhere, which is the one",
+		"command worth having without leaving.",
 		"",
-		"  Ctrl is left alone entirely, so the commit message keeps every",
-		"  readline key: Ctrl-A, Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W and the rest.",
+		"Ctrl is never a command, so the message keeps every readline key:",
+		"Ctrl-A, Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W, Ctrl-D and the rest.",
 		"",
 		"───────────────────────────────────────────────────────────────",
 		"Panes",
 		"",
-		"  Alt-1 unstaged   Alt-2 staged   Alt-3 diff   Alt-4 message",
 		"  Tab / Shift-Tab  cycle, including the Amend checkbox",
+		"  Alt-1 unstaged   Alt-2 staged   Alt-3 diff   Alt-4 message",
 		"",
 		"  Arrows or h/j/k/l move. The panes are a grid, and moving off",
 		"  the edge of one enters the next:",
@@ -1444,6 +1418,7 @@ func helpText() string {
 		"  Space   stage, or unstage from the staged list",
 		"  m       mark a file, so a command acts on several at once",
 		"  D       delete untracked files",
+		"  q       quit                    ?  these keys",
 		"",
 		"───────────────────────────────────────────────────────────────",
 		"In the diff, beyond the commands above",
@@ -1457,18 +1432,16 @@ func helpText() string {
 		"  On the staged side each of these unstages instead.",
 		"",
 		"───────────────────────────────────────────────────────────────",
-		"Why Alt, and not git gui's Ctrl keys",
+		"Why letters, and not git gui's Ctrl keys",
 		"",
 		"  A terminal cannot deliver most of them. Ctrl-I is Tab, Ctrl-M is",
 		"  Enter, and Ctrl-Enter arrives as Ctrl-J. The rest — Ctrl-A, -E,",
 		"  -K, -U, -W, -D, -B, -F, -N, -P, -T — all edit text in the message",
 		"  buffer, so a Ctrl command layer would break typing.",
 		"",
-		"  On macOS, Option is not Meta by default, so Alt may arrive as an",
-		"  accented character. Either turn it on — Terminal.app: Settings >",
-		"  Profiles > Keyboard > Use Option as Meta Key; iTerm2: Settings >",
-		"  Profiles > Keys > Left Option key > Esc+ — or just use the bare",
-		"  letters, which need no modifier at all.",
+		"  Letters need no modifier at all, which also avoids macOS, where",
+		"  Option is not Meta unless the terminal is set up for it. Only",
+		"  Alt-1 to Alt-4 use it, and Tab does the same thing.",
 		"",
 		"  Press Esc to close.",
 	}, "\n")
