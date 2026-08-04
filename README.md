@@ -338,6 +338,7 @@ every marked file. With nothing marked they apply to the file under the cursor.
 | Path | Contents |
 | --- | --- |
 | `main.go` | Flag parsing and program startup |
+| `internal/git/system.go` | The whole system boundary: running git, and file access |
 | `internal/git/git.go` | Every git invocation, the file state table and the scan |
 | `internal/git/patch.go` | Unified diff parsing, and building hunk/line patches |
 | `internal/ui/model.go` | The Bubble Tea model: layout, keys, actions |
@@ -350,6 +351,23 @@ every marked file. With nothing marked they apply to the file under the cursor.
 
 Hunk and line staging work by rebuilding a minimal patch and feeding it to
 `git apply --cached`, reversing it to unstage — the same trick git gui uses.
+
+### The system boundary
+
+Everything difftui does outside its own process goes through one interface,
+`git.System` in `internal/git/system.go`: running git, and the few files it
+reads directly because git has no command for them (`MERGE_MSG`, the commit
+template, its own saved commit message). `Local` is the implementation that
+runs git as a child process and reads from the local disk, and `git.OpenWith`
+takes any other.
+
+A test walks the whole module and fails if anything outside `system.go` runs a
+command or touches a file, so the boundary cannot erode by accident. Another
+drives a repository entirely through a fake `System` to show the interface is
+sufficient on its own.
+
+Process I/O — `os.Stderr`, `os.Exit` in `main.go` — is deliberately not behind
+it: it is how difftui talks to its own terminal, not to a repository.
 
 ## Tests
 

@@ -2,35 +2,41 @@
 package git
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// Repo is a handle on a working tree.
+// Repo is a handle on a working tree, reached through a System.
 type Repo struct {
-	Dir    string // absolute path to the top level of the working tree
-	GitDir string // absolute path to the .git directory
+	Dir    string // path to the top level of the working tree
+	GitDir string // path to the .git directory
+
+	sys System
 }
 
-// Open locates the working tree that contains dir.
+// Open locates the working tree that contains dir on the local machine.
 func Open(dir string) (*Repo, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
 	}
-	out, err := run(abs, "rev-parse", "--show-toplevel")
-	if err != nil {
-		return nil, fmt.Errorf("not a git repository: %s", abs)
-	}
-	r := &Repo{Dir: strings.TrimSpace(out)}
+	return OpenWith(Local{}, abs)
+}
 
-	gd, err := run(r.Dir, "rev-parse", "--git-dir")
+// OpenWith locates the working tree that contains dir through sys. Every call
+// the repository goes on to make — running git, reading a file — goes through
+// that same sys, so a different backend needs nothing else.
+func OpenWith(sys System, dir string) (*Repo, error) {
+	out, err := sys.Git(dir, nil, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return nil, fmt.Errorf("not a git repository: %s", dir)
+	}
+	r := &Repo{Dir: strings.TrimSpace(out), sys: sys}
+
+	gd, err := sys.Git(r.Dir, nil, "rev-parse", "--git-dir")
 	if err != nil {
 		return nil, err
 	}
@@ -41,36 +47,13 @@ func Open(dir string) (*Repo, error) {
 	return r, nil
 }
 
-func run(dir string, args ...string) (string, error) {
-	return runInput(dir, nil, args...)
-}
-
-func runInput(dir string, stdin []byte, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	if stdin != nil {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.Env = append(os.Environ(), "GIT_PAGER=cat", "LC_ALL=C")
-	err := cmd.Run()
-	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = strings.TrimSpace(stdout.String())
-		}
-		if msg == "" {
-			msg = err.Error()
-		}
-		return stdout.String(), errors.New(msg)
-	}
-	return stdout.String(), nil
+// run is the repository's own shorthand for a git command with no input.
+func (r *Repo) run(args ...string) (string, error) {
+	return r.sys.Git(r.Dir, nil, args...)
 }
 
 // Git runs an arbitrary git command in the work tree and returns its output.
-func (r *Repo) Git(args ...string) (string, error) { return run(r.Dir, args...) }
+func (r *Repo) Git(args ...string) (string, error) { return r.run(args...) }
 
 // Name is the repository name shown in the window title, as git-gui does it.
 func (r *Repo) Name() string { return filepath.Base(r.Dir) }
@@ -200,7 +183,7 @@ func (r *Repo) Status(parent string) ([]File, error) {
 	}
 
 	// The index side: HEAD (or the amend parent) versus the index.
-	out, err := run(r.Dir, "diff-index", "--cached", "-M",
+	out, err := r.run("diff-index", "--cached", "-M",
 		"--ignore-submodules=dirty", "-z", parent)
 	if err != nil {
 		return nil, err
@@ -214,7 +197,7 @@ func (r *Repo) Status(parent string) ([]File, error) {
 
 	// The working directory side: the index versus the files on disk. This is
 	// the same whether or not we are amending.
-	out, err = run(r.Dir, "diff-files", "--ignore-submodules=dirty", "-z")
+	out, err = r.run("diff-files", "--ignore-submodules=dirty", "-z")
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +206,7 @@ func (r *Repo) Status(parent string) ([]File, error) {
 	})
 
 	// Untracked files show as 'O' on the working directory side.
-	out, err = run(r.Dir, "ls-files", "--others", "--exclude-standard", "-z")
+	out, err = r.run("ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +215,7 @@ func (r *Repo) Status(parent string) ([]File, error) {
 	}
 
 	// Unmerged paths override both sides.
-	out, err = run(r.Dir, "ls-files", "--unmerged", "-z")
+	out, err = r.run("ls-files", "--unmerged", "-z")
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +300,7 @@ func (r *Repo) StatusParent(amend bool) string {
 // amending: HEAD's first parent, or the empty tree when HEAD is the initial
 // commit and there is nothing before it.
 func (r *Repo) AmendParent() string {
-	out, err := run(r.Dir, "rev-list", "--parents", "-n", "1", "HEAD")
+	out, err := r.run("rev-list", "--parents", "-n", "1", "HEAD")
 	if err != nil {
 		return EmptyTree
 	}
@@ -352,10 +335,10 @@ func mapState(x, y byte) State {
 
 // CurrentBranch returns the checked out branch, or a detached HEAD label.
 func (r *Repo) CurrentBranch() string {
-	if out, err := run(r.Dir, "symbolic-ref", "--short", "HEAD"); err == nil {
+	if out, err := r.run("symbolic-ref", "--short", "HEAD"); err == nil {
 		return strings.TrimSpace(out)
 	}
-	if out, err := run(r.Dir, "rev-parse", "--short", "HEAD"); err == nil {
+	if out, err := r.run("rev-parse", "--short", "HEAD"); err == nil {
 		return "(detached " + strings.TrimSpace(out) + ")"
 	}
 	return "(unknown)"
@@ -363,13 +346,13 @@ func (r *Repo) CurrentBranch() string {
 
 // HasHEAD reports whether any commit exists yet.
 func (r *Repo) HasHEAD() bool {
-	_, err := run(r.Dir, "rev-parse", "--verify", "HEAD")
+	_, err := r.run("rev-parse", "--verify", "HEAD")
 	return err == nil
 }
 
 // IsMerging reports whether a merge is in progress (MERGE_HEAD present).
 func (r *Repo) IsMerging() bool {
-	_, err := os.Stat(filepath.Join(r.GitDir, "MERGE_HEAD"))
+	_, err := r.sys.Stat(filepath.Join(r.GitDir, "MERGE_HEAD"))
 	return err == nil
 }
 
@@ -381,7 +364,7 @@ func (r *Repo) MergeMessage() string {
 
 // Branches lists local branch names.
 func (r *Repo) Branches() ([]string, error) {
-	out, err := run(r.Dir, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+	out, err := r.run("for-each-ref", "--format=%(refname:short)", "refs/heads")
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +379,7 @@ func (r *Repo) Branches() ([]string, error) {
 
 // Remotes lists configured remotes.
 func (r *Repo) Remotes() ([]string, error) {
-	out, err := run(r.Dir, "remote")
+	out, err := r.run("remote")
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +407,7 @@ const (
 
 // ReadStateFile reads a file from the git directory.
 func (r *Repo) ReadStateFile(name string) (string, bool) {
-	b, err := os.ReadFile(filepath.Join(r.GitDir, name))
+	b, err := r.sys.ReadFile(filepath.Join(r.GitDir, name))
 	if err != nil {
 		return "", false
 	}
@@ -433,41 +416,37 @@ func (r *Repo) ReadStateFile(name string) (string, bool) {
 
 // WriteStateFile writes a file into the git directory.
 func (r *Repo) WriteStateFile(name, content string) error {
-	return os.WriteFile(filepath.Join(r.GitDir, name), []byte(content), 0o644)
+	return r.sys.WriteFile(filepath.Join(r.GitDir, name), []byte(content))
 }
 
 // RemoveStateFile deletes a file from the git directory, ignoring a missing
 // file.
 func (r *Repo) RemoveStateFile(name string) error {
-	err := os.Remove(filepath.Join(r.GitDir, name))
-	if err != nil && os.IsNotExist(err) {
-		return nil
-	}
-	return err
+	return r.sys.Remove(filepath.Join(r.GitDir, name))
 }
 
 // RenameStateFile moves one git directory file over another.
 func (r *Repo) RenameStateFile(from, to string) error {
-	return os.Rename(filepath.Join(r.GitDir, from), filepath.Join(r.GitDir, to))
+	return r.sys.Rename(filepath.Join(r.GitDir, from), filepath.Join(r.GitDir, to))
 }
 
 // StateFileNewer reports whether a is strictly newer than b. It is false when
 // either file is missing.
 func (r *Repo) StateFileNewer(a, b string) bool {
-	sa, err := os.Stat(filepath.Join(r.GitDir, a))
+	sa, err := r.sys.Stat(filepath.Join(r.GitDir, a))
 	if err != nil {
 		return false
 	}
-	sb, err := os.Stat(filepath.Join(r.GitDir, b))
+	sb, err := r.sys.Stat(filepath.Join(r.GitDir, b))
 	if err != nil {
 		return false
 	}
-	return sa.ModTime().After(sb.ModTime())
+	return sa.ModTime.After(sb.ModTime)
 }
 
 // StateFileExists reports whether a git directory file is present.
 func (r *Repo) StateFileExists(name string) bool {
-	_, err := os.Stat(filepath.Join(r.GitDir, name))
+	_, err := r.sys.Stat(filepath.Join(r.GitDir, name))
 	return err == nil
 }
 
@@ -479,7 +458,7 @@ func (r *Repo) SquashMessage() string {
 
 // CommitTemplate returns the contents of commit.template, if one is set.
 func (r *Repo) CommitTemplate() string {
-	out, err := run(r.Dir, "config", "commit.template")
+	out, err := r.run("config", "commit.template")
 	if err != nil {
 		return ""
 	}
@@ -488,14 +467,14 @@ func (r *Repo) CommitTemplate() string {
 		return ""
 	}
 	if strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
+		if home, err := r.sys.HomeDir(); err == nil {
 			path = filepath.Join(home, path[2:])
 		}
 	}
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(r.Dir, path)
 	}
-	b, err := os.ReadFile(path)
+	b, err := r.sys.ReadFile(path)
 	if err != nil {
 		return ""
 	}
@@ -539,7 +518,7 @@ func (r *Repo) Diff(f File, side Side, context int, parent string) (string, erro
 	} else {
 		args = append(args, "--", f.Path)
 	}
-	out, err := run(r.Dir, args...)
+	out, err := r.run(args...)
 	if err != nil && strings.TrimSpace(out) == "" {
 		return "", err
 	}
@@ -554,16 +533,16 @@ func (r *Repo) Diff(f File, side Side, context int, parent string) (string, erro
 const EmptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 func (r *Repo) untrackedDiff(path, ctx string) (string, error) {
-	info, err := os.Stat(filepath.Join(r.Dir, path))
+	info, err := r.sys.Stat(filepath.Join(r.Dir, path))
 	if err != nil {
 		return "", err
 	}
-	if info.IsDir() {
+	if info.IsDir {
 		return "* " + path + " is a directory.\n", nil
 	}
 	// --no-index exits 1 when files differ, which is the normal case here.
-	out, _ := run(r.Dir, "diff", "--no-color", "--no-ext-diff", ctx,
-		"--no-index", "--", os.DevNull, path)
+	out, _ := r.run("diff", "--no-color", "--no-ext-diff", ctx,
+		"--no-index", "--", r.sys.DevNull(), path)
 	if strings.TrimSpace(out) == "" {
 		return "* " + path + " is empty.\n", nil
 	}
@@ -580,14 +559,14 @@ func (r *Repo) Stage(paths []string) error {
 		return nil
 	}
 	args := append([]string{"add", "--"}, paths...)
-	_, err := run(r.Dir, args...)
+	_, err := r.run(args...)
 	return err
 }
 
 // StageChanged stages every tracked file that was modified or deleted, which
 // is git-gui's "Stage Changed Files To Commit".
 func (r *Repo) StageChanged() error {
-	_, err := run(r.Dir, "add", "--update", "--", ".")
+	_, err := r.run("add", "--update", "--", ".")
 	return err
 }
 
@@ -608,11 +587,11 @@ func (r *Repo) Unstage(paths []string, parent string) error {
 	}
 	if !r.HasHEAD() {
 		args := append([]string{"rm", "--cached", "-r", "-q", "--"}, paths...)
-		_, err := run(r.Dir, args...)
+		_, err := r.run(args...)
 		return err
 	}
 	args := append([]string{"reset", "-q", parent, "--"}, paths...)
-	_, err := run(r.Dir, args...)
+	_, err := r.run(args...)
 	return err
 }
 
@@ -622,14 +601,14 @@ func (r *Repo) Revert(paths []string) error {
 		return nil
 	}
 	args := append([]string{"checkout", "-f", "--"}, paths...)
-	_, err := run(r.Dir, args...)
+	_, err := r.run(args...)
 	return err
 }
 
 // Delete removes untracked files from disk.
 func (r *Repo) Delete(paths []string) error {
 	for _, p := range paths {
-		if err := os.RemoveAll(filepath.Join(r.Dir, p)); err != nil {
+		if err := r.sys.RemoveAll(filepath.Join(r.Dir, p)); err != nil {
 			return err
 		}
 	}
@@ -647,7 +626,7 @@ func (r *Repo) ApplyPatch(patch string, cached, reverse bool) error {
 		args = append(args, "--reverse")
 	}
 	args = append(args, "-")
-	_, err := runInput(r.Dir, []byte(patch), args...)
+	_, err := r.sys.Git(r.Dir, []byte(patch), args...)
 	return err
 }
 
@@ -661,13 +640,13 @@ func (r *Repo) Commit(message string, amend bool) (string, error) {
 	if amend {
 		args = append(args, "--amend")
 	}
-	out, err := runInput(r.Dir, []byte(message), args...)
+	out, err := r.sys.Git(r.Dir, []byte(message), args...)
 	return out, err
 }
 
 // LastCommitMessage returns HEAD's message, used when switching to amend mode.
 func (r *Repo) LastCommitMessage() string {
-	out, err := run(r.Dir, "log", "-1", "--pretty=format:%B")
+	out, err := r.run("log", "-1", "--pretty=format:%B")
 	if err != nil {
 		return ""
 	}
@@ -676,11 +655,11 @@ func (r *Repo) LastCommitMessage() string {
 
 // SignOff returns the "Signed-off-by" trailer for the current committer.
 func (r *Repo) SignOff() (string, error) {
-	name, err := run(r.Dir, "config", "user.name")
+	name, err := r.run("config", "user.name")
 	if err != nil {
 		return "", errors.New("user.name is not set")
 	}
-	email, err := run(r.Dir, "config", "user.email")
+	email, err := r.run("config", "user.email")
 	if err != nil {
 		return "", errors.New("user.email is not set")
 	}
@@ -701,25 +680,25 @@ func (r *Repo) Push(remote, branch string, force, thin bool) (string, error) {
 		args = append(args, "--thin")
 	}
 	args = append(args, remote, branch)
-	return run(r.Dir, args...)
+	return r.run(args...)
 }
 
 // Merge merges a revision into the current branch.
 func (r *Repo) Merge(rev string) (string, error) {
-	return run(r.Dir, "merge", "--no-ff", rev)
+	return r.run("merge", "--no-ff", rev)
 }
 
 // AbortMerge resets a merge in progress.
 func (r *Repo) AbortMerge() (string, error) {
-	return run(r.Dir, "merge", "--abort")
+	return r.run("merge", "--abort")
 }
 
 // Checkout switches branches.
 func (r *Repo) Checkout(branch string) (string, error) {
-	return run(r.Dir, "checkout", branch)
+	return r.run("checkout", branch)
 }
 
 // CreateBranch creates and checks out a new branch.
 func (r *Repo) CreateBranch(name string) (string, error) {
-	return run(r.Dir, "checkout", "-b", name)
+	return r.run("checkout", "-b", name)
 }

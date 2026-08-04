@@ -17,15 +17,15 @@ func testRepo(t *testing.T) *Repo {
 		{"config", "user.email", "test@example.com"},
 		{"config", "commit.gpgsign", "false"},
 	} {
-		if _, err := run(dir, args...); err != nil {
+		if _, err := (Local{}).Git(dir, nil, args...); err != nil {
 			t.Fatalf("git %v: %v", args, err)
 		}
 	}
 	write(t, dir, "foo.txt", "one\ntwo\nthree\nfour\nfive\n")
-	if _, err := run(dir, "add", "foo.txt"); err != nil {
+	if _, err := (Local{}).Git(dir, nil, "add", "foo.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run(dir, "commit", "-q", "-m", "initial"); err != nil {
+	if _, err := (Local{}).Git(dir, nil, "commit", "-q", "-m", "initial"); err != nil {
 		t.Fatal(err)
 	}
 	r, err := Open(dir)
@@ -342,7 +342,7 @@ func TestUnstageWithNoHEAD(t *testing.T) {
 		{"config", "user.name", "Test"},
 		{"config", "user.email", "test@example.com"},
 	} {
-		if _, err := run(dir, args...); err != nil {
+		if _, err := (Local{}).Git(dir, nil, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
