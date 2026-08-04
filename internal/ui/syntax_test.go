@@ -3,11 +3,28 @@ package ui
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/obot-platform/difftui/internal/git"
 )
+
+// Tests run without a terminal, where lipgloss resolves to no colour at all
+// and every style renders as bare text. Pinning a profile makes the rendering
+// deterministic, and is the only way to assert on the diff's bands.
+func init() {
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	lipgloss.SetHasDarkBackground(true)
+}
+
+// plainText strips the styling from a rendered row, for assertions about the
+// text itself rather than its colours.
+func plainText(rendered string) string {
+	text, _ := bgAt(rendered)
+	return string(text)
+}
 
 // spanText returns the source covered by a span, for readable assertions.
 func spanText(line string, s span) string {
@@ -200,9 +217,9 @@ func TestRenderSyntaxLineKeepsWidth(t *testing.T) {
 			if !isCodeLine(l.Kind) {
 				continue
 			}
-			got := renderDiffRow(diffRow{number: lineNumber(l), numW: 3,
+			got := renderDiffRow(diffRow{number: lineNumber(l), numW: 3, numSty: base,
 				gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
-				spans: spans[i], base: base, numFg: colDim,
+				spans: spans[i], base: base, emphSty: base,
 				palette: newSyntaxPalette(), width: width})
 			if w := lipgloss.Width(got); w != width {
 				t.Errorf("width %d: line %q rendered %d cells", width, l.Text, w)
@@ -218,11 +235,11 @@ func TestRenderSyntaxLineKeepsTheText(t *testing.T) {
 		if !isCodeLine(l.Kind) {
 			continue
 		}
-		got := renderDiffRow(diffRow{number: lineNumber(l), numW: 3,
+		got := renderDiffRow(diffRow{number: lineNumber(l), numW: 3, numSty: base,
 			gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
-			spans: spans[i], base: base, numFg: colDim,
+			spans: spans[i], base: base, emphSty: base,
 			palette: newSyntaxPalette(), width: 200})
-		if !strings.Contains(got, strings.TrimSpace(codeText(l.Text))) {
+		if !strings.Contains(plainText(got), strings.TrimSpace(codeText(l.Text))) {
 			t.Errorf("rendered line dropped its text: %q -> %q", l.Text, got)
 		}
 	}
@@ -235,8 +252,8 @@ func TestRenderSyntaxLineWithoutPaletteIsPlain(t *testing.T) {
 		if l.Kind != '+' {
 			continue
 		}
-		row := diffRow{number: lineNumber(l), numW: 3, gutter: diffGutter(l.Kind),
-			code: expandTabs(codeText(l.Text)), base: base, numFg: colDim, width: 60}
+		row := diffRow{number: lineNumber(l), numW: 3, numSty: base, gutter: diffGutter(l.Kind),
+			code: expandTabs(codeText(l.Text)), base: base, emphSty: base, width: 60}
 		plain := renderDiffRow(row)
 		row.spans, row.palette = spans[i], newSyntaxPalette()
 		coloured := renderDiffRow(row)
@@ -282,21 +299,173 @@ func TestRenderedGutterLayout(t *testing.T) {
 		}
 		seen[l.Kind] = renderDiffRow(diffRow{numW: 0,
 			gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
-			spans: spans[i], base: base, numFg: colDim,
+			spans: spans[i], base: base, emphSty: base,
 			palette: newSyntaxPalette(), width: 200})
 	}
+	// Each row opens with the one column cursor/selection bar, blank here,
+	// then the gutter.
 	for kind, want := range map[byte]string{
-		'+': "+ func shiny",
-		'-': " -func old",
-		' ': "  package main",
+		'+': " + func shiny",
+		'-': "  -func old",
+		' ': "   package main",
 	} {
 		got, ok := seen[kind]
 		if !ok {
 			t.Errorf("no %c line rendered", kind)
 			continue
 		}
-		if !strings.HasPrefix(got, want) {
+		if !strings.HasPrefix(plainText(got), want) {
 			t.Errorf("%c line = %q, want it to start with %q", kind, got, want)
 		}
 	}
+}
+
+// bgAt returns the background colour in force at each rune of a rendered row,
+// by replaying the SGR sequences. It is how the band tests check that the
+// diff's colour, the emphasis and the syntax foreground all land together.
+func bgAt(rendered string) (text []rune, bg []string) {
+	cur := ""
+	for i := 0; i < len(rendered); {
+		if rendered[i] == 0x1b {
+			end := strings.IndexByte(rendered[i:], 'm')
+			if end < 0 {
+				break
+			}
+			seq := rendered[i : i+end+1]
+			switch {
+			case strings.Contains(seq, "[0m"):
+				cur = ""
+			case strings.Contains(seq, "48;5;"):
+				n := seq[strings.Index(seq, "48;5;")+5:]
+				n = n[:strings.IndexAny(n, ";m")]
+				cur = n
+			case strings.Contains(seq, "[49m"):
+				cur = ""
+			}
+			i += end + 1
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(rendered[i:])
+		text = append(text, r)
+		bg = append(bg, cur)
+		i += size
+	}
+	return text, bg
+}
+
+// An added line is a green band, with a stronger green over just the
+// characters that changed, while the syntax colours stay in the foreground.
+func TestChangedCharactersGetAStrongerBand(t *testing.T) {
+	raw := `diff --git a/x.go b/x.go
+--- a/x.go
++++ b/x.go
+@@ -1,2 +1,2 @@
+-const prefix = "hello, "
++const prefix = "greetings, "
+`
+	lines, spans := parseAndHighlight(t, "x.go", raw)
+	st := newStyles()
+
+	for _, c := range []struct {
+		kind           byte
+		band, stronger string
+		word           string
+	}{
+		{'+', "22", "28", "greetings"},
+		{'-', "52", "88", "hello"},
+	} {
+		var row string
+		for i, l := range lines {
+			if l.Kind != c.kind {
+				continue
+			}
+			base, emph := st.diffAdd, st.diffAddEmph
+			if c.kind == '-' {
+				base, emph = st.diffDel, st.diffDelEmph
+			}
+			row = renderDiffRow(diffRow{
+				bar: st.body, number: lineNumber(l), numW: 3, numSty: st.dimText,
+				gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
+				spans: spans[i], emph: pairEmphasis(lines, textsOf(lines))[i],
+				base: base, emphSty: emph, palette: st.syntax, width: 60,
+			})
+		}
+		if row == "" {
+			t.Fatalf("no %c line rendered", c.kind)
+		}
+
+		text, bg := bgAt(row)
+		joined := string(text)
+		// The band covers the code and runs to the margin.
+		if !strings.Contains(joined, "const prefix") {
+			t.Fatalf("%c row lost its text: %q", c.kind, joined)
+		}
+		var banded, stronger int
+		for i := range text {
+			switch bg[i] {
+			case c.band:
+				banded++
+			case c.stronger:
+				stronger++
+			}
+		}
+		if banded == 0 {
+			t.Errorf("%c line has no %s band", c.kind, c.band)
+		}
+		if stronger == 0 {
+			t.Errorf("%c line has no %s emphasis", c.kind, c.stronger)
+		}
+		// The changed word, and only it, carries the stronger shade.
+		at := strings.Index(joined, c.word)
+		if at < 0 {
+			t.Fatalf("%c line is missing %q", c.kind, c.word)
+		}
+		for i := at; i < at+len([]rune(c.word)); i++ {
+			if bg[i] != c.stronger {
+				t.Errorf("%c line: %q at %d has bg %q, want %q", c.kind, string(text[i]), i, bg[i], c.stronger)
+			}
+		}
+		if bg[at-1] != c.band {
+			t.Errorf("%c line: the character before %q has bg %q, want the plain band %q",
+				c.kind, c.word, bg[at-1], c.band)
+		}
+		// Syntax highlighting survives on top of the band.
+		if !strings.Contains(row, "38;5;") {
+			t.Errorf("%c line lost its syntax foreground", c.kind)
+		}
+	}
+}
+
+// A context line has no band at all, so unchanged code reads as plain text.
+func TestContextLinesHaveNoBand(t *testing.T) {
+	lines, spans := parseAndHighlight(t, "x.go", goDiff)
+	st := newStyles()
+	for i, l := range lines {
+		if l.Kind != ' ' {
+			continue
+		}
+		row := renderDiffRow(diffRow{
+			bar: st.body, number: lineNumber(l), numW: 3, numSty: st.dimText,
+			gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
+			spans: spans[i], base: st.body, emphSty: st.body,
+			palette: st.syntax, width: 60,
+		})
+		if strings.Contains(row, "48;5;") {
+			t.Errorf("context line %q has a background: %q", l.Text, row)
+		}
+		return
+	}
+}
+
+// textsOf expands every line the way the diff pane does.
+func textsOf(lines []git.DiffLine) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		if isCodeLine(l.Kind) {
+			out[i] = expandTabs(codeText(l.Text))
+		} else {
+			out[i] = l.Text
+		}
+	}
+	return out
 }

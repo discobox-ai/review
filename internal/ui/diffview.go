@@ -230,45 +230,51 @@ func (d *diffView) view(st *styles, focused bool) string {
 	}
 	for i := d.offset; i < len(d.lines) && len(rows) < d.height; i++ {
 		l := d.lines[i]
-		var style lipgloss.Style
-		switch l.Kind {
-		case '+':
-			style = st.diffAdd
-		case '-':
-			style = st.diffDel
-		case '@':
-			style = st.diffHunk
-		case 'h', '\\':
-			style = st.diffMeta
-		default:
-			style = st.body
-		}
+
+		// The cursor and the selection live in the left edge bar, leaving the
+		// background free to carry the diff itself.
+		cursor := i == d.cursor && focused
+		selected := d.inSelection(i)
+		bar := st.body
 		switch {
-		case d.inSelection(i) && focused:
-			style = style.Background(colSelBG)
-		case d.inSelection(i):
-			style = style.Background(colInactive)
-		case i == d.cursor && focused:
-			style = style.Background(colSelBG)
+		case cursor:
+			bar = st.cursorBar
+		case selected:
+			bar = st.selectBar
 		}
-		if isCodeLine(l.Kind) {
+		numSty := st.dimText
+		if cursor {
+			numSty = st.numberOn
+		}
+
+		if !isCodeLine(l.Kind) {
+			style := st.diffMeta
+			if l.Kind == '@' {
+				style = st.diffHunk
+			}
 			rows = append(rows, renderDiffRow(diffRow{
-				number:  lineNumber(l),
-				numW:    d.numW,
-				gutter:  diffGutter(l.Kind),
-				code:    d.texts[i],
-				spans:   d.spanAt(i),
-				emph:    d.emphAt(i),
-				base:    style,
-				numFg:   colDim,
-				palette: st.syntax,
-				width:   d.width,
+				bar: bar, numW: d.numW, numSty: numSty,
+				gutter: "", code: l.Text, base: style, emphSty: style,
+				width: d.width,
 			}))
 			continue
 		}
-		// Metadata lines are indented past the number column so the code stays
-		// in one straight edge.
-		rows = append(rows, style.Render(pad(strings.Repeat(" ", d.numW+1)+l.Text, d.width)))
+
+		base, emphSty := st.body, st.body
+		switch l.Kind {
+		case '+':
+			base, emphSty = st.diffAdd, st.diffAddEmph
+		case '-':
+			base, emphSty = st.diffDel, st.diffDelEmph
+		}
+		rows = append(rows, renderDiffRow(diffRow{
+			bar:    bar,
+			number: lineNumber(l), numW: d.numW, numSty: numSty,
+			gutter: diffGutter(l.Kind), code: d.texts[i],
+			spans: d.spanAt(i), emph: d.emphAt(i),
+			base: base, emphSty: emphSty,
+			palette: st.syntax, width: d.width,
+		}))
 	}
 	for len(rows) < d.height {
 		rows = append(rows, strings.Repeat(" ", max(d.width, 0)))
@@ -339,37 +345,43 @@ func diffGutter(kind byte) string {
 
 // diffRow is everything needed to draw one line of code in the diff pane.
 type diffRow struct {
-	number  int    // line number, 0 to leave the column blank
-	numW    int    // width of the number column
+	bar     lipgloss.Style // the one column cursor/selection bar at the left
+	number  int            // line number, 0 to leave the column blank
+	numW    int            // width of the number column
+	numSty  lipgloss.Style
 	gutter  string // the two column +/- marker
 	code    string // the line's text, tabs already expanded
 	spans   []span
 	emph    emphasis
-	base    lipgloss.Style
-	numFg   lipgloss.TerminalColor
+	base    lipgloss.Style // the line's band: a background, or none for context
+	emphSty lipgloss.Style // the stronger band for the characters that changed
 	palette syntaxPalette
 	width   int
 }
 
 // renderDiffRow draws one line as
 //
-//	[number][ ][gutter][code, padded to the pane width]
+//	[bar][number][ ][gutter][code, padded to the pane width]
 //
-// resolving three independent channels at each position: the line's own
-// add/remove colour, the syntax colour of the token under it, and whether this
-// is the part of the line that actually changed. The first two are colours and
-// combine; the third is rendered bold rather than as a background, because the
-// background is already spoken for by the cursor and the visual selection.
+// resolving three channels at once. The background says what the diff did:
+// a band across added and removed lines, a stronger shade over the characters
+// that actually changed. The foreground says what the code is, from the
+// lexer. And the bar at the left edge says where the cursor is and what is
+// selected — it lives outside the code because the background it would
+// otherwise use is already carrying the diff.
 func renderDiffRow(r diffRow) string {
 	if r.width <= 0 {
 		return ""
 	}
 
-	// The number sits in the line's own background so the cursor highlight
-	// covers the whole row, but in a quiet foreground: it is not part of the
-	// file.
 	var b strings.Builder
-	used := 0
+	// The bar column is always drawn, blank when the row is neither the
+	// cursor nor selected, so rows never shift sideways.
+	b.WriteString(r.bar.Render(" "))
+	used := 1
+	if used >= r.width {
+		return truncateANSI(b.String(), r.width)
+	}
 	if r.numW > 0 {
 		numText := strings.Repeat(" ", r.numW)
 		if r.number > 0 {
@@ -379,8 +391,8 @@ func renderDiffRow(r diffRow) string {
 			}
 			numText = n
 		}
-		b.WriteString(r.base.Foreground(r.numFg).Render(numText + " "))
-		used = runewidth.StringWidth(numText) + 1
+		b.WriteString(r.numSty.Render(numText + " "))
+		used += runewidth.StringWidth(numText) + 1
 		if used >= r.width {
 			return truncateANSI(b.String(), r.width)
 		}
@@ -399,16 +411,16 @@ func renderDiffRow(r diffRow) string {
 			fg[at] = value
 		}
 	}
-	bold := make([]bool, len(runes))
+	changed := make([]bool, len(runes))
 	if !r.emph.empty() {
 		for at := max(r.emph.start+offset, 0); at < r.emph.end+offset && at < len(runes); at++ {
-			bold[at] = true
+			changed[at] = true
 		}
 	}
 
 	type appearance struct {
-		fg   lipgloss.TerminalColor
-		bold bool
+		fg      lipgloss.TerminalColor
+		changed bool
 	}
 	var buf []rune
 	var current appearance
@@ -417,11 +429,11 @@ func renderDiffRow(r diffRow) string {
 			return
 		}
 		style := r.base
+		if current.changed {
+			style = r.emphSty
+		}
 		if current.fg != nil {
 			style = style.Foreground(current.fg)
-		}
-		if current.bold {
-			style = style.Bold(true)
 		}
 		b.WriteString(style.Render(string(buf)))
 		buf = buf[:0]
@@ -434,7 +446,7 @@ func renderDiffRow(r diffRow) string {
 			truncated = true
 			break
 		}
-		next := appearance{fg: fg[at], bold: bold[at]}
+		next := appearance{fg: fg[at], changed: changed[at]}
 		if next != current {
 			flush()
 			current = next
@@ -447,6 +459,8 @@ func renderDiffRow(r diffRow) string {
 		b.WriteString(r.base.Render("…"))
 		used++
 	}
+	// The band runs to the right margin, so a changed line reads as a solid
+	// block rather than as ragged text.
 	if used < r.width {
 		b.WriteString(r.base.Render(strings.Repeat(" ", r.width-used)))
 	}

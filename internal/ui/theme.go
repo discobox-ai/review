@@ -15,10 +15,19 @@ var (
 	colInactive = lipgloss.Color("236")
 	colAdd      = lipgloss.Color("77")
 	colDel      = lipgloss.Color("203")
-	colHunk     = lipgloss.Color("111")
-	colWarn     = lipgloss.Color("214")
-	colErr      = lipgloss.Color("196")
-	colOK       = lipgloss.Color("83")
+
+	// Diff bands. A changed line carries its colour as a background, and the
+	// characters that actually changed carry a stronger shade of it, so both
+	// read at once without touching the foreground — which belongs to the
+	// syntax highlighting.
+	colAddBg     = lipgloss.AdaptiveColor{Dark: "22", Light: "194"}
+	colAddEmphBg = lipgloss.AdaptiveColor{Dark: "28", Light: "157"}
+	colDelBg     = lipgloss.AdaptiveColor{Dark: "52", Light: "224"}
+	colDelEmphBg = lipgloss.AdaptiveColor{Dark: "88", Light: "217"}
+	colHunk      = lipgloss.Color("111")
+	colWarn      = lipgloss.Color("214")
+	colErr       = lipgloss.Color("196")
+	colOK        = lipgloss.Color("83")
 )
 
 type styles struct {
@@ -40,10 +49,18 @@ type styles struct {
 	statusWA lipgloss.Style
 	statusER lipgloss.Style
 
-	diffAdd  lipgloss.Style
-	diffDel  lipgloss.Style
-	diffHunk lipgloss.Style
-	diffMeta lipgloss.Style
+	diffAdd     lipgloss.Style
+	diffAddEmph lipgloss.Style
+	diffDel     lipgloss.Style
+	diffDelEmph lipgloss.Style
+	diffHunk    lipgloss.Style
+	diffMeta    lipgloss.Style
+
+	// The cursor and the visual selection live in a one column bar at the
+	// left edge, because the background is spoken for by the diff.
+	cursorBar lipgloss.Style
+	selectBar lipgloss.Style
+	numberOn  lipgloss.Style
 
 	button      lipgloss.Style
 	buttonFocus lipgloss.Style
@@ -77,8 +94,13 @@ func newStyles() *styles {
 	s.statusWA = lipgloss.NewStyle().Foreground(colWarn)
 	s.statusER = lipgloss.NewStyle().Foreground(colErr)
 
-	s.diffAdd = lipgloss.NewStyle().Foreground(colAdd)
-	s.diffDel = lipgloss.NewStyle().Foreground(colDel)
+	s.diffAdd = lipgloss.NewStyle().Background(colAddBg)
+	s.diffAddEmph = lipgloss.NewStyle().Background(colAddEmphBg)
+	s.diffDel = lipgloss.NewStyle().Background(colDelBg)
+	s.diffDelEmph = lipgloss.NewStyle().Background(colDelEmphBg)
+	s.cursorBar = lipgloss.NewStyle().Background(colGold)
+	s.selectBar = lipgloss.NewStyle().Background(colSelBG)
+	s.numberOn = lipgloss.NewStyle().Foreground(colGold).Bold(true)
 	s.diffHunk = lipgloss.NewStyle().Foreground(colHunk).Bold(true)
 	s.diffMeta = lipgloss.NewStyle().Foreground(colDim)
 

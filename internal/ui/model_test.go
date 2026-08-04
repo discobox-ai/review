@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/obot-platform/difftui/internal/git"
 )
 
@@ -1678,5 +1679,63 @@ func TestCommandLettersAreTextInTheMessageBuffer(t *testing.T) {
 	}
 	if m.commit.Value() != typed {
 		t.Errorf("commit buffer = %q, want %q", m.commit.Value(), typed)
+	}
+}
+
+// The cursor and the visual selection live in the left edge bar, so they never
+// compete with the diff's own background.
+func TestCursorAndSelectionUseTheEdgeBar(t *testing.T) {
+	m := cursorTo(t, diffModel(t), '+')
+	st := m.st
+
+	// The bar column is always present, so rows never shift sideways.
+	widths := map[int]bool{}
+	for _, row := range strings.Split(m.View(), "\n") {
+		widths[lipgloss.Width(row)] = true
+	}
+	if len(widths) != 1 {
+		t.Errorf("rows have differing widths: %v", widths)
+	}
+
+	before := m.View()
+	m = drive(t, m, rkey("V"), rkey("j"))
+	after := m.View()
+	if before == after {
+		t.Fatal("selecting changed nothing on screen")
+	}
+	widths = map[int]bool{}
+	for _, row := range strings.Split(after, "\n") {
+		widths[lipgloss.Width(row)] = true
+	}
+	if len(widths) != 1 {
+		t.Errorf("selecting changed row widths: %v", widths)
+	}
+
+	// The two bar colours are distinct, so cursor and selection read apart.
+	if st.cursorBar.GetBackground() == st.selectBar.GetBackground() {
+		t.Error("the cursor and selection bars are the same colour")
+	}
+	// And neither is a diff band colour, so they cannot be confused with one.
+	for _, band := range []lipgloss.Style{st.diffAdd, st.diffAddEmph, st.diffDel, st.diffDelEmph} {
+		if st.cursorBar.GetBackground() == band.GetBackground() {
+			t.Error("the cursor bar shares a colour with a diff band")
+		}
+	}
+}
+
+// Bands must not leak into the file lists or the commit area.
+func TestBandsAreConfinedToTheDiff(t *testing.T) {
+	m := diffModel(t)
+	view := strings.Split(m.View(), "\n")
+	if len(view) < 4 {
+		t.Fatal("view too short")
+	}
+	// The branch bar and the status bar carry no diff colours.
+	for _, i := range []int{0, len(view) - 1} {
+		for _, band := range []string{"48;5;22m", "48;5;52m", "48;5;28m", "48;5;88m"} {
+			if strings.Contains(view[i], band) {
+				t.Errorf("row %d has a diff band: %q", i, view[i])
+			}
+		}
 	}
 }

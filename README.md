@@ -184,6 +184,79 @@ by the terminal itself, so it cannot be bound at all.) The only `Alt` bindings
 left are `Alt-1` … `Alt-4` for jumping straight to a pane, and `Tab` does the
 same thing without them.
 
+## How a diff is drawn
+
+Four things are shown at once, on channels that do not fight each other.
+
+**The background is the diff.** An added line is a green band, a removed line a
+red one, running to the right margin so changes read as solid blocks. Context
+lines have no band at all.
+
+**A stronger shade marks what actually changed.** When a run of removed lines is
+followed by an equally long run of added ones, that is an edit of those lines in
+order, and the characters that differ get a brighter shade of the same colour:
+
+```
+  6  -    const prefix = "hello, "         ← "hello" on a brighter red
+  6 +     const prefix = "greetings, "     ← "greetings" on a brighter green
+```
+
+Anything else is a pure insertion or deletion, where there is no counterpart to
+compare against and nothing to mark. It is also dropped when more than half the
+line changed — at that point the whole line is the change, and marking it says
+nothing.
+
+**The foreground is the code**, syntax highlighted with
+[chroma](https://github.com/alecthomas/chroma). Two details make it read well
+rather than just colourful:
+
+- Each side of a hunk is lexed as one text — context plus removed lines for the
+  old side, context plus added lines for the new one. A lexer is a state
+  machine, so fed one line at a time it restarts on every line and anything
+  spanning lines (block comments, raw strings) is coloured as though it began
+  where it did not.
+- The palette is short and deliberately quiet. Keywords, types, literals and
+  comments are coloured; plain identifiers and punctuation keep the default
+  foreground, because colouring everything emphasises nothing. The colours also
+  stay clear of the bands, so a string never lands green-on-green.
+
+Files chroma does not recognise are shown plain, rather than run through a
+fallback lexer that would colour nothing.
+
+**The cursor and the selection live in a one column bar at the left edge**,
+outside the code. The background is already carrying the diff, so a cursor
+highlight drawn that way would fight it: gold marks the cursor row, blue marks
+the rows in a `V` selection, and the bar column is always present so rows never
+shift sideways.
+
+### The gutter
+
+A unified diff puts `+` and `-` in the same column, so an added line's code
+starts immediately after its marker. difftui gives each side a column of its
+own:
+
+```
+  context
+ -removed
++ added
+```
+
+An addition always has a space between the marker and the code, so the line
+reads like the file itself rather than like a patch. A deletion sits tight
+against its marker instead — which costs little, since the removed side is the
+one you skim.
+
+### Line numbers and tabs
+
+Each line is numbered on its own side — the old number for a removal, the new
+one for an addition — in a column sized to the largest number in the diff so it
+does not jitter.
+
+Tabs are expanded to four columns before anything measures, tokenises or
+highlights a line, so the syntax offsets, the emphasis offsets and the padding
+all count the same columns. It also stops a tab rendering as an unpainted gap
+in the middle of a band.
+
 ## Amending
 
 The `[ ] Amend Last Commit` checkbox in the commit message header is git gui's.
@@ -255,7 +328,9 @@ every marked file. With nothing marked they apply to the file under the cursor.
 | `internal/git/patch.go` | Unified diff parsing, and building hunk/line patches |
 | `internal/ui/model.go` | The Bubble Tea model: layout, keys, actions |
 | `internal/ui/filelist.go` | The two file panes |
-| `internal/ui/diffview.go` | The diff pane, hunk cursor and line selection |
+| `internal/ui/diffview.go` | The diff pane, hunk cursor, line selection and row drawing |
+| `internal/ui/syntax.go` | Lexing a hunk and the syntax palette |
+| `internal/ui/emphasis.go` | Tabs, and finding the characters that changed |
 | `internal/ui/syntax.go` | Lexing a hunk and the highlighting palette |
 | `internal/ui/dialog.go` | The modal layer standing in for git gui's popups |
 
