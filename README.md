@@ -82,9 +82,7 @@ difftui keeps git gui's accelerators wherever a terminal can deliver them.
 
 ### One rule
 
-Every command is **one letter**. Press it in a file list or the diff, or
-**Alt + that same letter** anywhere — including while typing a commit message,
-where a bare letter would just be text.
+Every command is **one letter**, pressed in a file list or the diff.
 
 | | | | |
 | --- | --- | --- | --- |
@@ -96,22 +94,24 @@ where a bare letter would just be text.
 | `N` | new branch | `K` | checkout branch |
 | `-` | less diff context | `=` | more diff context |
 
-`Ctrl-Enter` also commits. `Ctrl-C` or `q` quits. `F1` or `?` shows the keys.
+In the commit message a letter is just text, so press `Tab` to leave the buffer
+first. **`Ctrl-Enter` commits from anywhere** — the one command worth having
+without leaving. `Ctrl-C` or `q` quits, `F1` or `?` shows the keys.
 
-**Ctrl is left alone entirely.** No command uses it, so the commit message keeps
-every readline key: `Ctrl-A`, `Ctrl-E`, `Ctrl-K`, `Ctrl-U`, `Ctrl-W`, `Ctrl-D`,
-`Ctrl-B`, `Ctrl-F`, `Ctrl-N`, `Ctrl-P`, `Ctrl-T`.
+**Ctrl is never a command.** The commit message keeps every readline key:
+`Ctrl-A`, `Ctrl-E`, `Ctrl-K`, `Ctrl-U`, `Ctrl-W`, `Ctrl-D`, `Ctrl-B`, `Ctrl-F`,
+`Ctrl-N`, `Ctrl-P`, `Ctrl-T`.
 
 ### Panes
 
 | Key | Action |
 | --- | --- |
-| `Alt-1` … `Alt-4` | Focus unstaged / staged / diff / commit message |
 | `Tab`, `Shift-Tab` | Cycle focus, including the Amend checkbox |
+| `Alt-1` … `Alt-4` | Jump straight to unstaged / staged / diff / message |
 | `←` `↓` `↑` `→`, `h` `j` `k` `l` | Move, crossing into the neighbouring pane at the edges |
 
 On startup the first file in **Unstaged Changes** is focused with its diff
-already loaded, so the letters are live immediately.
+already loaded, so the command letters are live immediately.
 
 The four panes form a grid, and navigation walks it:
 
@@ -164,7 +164,7 @@ the file lists.
 While a selection is open the status bar switches to say so, counting the lines,
 and the cursor stays inside the diff rather than running off into the next pane.
 
-### Why Alt, and not git gui's Ctrl keys
+### Why letters, and not git gui's Ctrl keys
 
 A terminal cannot deliver most of them:
 
@@ -175,15 +175,14 @@ A terminal cannot deliver most of them:
   all readline editing keys in the message buffer.
 
 Honouring some and silently breaking the others is worse than moving them all,
-so every command is a letter, with Alt as the modifier for reaching it from
-inside the message buffer.
+so commands are bare letters.
 
-**On macOS**, Option is not Meta by default, so `Alt-S` may arrive as `ß` rather
-than a command. Either turn it on — Terminal.app: Settings → Profiles →
-Keyboard → *Use Option as Meta Key*; iTerm2: Settings → Profiles → Keys → Left
-Option key → *Esc+* — or simply use the bare letters, which need no modifier at
-all. Option never maps to Cmd, and Cmd is intercepted by the terminal itself, so
-it cannot be used for bindings.
+Letters also need no modifier, which sidesteps macOS: Option is not Meta there
+unless the terminal is configured for it, so an `Alt`-based scheme would arrive
+as accented characters. (Option never maps to Cmd either, and Cmd is intercepted
+by the terminal itself, so it cannot be bound at all.) The only `Alt` bindings
+left are `Alt-1` … `Alt-4` for jumping straight to a pane, and `Tab` does the
+same thing without them.
 
 ## Amending
 
