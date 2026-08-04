@@ -50,12 +50,16 @@ The window reproduces git gui's paned layout exactly:
 
 | Region | Contents |
 | --- | --- |
-| Top bar | `Current Branch: <name>` |
+| Top bar | `Current Branch: <name>`, and `[amending]` when that is on |
 | Left, upper | **Unstaged Changes** — the working directory vs the index |
 | Left, lower | **Staged Changes (Will Commit)** — the index vs HEAD |
-| Right, upper | The diff for the selected file, with its status in the header |
-| Right, lower | The button column beside the commit message buffer |
+| Right | The diff for the selected file, with its status in the header |
 | Bottom bar | Status messages, file counts, current diff context |
+
+git gui keeps a commit message buffer and a column of buttons on screen at all
+times. Here the message is a composer that opens on `Ctrl-Enter` (see
+[Committing](#committing)) and the buttons are just keys, so the diff gets the
+whole right hand column.
 
 Files are routed to the two lists using git gui's own rule: a path appears in
 the staged list when its index status is neither unmodified nor unmerged, and
@@ -88,26 +92,43 @@ Every command is **one letter**, pressed in a file list or the diff.
 | --- | --- | --- | --- |
 | `s` | stage | `u` | unstage |
 | `a` | stage all changed | `v` | revert changes |
-| `c` | commit | `e` | amend last commit |
-| `o` | sign off | `R` | rescan (also `F5`) |
+| `o` | sign off | `e` | amend last commit |
+| `R` | rescan (also `F5`) | `-` / `=` | less / more diff context |
 | `P` | push | `M` | local merge / abort merge |
 | `N` | new branch | `K` | checkout branch |
-| `-` | less diff context | `=` | more diff context |
 
-In the commit message a letter is just text, so press `Tab` to leave the buffer
-first. **`Ctrl-Enter` commits from anywhere** — the one command worth having
-without leaving. `Ctrl-C` or `q` quits, `F1` or `?` shows the keys.
+`Ctrl-Enter` writes a commit. `Ctrl-C` or `q` quits, `F1` or `?` shows the keys.
 
-**Ctrl is never a command.** The commit message keeps every readline key:
+**Ctrl is never a command.** The commit composer keeps every readline key:
 `Ctrl-A`, `Ctrl-E`, `Ctrl-K`, `Ctrl-U`, `Ctrl-W`, `Ctrl-D`, `Ctrl-B`, `Ctrl-F`,
 `Ctrl-N`, `Ctrl-P`, `Ctrl-T`.
+
+### Committing
+
+`Ctrl-Enter` opens the message composer. It is a full text field, so every
+readline key edits it.
+
+- **`Ctrl-Enter` again** asks *"Commit N staged files to `<branch>`?"*, answered
+  `y` or `n`. Committing is two deliberate steps; nothing happens on the first.
+- **`Esc`** closes the composer and **keeps what you typed**, so going back to
+  read the diff costs nothing. It is still there when you reopen — and it
+  survives quitting difftui entirely, see [Saved state](#saved-state).
+- **`n`** or `Esc` at the question returns to editing rather than closing.
+
+Sign off with `o` and switch to amend with `e` *before* opening it; both change
+the message the composer will show. When amending, the top bar reads
+`[amending]` and the composer is titled `Amend Last Commit`.
+
+The three things git gui refuses — an empty message, nothing staged, unmerged
+files — are reported inside the composer rather than as another box on top of
+it, and clear as soon as you carry on typing.
 
 ### Panes
 
 | Key | Action |
 | --- | --- |
-| `Tab`, `Shift-Tab` | Cycle focus, including the Amend checkbox |
-| `Alt-1` … `Alt-4` | Jump straight to unstaged / staged / diff / message |
+| `Tab`, `Shift-Tab` | Cycle focus |
+| `Alt-1` … `Alt-3` | Jump straight to unstaged / staged / diff |
 | `←` `↓` `↑` `→`, `h` `j` `k` `l` | Move, crossing into the neighbouring pane at the edges |
 
 On startup the first file in **Unstaged Changes** is focused with its diff
@@ -116,23 +137,18 @@ already loaded, so the command letters are live immediately.
 The four panes form a grid, and navigation walks it:
 
 ```
-Unstaged │ Diff
-─────────┼────────
-Staged   │ Commit
+Unstaged │
+─────────┤ Diff
+Staged   │
 ```
 
 Moving down past the last file in **Unstaged Changes** carries on into
 **Staged Changes** at its first row; moving up from the top of the staged list
-goes back to the bottom of the unstaged one. The same applies on the right,
-between the diff and the commit message.
+goes back to the bottom of the unstaged one.
 
 `→` from **either** file list goes to the diff. The diff remembers which list it
 is showing — git gui tracks the same thing as `current_diff_side` — so `←` comes
 back to *that* list with the same file still selected.
-
-In the commit message buffer only the arrow keys move out, and only from the
-very start of the text (`↑` on the first line, `←` at the first column) — so
-`h`/`j`/`k`/`l` stay typable there.
 
 ### On a file
 
@@ -259,10 +275,8 @@ in the middle of a band.
 
 ## Amending
 
-The `[ ] Amend Last Commit` checkbox in the commit message header is git gui's.
-`Ctrl-E` toggles it from anywhere, or `Tab` to it — it is a focus stop of its
-own, sitting between the diff and the message buffer where it is drawn, so
-`↑`/`↓` reach it too — and press `Space` or `Enter`.
+`e` switches to amending. The top bar then reads `[amending]`, and the composer
+is titled `Amend Last Commit`.
 
 Switching to amend also changes what the file lists mean, the way git gui does
 it. git gui keeps a `PARENT` alongside `HEAD`: normally they are the same, but

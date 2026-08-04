@@ -18,9 +18,18 @@ const (
 	focusWorkdir focusArea = iota
 	focusIndex
 	focusDiff
-	focusAmend // the "Amend Last Commit" checkbox, drawn above the buffer
-	focusCommit
 	focusCount
+)
+
+// composeState is the commit composer, which replaces git-gui's always visible
+// message buffer. It opens on Ctrl-Enter, remembers what was typed when it is
+// closed, and asks before it actually commits.
+type composeState int
+
+const (
+	composeOff composeState = iota
+	composeEdit
+	composeConfirm
 )
 
 const (
@@ -68,6 +77,11 @@ type Model struct {
 
 	dialog *dialog
 	quit   bool
+
+	// compose is the commit composer's state; the message itself stays in
+	// commit, so it survives the composer being closed and reopened.
+	compose    composeState
+	composeErr string
 
 	// rescanning marks the transient "Rescanning…" status so it can be
 	// cleared when the scan lands, rather than sitting there looking like
@@ -428,6 +442,10 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	if m.compose != composeOff {
+		return m.composeKey(msg)
+	}
+
 	// A status message lasts until the next key press. Clearing it here
 	// rather than after dispatch means an action that sets its own message
 	// still gets to show it.
@@ -441,7 +459,7 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.dialog = textDialog("difftui — keys", helpText())
 		return m, nil
 	case key.Matches(msg, m.keys.Commit):
-		return m.doCommit()
+		return m.openCompose()
 	case key.Matches(msg, m.keys.Rescan):
 		m.setOK("Rescanning…")
 		m.rescanning = true
@@ -452,36 +470,10 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.setFocus(focusIndex)
 	case key.Matches(msg, m.keys.FocusDiff):
 		return m.setFocus(focusDiff)
-	case key.Matches(msg, m.keys.FocusCommit):
-		return m.setFocus(focusCommit)
 	case key.Matches(msg, m.keys.NextPane):
 		return m.setFocus((m.focus + 1) % focusCount)
 	case key.Matches(msg, m.keys.PrevPane):
 		return m.setFocus((m.focus + focusCount - 1) % focusCount)
-	}
-
-	if m.focus == focusCommit {
-		// Only the arrow keys leave the message buffer, and only from the
-		// very edge of the text: h/j/k/l have to stay typable here.
-		info := m.commit.LineInfo()
-		atFirstLine := m.commit.Line() == 0 && info.RowOffset == 0
-		switch msg.String() {
-		case "up":
-			if atFirstLine {
-				if t, ok := paneAbove(focusCommit); ok {
-					return m.enterPane(t, entryBottom)
-				}
-			}
-		case "left":
-			if atFirstLine && info.ColumnOffset == 0 {
-				if t, ok := m.paneLeft(focusCommit); ok {
-					return m.enterPane(t, entryKeep)
-				}
-			}
-		}
-		var cmd tea.Cmd
-		m.commit, cmd = m.commit.Update(msg)
-		return m, cmd
 	}
 
 	// Commands. A letter each, live in the file lists and the diff. In the
@@ -505,8 +497,6 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.doSignOff()
 	case key.Matches(msg, m.keys.AmendKey):
 		return m.toggleAmend()
-	case key.Matches(msg, m.keys.CommitKey):
-		return m.doCommit()
 	case key.Matches(msg, m.keys.LessContextKey):
 		return m.changeContext(-1)
 	case key.Matches(msg, m.keys.MoreContextKey):
@@ -530,9 +520,6 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.focus == focusDiff {
 		return m.diffKey(msg)
 	}
-	if m.focus == focusAmend {
-		return m.amendKey(msg)
-	}
 	return m.listKey(msg)
 }
 
@@ -546,25 +533,15 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // paneAbove and friends return the neighbour in a direction, or false when
 // there is nothing there.
 func paneAbove(f focusArea) (focusArea, bool) {
-	switch f {
-	case focusIndex:
+	if f == focusIndex {
 		return focusWorkdir, true
-	case focusAmend:
-		return focusDiff, true
-	case focusCommit:
-		return focusAmend, true
 	}
 	return f, false
 }
 
 func paneBelow(f focusArea) (focusArea, bool) {
-	switch f {
-	case focusWorkdir:
+	if f == focusWorkdir {
 		return focusIndex, true
-	case focusDiff:
-		return focusAmend, true
-	case focusAmend:
-		return focusCommit, true
 	}
 	return f, false
 }
@@ -575,7 +552,7 @@ func paneBelow(f focusArea) (focusArea, bool) {
 // you were looking at.
 func (m *Model) paneLeft(f focusArea) (focusArea, bool) {
 	switch f {
-	case focusDiff, focusAmend, focusCommit:
+	case focusDiff:
 		if _, side := m.activeList(); side == git.SideIndex {
 			return focusIndex, true
 		}
@@ -632,11 +609,6 @@ func (m Model) enterPane(f focusArea, e entry) (tea.Model, tea.Cmd) {
 
 func (m Model) setFocus(f focusArea) (tea.Model, tea.Cmd) {
 	m.focus = f
-	if f == focusCommit {
-		m.commit.Focus()
-		return m, textarea.Blink
-	}
-	m.commit.Blur()
 	if f != focusDiff {
 		m.diff.clearVisual()
 	}
@@ -703,28 +675,6 @@ func (m Model) listKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if moved {
 		return m, m.refreshDiffCmd()
-	}
-	return m, nil
-}
-
-// amendKey handles the "Amend Last Commit" checkbox, which behaves like a
-// checkbox anywhere else: Space or Enter flips it.
-func (m Model) amendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch {
-	case key.Matches(msg, m.keys.Toggle):
-		return m.toggleAmend()
-	case key.Matches(msg, m.keys.Up):
-		if t, ok := paneAbove(m.focus); ok {
-			return m.enterPane(t, entryBottom)
-		}
-	case key.Matches(msg, m.keys.Down):
-		if t, ok := paneBelow(m.focus); ok {
-			return m.enterPane(t, entryTop)
-		}
-	case key.Matches(msg, m.keys.Left):
-		if t, ok := m.paneLeft(m.focus); ok {
-			return m.enterPane(t, entryKeep)
-		}
 	}
 	return m, nil
 }
@@ -1045,38 +995,96 @@ func (m Model) toggleAmend() (tea.Model, tea.Cmd) {
 	return m, m.rescanCmd()
 }
 
-func (m Model) doCommit() (tea.Model, tea.Cmd) {
-	msg := strings.TrimSpace(m.commit.Value())
-	if msg == "" {
-		m.dialog = messageDialog("Commit",
-			"Please supply a commit message.\n\nA good commit message has the following format:\n\n"+
-				"- First line: Describe in one sentence what you did.\n"+
-				"- Second line: Blank\n"+
-				"- Remaining lines: Describe why this change is good.", true)
+// openCompose brings up the commit composer, with whatever message was last
+// typed still in it.
+func (m Model) openCompose() (tea.Model, tea.Cmd) {
+	m.compose = composeEdit
+	m.composeErr = ""
+	m.layoutCompose()
+	m.commit.Focus()
+	return m, textarea.Blink
+}
+
+// closeCompose puts the composer away, keeping the message for next time.
+func (m Model) closeCompose() (tea.Model, tea.Cmd) {
+	m.compose = composeOff
+	m.composeErr = ""
+	m.commit.Blur()
+	return m, nil
+}
+
+// composeKey drives the composer. The message field is a full text editor, so
+// only Ctrl-Enter and Esc are taken from it.
+func (m Model) composeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Quit) {
+		return m.doQuit()
+	}
+
+	if m.compose == composeConfirm {
+		switch strings.ToLower(msg.String()) {
+		case "y":
+			return m.doCommit()
+		case "n", "esc", "q":
+			m.compose = composeEdit
+			return m, nil
+		}
 		return m, nil
 	}
-	if !m.amend && len(m.index.files) == 0 && !m.merging {
-		m.dialog = messageDialog("Commit",
-			"No changes to commit.\n\nYou must stage at least 1 file before you can commit.", true)
+
+	switch {
+	case key.Matches(msg, m.keys.Commit):
+		if problem := m.commitProblem(); problem != "" {
+			m.composeErr = problem
+			return m, nil
+		}
+		m.composeErr = ""
+		m.compose = composeConfirm
 		return m, nil
+	case key.Matches(msg, m.keys.Cancel):
+		return m.closeCompose()
+	}
+
+	m.composeErr = ""
+	var cmd tea.Cmd
+	m.commit, cmd = m.commit.Update(msg)
+	return m, cmd
+}
+
+// commitProblem reports why the commit cannot be made, or "" when it can.
+// git-gui refuses the same three cases.
+func (m Model) commitProblem() string {
+	if strings.TrimSpace(m.commit.Value()) == "" {
+		return "Please supply a commit message. A good one says in its first " +
+			"line what you did, leaves the second blank, and explains why below."
 	}
 	for _, f := range m.files {
 		if f.State.Unmerged() {
-			m.dialog = messageDialog("Commit",
-				"Unmerged files cannot be committed.\n\nFile "+f.Path+
-					" has merge conflicts. You must resolve them and stage the file before committing.", true)
-			return m, nil
+			return "Unmerged files cannot be committed. " + f.Path +
+				" has conflicts: resolve them and stage the file first."
 		}
 	}
+	if !m.amend && len(m.index.files) == 0 && !m.merging {
+		return "No changes to commit. Stage at least one file first."
+	}
+	return ""
+}
 
+// doCommit makes the commit. The composer has already checked it can be made.
+func (m Model) doCommit() (tea.Model, tea.Cmd) {
+	message := normalizeMessage(m.commit.Value())
 	repo, amend := m.repo, m.amend
+
 	m.commit.SetValue("")
+	m.commit.Blur()
 	m.amend = false
 	m.savedMsg = ""
 	m.msgBackedUp = m.commit.Value()
 	m.bckExists = false
+	m.compose = composeOff
+	m.composeErr = ""
+
 	return m, func() tea.Msg {
-		out, err := repo.Commit(msg, amend)
+		out, err := repo.Commit(message, amend)
 		if err != nil {
 			return opMsg{text: "Commit", err: err}
 		}
@@ -1211,20 +1219,25 @@ func (m *Model) layout() {
 	m.workdir.width, m.workdir.height = leftW, max(workH-1, 1)
 	m.index.width, m.index.height = leftW, max(stagedH-1, 1)
 
-	commitH := min(10, max(body/2, 5))
-	diffH := max(body-commitH, 3)
-	m.diff.width, m.diff.height = rightW, max(diffH-1, 1)
+	m.diff.width, m.diff.height = rightW, max(body-1, 1)
 
-	taW := max(rightW-buttonColumnWidth-1, 10)
-	m.commit.SetWidth(taW)
-	m.commit.SetHeight(max(commitH-1, 2))
-
+	m.layoutCompose()
 	m.workdir.clamp()
 	m.index.clamp()
 	m.diff.clamp()
 }
 
-const buttonColumnWidth = 20
+// composeWidth is how wide the commit composer's box is drawn.
+func (m *Model) composeWidth() int {
+	return min(max(m.width-8, 30), 80)
+}
+
+// layoutCompose sizes the message field inside the composer box.
+func (m *Model) layoutCompose() {
+	inner := max(m.composeWidth()-6, 10)
+	m.commit.SetWidth(inner)
+	m.commit.SetHeight(max(min(m.height-14, 10), 3))
+}
 
 // View renders the whole window.
 func (m Model) View() string {
@@ -1235,107 +1248,93 @@ func (m Model) View() string {
 		return "Loading…"
 	}
 
-	branchBar := m.viewBranchBar()
-
 	left := lipgloss.JoinVertical(lipgloss.Left,
 		m.workdir.view(m.st, m.focus == focusWorkdir),
 		m.index.view(m.st, m.focus == focusIndex),
 	)
-	right := lipgloss.JoinVertical(lipgloss.Left,
-		m.diff.view(m.st, m.focus == focusDiff),
-		m.viewCommitArea(),
-	)
+	right := m.diff.view(m.st, m.focus == focusDiff)
 
 	bodyH := max(m.height-2, 4)
 	sep := strings.TrimRight(strings.Repeat("│\n", bodyH), "\n")
 	middle := lipgloss.JoinHorizontal(lipgloss.Top, left, m.st.sep.Render(sep), right)
 
-	view := lipgloss.JoinVertical(lipgloss.Left, branchBar, middle, m.viewStatusBar())
+	view := lipgloss.JoinVertical(lipgloss.Left,
+		m.viewBranchBar(), middle, m.viewStatusBar())
 
 	if m.dialog != nil {
 		return m.dialog.view(m.st, m.width, m.height)
 	}
+	if m.compose != composeOff {
+		return m.viewCompose()
+	}
 	return view
+}
+
+// viewCompose draws the commit composer: the message being written, and either
+// how to commit it or the question asked before doing so.
+func (m Model) viewCompose() string {
+	boxWidth := m.composeWidth()
+	inner := max(boxWidth-6, 10)
+
+	title := "Commit Message"
+	switch {
+	case m.amend && !m.hasHEAD:
+		title = "Amended Initial Commit Message"
+	case m.amend:
+		title = "Amend Last Commit"
+	case m.merging:
+		title = "Merge Commit Message"
+	case !m.hasHEAD:
+		title = "Initial Commit Message"
+	}
+
+	var b strings.Builder
+	b.WriteString(m.st.dialogTitle.Render(truncate(title, inner)))
+	b.WriteString("\n")
+	b.WriteString(m.st.dimText.Render(truncate(fmt.Sprintf("on %s · %s staged",
+		m.branch, plural(len(m.index.files), "file", "files")), inner)))
+	b.WriteString("\n\n")
+	b.WriteString(m.commit.View())
+	b.WriteString("\n")
+
+	if m.composeErr != "" {
+		b.WriteString("\n")
+		for _, l := range wrap(m.composeErr, inner) {
+			b.WriteString(m.st.statusER.Render(l) + "\n")
+		}
+	}
+
+	b.WriteString("\n")
+	switch m.compose {
+	case composeConfirm:
+		question := fmt.Sprintf("Commit %s to %s?",
+			plural(len(m.index.files), "staged file", "staged files"), m.branch)
+		if m.amend {
+			question = "Rewrite the last commit on " + m.branch + "?"
+		}
+		b.WriteString(truncate(question, inner) + "\n")
+		b.WriteString(m.st.key.Render("y") + " yes   " + m.st.key.Render("n") + " no")
+	default:
+		b.WriteString(m.st.dimText.Render(truncate(
+			"Ctrl-Enter to commit · Esc closes and keeps the message", inner)))
+	}
+
+	box := m.st.dialog.Width(boxWidth).Render(b.String())
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m Model) viewBranchBar() string {
 	repo := m.repo.Name()
 	left := m.st.branchLabel.Render("Current Branch: ") + m.st.branchBar.Render(m.branch)
+	if m.amend {
+		left += "  " + m.st.statusWA.Render("[amending]")
+	}
 	right := m.st.dimText.Render(repo + "  ·  F1 help  ·  Ctrl-Q quit")
 	gapW := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gapW < 1 {
 		return truncateANSI(left, m.width)
 	}
 	return left + strings.Repeat(" ", gapW) + right
-}
-
-// viewCommitArea draws the button column beside the commit message buffer,
-// with the amend checkbox in the buffer header, as in git-gui.
-func (m Model) viewCommitArea() string {
-	rightW := m.diff.width
-	label := "Commit Message:"
-	switch {
-	case m.amend && !m.hasHEAD:
-		label = "Amended Initial Commit Message:"
-	case m.amend && m.merging:
-		label = "Amended Merge Commit Message:"
-	case m.amend:
-		label = "Amended Commit Message:"
-	case m.merging:
-		label = "Merge Commit Message:"
-	case !m.hasHEAD:
-		label = "Initial Commit Message:"
-	}
-	check := "[ ] Amend Last Commit"
-	if m.amend {
-		check = "[x] Amend Last Commit"
-	}
-	labelStyled := m.st.commitLabel.Render(label)
-	amendStyle := m.st.dimText
-	if m.amend {
-		amendStyle = m.st.statusWA
-	}
-	if m.focus == focusAmend {
-		amendStyle = amendStyle.Background(colSelBG).Bold(true)
-	}
-	amendStyled := amendStyle.Render(check)
-	gap := rightW - lipgloss.Width(labelStyled) - lipgloss.Width(amendStyled)
-	header := labelStyled
-	if gap > 0 {
-		header += strings.Repeat(" ", gap) + amendStyled
-	}
-	header = truncateANSI(header, rightW)
-
-	buttons := m.viewButtons()
-	msg := m.commit.View()
-	area := lipgloss.JoinHorizontal(lipgloss.Top, buttons, " ", msg)
-	return lipgloss.JoinVertical(lipgloss.Left, header, area)
-}
-
-func (m Model) viewButtons() string {
-	type btn struct{ label, accel string }
-	btns := []btn{
-		{"Rescan", "F5"},
-		{"Stage Changed", "i"},
-		{"Sign Off", "^S"},
-		{"Commit", "^↵"},
-		{"Push", "^P"},
-	}
-	w := buttonColumnWidth
-	rows := make([]string, 0, len(btns))
-	for _, b := range btns {
-		// Measure display cells: "^↵" is two bytes wider than it looks.
-		gap := w - 4 - width(b.label) - width(b.accel)
-		if gap < 1 {
-			gap = 1
-		}
-		text := "[ " + b.label + strings.Repeat(" ", gap) + m.st.key.Render(b.accel) + " ]"
-		rows = append(rows, truncateANSI(text, w))
-	}
-	for len(rows) < max(m.commit.Height(), 0) {
-		rows = append(rows, strings.Repeat(" ", w))
-	}
-	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
 func (m Model) viewStatusBar() string {
@@ -1360,9 +1359,9 @@ func (m Model) viewStatusBar() string {
 func (m Model) hints() string {
 	switch m.focus {
 	case focusWorkdir:
-		return "Space stage · s stage · a stage all · v revert · m mark · c commit · ? keys"
+		return "Space stage · s stage · a stage all · v revert · m mark · Ctrl-Enter commit · ? keys"
 	case focusIndex:
-		return "Space unstage · u unstage · a stage all · m mark · c commit · ? keys"
+		return "Space unstage · u unstage · a stage all · m mark · Ctrl-Enter commit · ? keys"
 	case focusDiff:
 		if m.diff.visual() {
 			n := 1 + max(m.diff.cursor, m.diff.anchor) - min(m.diff.cursor, m.diff.anchor)
@@ -1370,10 +1369,8 @@ func (m Model) hints() string {
 				plural(n, "line", "lines"))
 		}
 		return "Space stage hunk · V select lines · L stage line · r revert · n/p hunk · -/= context"
-	case focusAmend:
-		return "Space or Enter toggles Amend Last Commit · ↑/↓ diff and message · F1 keys"
 	default:
-		return "Ctrl-Enter commits · Tab leaves the message to run a command · F1 keys"
+		return "Ctrl-Enter writes a commit message · ? keys"
 	}
 }
 
@@ -1383,31 +1380,41 @@ func helpText() string {
 		"",
 		"    s  stage              u  unstage",
 		"    a  stage all changed  v  revert changes",
-		"    c  commit             e  amend last commit",
-		"    o  sign off           R  rescan          (also F5)",
+		"    o  sign off           e  amend last commit",
+		"    R  rescan (also F5)   -  /  =   less / more diff context",
 		"    P  push               M  local merge / abort merge",
 		"    N  new branch         K  checkout branch",
-		"    -  less diff context  =  more diff context",
 		"",
-		"In the commit message a letter is just text, so press Tab to leave",
-		"the buffer first. Ctrl-Enter commits from anywhere, which is the one",
-		"command worth having without leaving.",
+		"    Ctrl-Enter            write a commit message",
+		"    Ctrl-C or q           quit",
+		"    F1 or ?               these keys",
 		"",
-		"Ctrl is never a command, so the message keeps every readline key:",
-		"Ctrl-A, Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W, Ctrl-D and the rest.",
+		"───────────────────────────────────────────────────────────────",
+		"Committing",
+		"",
+		"  Ctrl-Enter opens the message composer. Type the message there —",
+		"  it is a full text field, so every readline key works: Ctrl-A,",
+		"  Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W and the rest.",
+		"",
+		"  Ctrl-Enter again asks to commit, and answers y or n.",
+		"  Esc closes the composer and keeps what you typed for next time,",
+		"  so nothing is lost by looking at the diff again first.",
+		"",
+		"  Sign off with o and amend with e before opening it: both change",
+		"  the message the composer will show.",
 		"",
 		"───────────────────────────────────────────────────────────────",
 		"Panes",
 		"",
-		"  Tab / Shift-Tab  cycle, including the Amend checkbox",
-		"  Alt-1 unstaged   Alt-2 staged   Alt-3 diff   Alt-4 message",
+		"  Tab / Shift-Tab  cycle",
+		"  Alt-1 unstaged   Alt-2 staged   Alt-3 diff",
 		"",
-		"  Arrows or h/j/k/l move. The panes are a grid, and moving off",
-		"  the edge of one enters the next:",
+		"  Arrows or h/j/k/l move. Moving off the edge of a pane enters",
+		"  the next:",
 		"",
-		"      Unstaged │ Diff",
-		"      ─────────┼────────",
-		"      Staged   │ Commit",
+		"      Unstaged │",
+		"      ─────────┤ Diff",
+		"      Staged   │",
 		"",
 		"  Right from either list opens the diff; left comes back to",
 		"  whichever list the diff is showing, still on the same file.",
@@ -1418,7 +1425,6 @@ func helpText() string {
 		"  Space   stage, or unstage from the staged list",
 		"  m       mark a file, so a command acts on several at once",
 		"  D       delete untracked files",
-		"  q       quit                    ?  these keys",
 		"",
 		"───────────────────────────────────────────────────────────────",
 		"In the diff, beyond the commands above",
@@ -1436,12 +1442,12 @@ func helpText() string {
 		"",
 		"  A terminal cannot deliver most of them. Ctrl-I is Tab, Ctrl-M is",
 		"  Enter, and Ctrl-Enter arrives as Ctrl-J. The rest — Ctrl-A, -E,",
-		"  -K, -U, -W, -D, -B, -F, -N, -P, -T — all edit text in the message",
-		"  buffer, so a Ctrl command layer would break typing.",
+		"  -K, -U, -W, -D, -B, -F, -N, -P, -T — all edit text, so a Ctrl",
+		"  command layer would break the composer.",
 		"",
 		"  Letters need no modifier at all, which also avoids macOS, where",
 		"  Option is not Meta unless the terminal is set up for it. Only",
-		"  Alt-1 to Alt-4 use it, and Tab does the same thing.",
+		"  Alt-1 to Alt-3 use it, and Tab does the same thing.",
 		"",
 		"  Press Esc to close.",
 	}, "\n")

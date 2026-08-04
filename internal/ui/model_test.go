@@ -108,8 +108,6 @@ func TestViewRenders(t *testing.T) {
 	for _, want := range []string{
 		"Current Branch:", "main",
 		"Unstaged Changes", "Staged Changes (Will Commit)",
-		"Commit Message:", "Amend Last Commit",
-		"Rescan", "Stage Changed", "Sign Off", "Commit", "Push",
 		"foo.txt", "bar.txt", "new.txt",
 	} {
 		if !strings.Contains(view, want) {
@@ -234,22 +232,6 @@ func TestSignOffJoinsExistingTrailerBlock(t *testing.T) {
 	}
 }
 
-func TestCommitWithEmptyMessageIsRefused(t *testing.T) {
-	repo := testRepo(t)
-	m := drive(t, New(repo),
-		tea.WindowSizeMsg{Width: 120, Height: 40},
-		New(repo).rescanCmd()(),
-	)
-	m.commit.SetValue("   ")
-	m = drive(t, m, rkey("c"))
-	if m.dialog == nil {
-		t.Fatal("expected a dialog complaining about the empty message")
-	}
-	if !strings.Contains(m.dialog.body, "commit message") {
-		t.Errorf("dialog body = %q", m.dialog.body)
-	}
-}
-
 func TestContextKeysChangeDiffContext(t *testing.T) {
 	repo := testRepo(t)
 	m := drive(t, New(repo),
@@ -266,31 +248,6 @@ func TestContextKeysChangeDiffContext(t *testing.T) {
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("-")})
 	if m.context != start {
 		t.Errorf("context = %d, want %d", m.context, start)
-	}
-}
-
-// Typing in the commit buffer must not trigger the single letter accelerators.
-func TestCommitBufferSwallowsLetterKeys(t *testing.T) {
-	repo := testRepo(t)
-	m := drive(t, New(repo),
-		tea.WindowSizeMsg{Width: 120, Height: 40},
-		New(repo).rescanCmd()(),
-	)
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4"), Alt: true})
-	if m.focus != focusCommit {
-		t.Fatalf("focus = %v, want focusCommit", m.focus)
-	}
-	for _, r := range "i M m v - = ?" {
-		m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-	}
-	if m.dialog != nil {
-		t.Errorf("typing in the message buffer opened a dialog: %q", m.dialog.title)
-	}
-	if got := m.commit.Value(); got != "i M m v - = ?" {
-		t.Errorf("commit buffer = %q, want the typed text", got)
-	}
-	if m.context != defaultContext {
-		t.Errorf("typing changed the diff context to %d", m.context)
 	}
 }
 
@@ -332,13 +289,13 @@ func TestQuitKeys(t *testing.T) {
 	if m := drive(t, fromList, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}); !m.quit {
 		t.Error("q did not quit from the unstaged list")
 	}
-	inCommit := drive(t, base, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4"), Alt: true})
-	inCommit = drive(t, inCommit, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	if inCommit.quit {
-		t.Error("q must not quit while the commit message has focus")
+	inCompose := drive(t, base, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	inCompose = drive(t, inCompose, rkey("q"))
+	if inCompose.quit {
+		t.Error("q must not quit while the composer is open")
 	}
-	if inCommit.commit.Value() != "q" {
-		t.Errorf("commit buffer = %q, want \"q\"", inCommit.commit.Value())
+	if inCompose.commit.Value() != "q" {
+		t.Errorf("composer = %q, want \"q\"", inCompose.commit.Value())
 	}
 }
 
@@ -454,86 +411,6 @@ func TestArrowKeysNavigateLikeHJKL(t *testing.T) {
 	}
 }
 
-// Down out of the diff walks the right hand column: the Amend checkbox sits
-// between the diff and the message buffer, which is where it is drawn.
-func TestDiffPaneDownAtEndWalksToAmendThenCommit(t *testing.T) {
-	base := newTestModel(t)
-	m, _ := base.setFocus(focusWorkdir)
-	mm := drive(t, m.(Model), rkey("l"))
-	if mm.focus != focusDiff {
-		t.Fatalf("focus = %v, want focusDiff", mm.focus)
-	}
-	if len(mm.diff.lines) == 0 {
-		t.Fatal("diff pane is empty")
-	}
-	mm.diff.moveTo(len(mm.diff.lines) - 1)
-
-	mm = drive(t, mm, rkey("j"))
-	if mm.focus != focusAmend {
-		t.Fatalf("focus = %v, want focusAmend", mm.focus)
-	}
-	mm = drive(t, mm, tea.KeyMsg{Type: tea.KeyDown})
-	if mm.focus != focusCommit {
-		t.Errorf("focus = %v, want focusCommit", mm.focus)
-	}
-	// And back up again.
-	mm = drive(t, mm, tea.KeyMsg{Type: tea.KeyUp})
-	if mm.focus != focusAmend {
-		t.Errorf("focus = %v, want focusAmend on the way back up", mm.focus)
-	}
-}
-
-func TestCommitBufferEdgeNavigation(t *testing.T) {
-	base := newTestModel(t)
-
-	// Up on the first line leaves for the pane above, which is the Amend
-	// checkbox drawn on the buffer's header line.
-	m, _ := base.setFocus(focusCommit)
-	mm := m.(Model)
-	mm.commit.SetValue("")
-	got := drive(t, mm, tea.KeyMsg{Type: tea.KeyUp})
-	if got.focus != focusAmend {
-		t.Errorf("up at the top of the buffer: focus = %v, want focusAmend", got.focus)
-	}
-
-	// Left at the very start leaves for the list the diff is showing, which
-	// at startup is the unstaged one. TestCommitBufferLeftReturnsToTheActiveList
-	// covers the staged case.
-	got = drive(t, mm, tea.KeyMsg{Type: tea.KeyLeft})
-	if got.focus != focusWorkdir {
-		t.Errorf("left at the start of the buffer: focus = %v, want focusWorkdir", got.focus)
-	}
-
-	// But not from the middle of the text.
-	mid := mm
-	mid.commit.SetValue("line one\nline two")
-	got = drive(t, mid, tea.KeyMsg{Type: tea.KeyUp})
-	if got.focus != focusCommit {
-		t.Errorf("up from the second line left the buffer: focus = %v", got.focus)
-	}
-	got = drive(t, mid, tea.KeyMsg{Type: tea.KeyLeft})
-	if got.focus != focusCommit {
-		t.Errorf("left from mid-text left the buffer: focus = %v", got.focus)
-	}
-}
-
-func TestHJKLAreTypableInCommitBuffer(t *testing.T) {
-	base := newTestModel(t)
-	m, _ := base.setFocus(focusCommit)
-	got := m.(Model)
-	for _, r := range "hjkl" {
-		got = drive(t, got, rkey(string(r)))
-	}
-	if got.focus != focusCommit {
-		t.Errorf("typing hjkl changed focus to %v", got.focus)
-	}
-	if got.commit.Value() != "hjkl" {
-		t.Errorf("commit buffer = %q, want \"hjkl\"", got.commit.Value())
-	}
-}
-
-// step runs a single Update without draining the resulting commands. It is
-// used for the backup tick, whose command is a two second timer.
 func step(m Model, msg tea.Msg) Model {
 	next, _ := m.Update(msg)
 	return next.(Model)
@@ -659,31 +536,6 @@ func TestNewerSavedMessageBeatsStaleBackup(t *testing.T) {
 	}
 }
 
-func TestCommitClearsSavedMessage(t *testing.T) {
-	repo := testRepo(t)
-	if err := repo.WriteStateFile(git.MsgFile, "left over"); err != nil {
-		t.Fatal(err)
-	}
-	m := drive(t, New(repo),
-		tea.WindowSizeMsg{Width: 120, Height: 40},
-		New(repo).rescanCmd()(),
-	)
-	if m.commit.Value() != "left over" {
-		t.Fatalf("buffer = %q, want the saved message", m.commit.Value())
-	}
-	m.commit.SetValue("a real commit")
-	m = drive(t, m, rkey("c"))
-	if m.dialog != nil {
-		t.Fatalf("commit was refused: %s / %s", m.dialog.title, m.dialog.body)
-	}
-	if _, ok := stateFile(t, repo, git.MsgFile); ok {
-		t.Errorf("%s should be removed once the message is committed", git.MsgFile)
-	}
-	if m.commit.Value() != "" {
-		t.Errorf("buffer = %q, want it cleared after committing", m.commit.Value())
-	}
-}
-
 func TestMergeMessageSeedsBuffer(t *testing.T) {
 	repo := testRepo(t)
 	if err := repo.WriteStateFile("MERGE_HEAD", "0000000000000000000000000000000000000000\n"); err != nil {
@@ -699,8 +551,10 @@ func TestMergeMessageSeedsBuffer(t *testing.T) {
 	if m.commit.Value() != "Merge branch 'other'" {
 		t.Errorf("buffer = %q, want the merge message", m.commit.Value())
 	}
-	if !strings.Contains(m.View(), "Merge Commit Message:") {
-		t.Error("the buffer label should say Merge Commit Message")
+	// The composer names the kind of commit being written.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if !strings.Contains(m.View(), "Merge Commit Message") {
+		t.Errorf("the composer should say Merge Commit Message:\n%s", m.View())
 	}
 }
 
@@ -738,11 +592,13 @@ func TestAmendLoadsAndRestoresBuffer(t *testing.T) {
 	if m.commit.Value() != "initial" {
 		t.Errorf("buffer = %q, want HEAD's message", m.commit.Value())
 	}
-	if !strings.Contains(m.View(), "[x] Amend Last Commit") {
-		t.Error("the amend checkbox should be ticked")
+	// Amending is announced in the branch bar, and again by the composer.
+	if !strings.Contains(m.View(), "[amending]") {
+		t.Errorf("the branch bar should show the amend state:\n%s", m.View())
 	}
-	if !strings.Contains(m.View(), "Amended Commit Message:") {
-		t.Error("the buffer label should say Amended Commit Message")
+	opened := drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if !strings.Contains(opened.View(), "Amend Last Commit") {
+		t.Errorf("the composer should say Amend Last Commit:\n%s", opened.View())
 	}
 
 	// Turning it back off restores what was being typed.
@@ -803,37 +659,6 @@ func TestAmendMessageIsNotSavedOnQuit(t *testing.T) {
 
 	if _, ok := stateFile(t, repo, git.MsgFile); ok {
 		t.Error("an amend message must not be stashed as the next commit message")
-	}
-}
-
-func TestAmendCommitRewritesHEAD(t *testing.T) {
-	repo := testRepo(t)
-	m := drive(t, New(repo),
-		tea.WindowSizeMsg{Width: 120, Height: 40},
-		New(repo).rescanCmd()(),
-	)
-	before, err := repo.Git("rev-list", "--count", "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-	m = drive(t, m, rkey("e"))
-	m.commit.SetValue("initial, reworded")
-	m = drive(t, m, rkey("c"))
-	if m.dialog != nil {
-		t.Fatalf("amend commit was refused: %s / %s", m.dialog.title, m.dialog.body)
-	}
-	if got := repo.LastCommitMessage(); got != "initial, reworded" {
-		t.Errorf("HEAD message = %q", got)
-	}
-	after, err := repo.Git("rev-list", "--count", "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if before != after {
-		t.Errorf("amend changed the commit count from %s to %s", strings.TrimSpace(before), strings.TrimSpace(after))
-	}
-	if m.amend {
-		t.Error("amend should be switched off after committing")
 	}
 }
 
@@ -949,37 +774,6 @@ func TestDiffRemembersWhichListItIsShowing(t *testing.T) {
 				t.Errorf("selection = %q, want %q", got, want)
 			}
 		})
-	}
-}
-
-// Left out of the commit buffer follows the same rule.
-func TestCommitBufferLeftReturnsToTheActiveList(t *testing.T) {
-	repo := testRepo(t)
-	m := drive(t, New(repo),
-		tea.WindowSizeMsg{Width: 120, Height: 40},
-		New(repo).rescanCmd()(),
-	)
-	// Select in the staged list, then walk right and down into the commit
-	// buffer the way a user would.
-	m = drive(t, m, altKey("2"))
-	if m.focus != focusIndex {
-		t.Fatalf("focus = %v, want focusIndex", m.focus)
-	}
-	m = drive(t, m, rkey("l"))
-	if m.focus != focusDiff {
-		t.Fatalf("focus = %v, want focusDiff", m.focus)
-	}
-	m.diff.moveTo(len(m.diff.lines) - 1)
-	m = drive(t, m, rkey("j"))                     // the Amend checkbox
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyDown}) // the message buffer
-	if m.focus != focusCommit {
-		t.Fatalf("focus = %v, want focusCommit", m.focus)
-	}
-	m.commit.SetValue("")
-
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyLeft})
-	if m.focus != focusIndex {
-		t.Errorf("focus = %v, want focusIndex (the list the diff came from)", m.focus)
 	}
 }
 
@@ -1209,104 +1003,6 @@ func TestLStagesJustTheCursorLine(t *testing.T) {
 	}
 }
 
-func TestTabReachesTheAmendCheckbox(t *testing.T) {
-	m := newTestModel(t)
-	// Tab walks every pane, including the checkbox, and comes back round.
-	want := []focusArea{focusIndex, focusDiff, focusAmend, focusCommit, focusWorkdir}
-	for i, expect := range want {
-		m = drive(t, m, tea.KeyMsg{Type: tea.KeyTab})
-		if m.focus != expect {
-			t.Fatalf("Tab %d: focus = %v, want %v", i+1, m.focus, expect)
-		}
-	}
-	// And Shift-Tab walks back.
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
-	if m.focus != focusCommit {
-		t.Errorf("Shift-Tab: focus = %v, want focusCommit", m.focus)
-	}
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
-	if m.focus != focusAmend {
-		t.Errorf("Shift-Tab: focus = %v, want focusAmend", m.focus)
-	}
-}
-
-func TestAmendCheckboxTogglesWithSpaceAndEnter(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		msg  tea.KeyMsg
-	}{
-		{"space", rkey(" ")},
-		{"enter", tea.KeyMsg{Type: tea.KeyEnter}},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			m := newTestModel(t)
-			focused, _ := m.setFocus(focusAmend)
-			m = drive(t, focused.(Model))
-			if strings.Contains(m.View(), "[x] Amend Last Commit") {
-				t.Fatal("amend should start off")
-			}
-
-			m = drive(t, m, c.msg)
-			if !m.amend {
-				t.Fatalf("%s did not tick the checkbox", c.name)
-			}
-			if !strings.Contains(m.View(), "[x] Amend Last Commit") {
-				t.Error("the checkbox is not shown ticked")
-			}
-			if m.commit.Value() != "initial" {
-				t.Errorf("buffer = %q, want HEAD's message", m.commit.Value())
-			}
-			// Focus stays on the checkbox so it can be toggled straight back.
-			if m.focus != focusAmend {
-				t.Errorf("focus = %v, want to stay on focusAmend", m.focus)
-			}
-
-			m = drive(t, m, c.msg)
-			if m.amend {
-				t.Errorf("%s did not untick the checkbox", c.name)
-			}
-		})
-	}
-}
-
-func TestAmendCheckboxShowsItIsFocused(t *testing.T) {
-	m := newTestModel(t)
-	unfocused := m.View()
-
-	focused, _ := m.setFocus(focusAmend)
-	m = drive(t, focused.(Model))
-	if m.View() == unfocused {
-		t.Error("focusing the checkbox did not change how it is drawn")
-	}
-	if !strings.Contains(m.View(), "Amend Last Commit") {
-		t.Error("the checkbox label went missing")
-	}
-	if !strings.Contains(m.View(), "toggles Amend Last Commit") {
-		t.Error("the status bar should say what the checkbox does")
-	}
-}
-
-func TestAmendCheckboxArrowNavigation(t *testing.T) {
-	m := newTestModel(t)
-	focused, _ := m.setFocus(focusAmend)
-	m = drive(t, focused.(Model))
-
-	up := drive(t, m, tea.KeyMsg{Type: tea.KeyUp})
-	if up.focus != focusDiff {
-		t.Errorf("up: focus = %v, want focusDiff", up.focus)
-	}
-	down := drive(t, m, tea.KeyMsg{Type: tea.KeyDown})
-	if down.focus != focusCommit {
-		t.Errorf("down: focus = %v, want focusCommit", down.focus)
-	}
-	left := drive(t, m, tea.KeyMsg{Type: tea.KeyLeft})
-	if left.focus != focusWorkdir {
-		t.Errorf("left: focus = %v, want the list the diff is showing", left.focus)
-	}
-}
-
-// Toggling amend has to rescan: the staged list means something different once
-// the index is being measured against HEAD's parent.
 func TestAmendRefreshesTheStagedList(t *testing.T) {
 	repo := testRepo(t)
 	// Commit the staged file so the working tree is otherwise settled.
@@ -1421,131 +1117,26 @@ func TestAmendToggleLeavesTheIndexAlone(t *testing.T) {
 	}
 }
 
-// commitModel focuses the message buffer with some text already in it.
-func commitModel(t *testing.T, text string) Model {
+// composeModel opens the commit composer with some text already typed.
+func composeModel(t *testing.T, text string) Model {
 	t.Helper()
 	repo := testRepo(t)
 	m := drive(t, New(repo),
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, altKey("4"))
-	if m.focus != focusCommit {
-		t.Fatalf("focus = %v, want focusCommit", m.focus)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if m.compose != composeEdit {
+		t.Fatalf("compose = %v, want composeEdit", m.compose)
 	}
 	m.commit.SetValue(text)
 	return m
 }
 
-// Every key bubbles' textarea uses for editing must reach the textarea rather
-// than firing a command. This is the guarantee that makes the command layer
-// safe to have live while typing.
-func TestReadlineKeysStillEditTheMessage(t *testing.T) {
-	// Keys the message buffer owns, with the command that must not fire.
-	cases := []struct {
-		name string
-		msg  tea.KeyMsg
-	}{
-		{"ctrl+a line start", tea.KeyMsg{Type: tea.KeyCtrlA}},
-		{"ctrl+t transpose", tea.KeyMsg{Type: tea.KeyCtrlT}},
-		{"ctrl+e line end", tea.KeyMsg{Type: tea.KeyCtrlE}},
-		{"ctrl+k kill after", tea.KeyMsg{Type: tea.KeyCtrlK}},
-		{"ctrl+u kill before", tea.KeyMsg{Type: tea.KeyCtrlU}},
-		{"ctrl+w delete word", tea.KeyMsg{Type: tea.KeyCtrlW}},
-		{"ctrl+d delete char", tea.KeyMsg{Type: tea.KeyCtrlD}},
-		{"ctrl+b back", tea.KeyMsg{Type: tea.KeyCtrlB}},
-		{"ctrl+f forward", tea.KeyMsg{Type: tea.KeyCtrlF}},
-		{"ctrl+n next line", tea.KeyMsg{Type: tea.KeyCtrlN}},
-		{"ctrl+p previous line", tea.KeyMsg{Type: tea.KeyCtrlP}},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			m := commitModel(t, "hello world")
-			before := m.amend
-			got := drive(t, m, c.msg)
-
-			if got.focus != focusCommit {
-				t.Errorf("%s moved focus to %v", c.name, got.focus)
-			}
-			if got.amend != before {
-				t.Errorf("%s toggled amend", c.name)
-			}
-			if got.dialog != nil {
-				t.Errorf("%s opened the %q dialog", c.name, got.dialog.title)
-			}
-			if got.quit {
-				t.Errorf("%s quit", c.name)
-			}
-		})
-	}
-}
-
-// Ctrl-U really deletes to the start of the line rather than unstaging.
-func TestCtrlUEditsInTheMessageBuffer(t *testing.T) {
-	m := commitModel(t, "throw this away")
-	got := drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlU})
-	if got.commit.Value() != "" {
-		t.Errorf("commit buffer = %q, want Ctrl-U to have deleted to the line start", got.commit.Value())
-	}
-}
-
-// Ctrl-E moves to the end of the line rather than switching to amend.
-func TestCtrlEEditsInTheMessageBuffer(t *testing.T) {
-	m := commitModel(t, "some text")
-	m.commit.SetCursor(0)
-	got := drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlE})
-	if got.amend {
-		t.Fatal("Ctrl-E switched to amend inside the message buffer")
-	}
-	got = drive(t, got, rkey("!"))
-	if got.commit.Value() != "some text!" {
-		t.Errorf("commit buffer = %q, want Ctrl-E to have moved to the line end", got.commit.Value())
-	}
-}
-
-// From inside the message buffer, Ctrl-Enter commits and nothing else fires:
-// a letter is text there, and Tab is how you reach a command.
-func TestOnlyCommitIsReachableWhileTyping(t *testing.T) {
-	t.Run("ctrl+enter commits", func(t *testing.T) {
-		m := commitModel(t, "typed then committed")
-		repo := m.repo
-		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
-		if m.dialog != nil {
-			t.Fatalf("commit refused: %s / %s", m.dialog.title, m.dialog.body)
-		}
-		if got := repo.LastCommitMessage(); got != "typed then committed" {
-			t.Errorf("HEAD message = %q", got)
-		}
-	})
-
-	t.Run("tab then a letter runs the command", func(t *testing.T) {
-		m := commitModel(t, "a message")
-		repo := m.repo
-		// Tab out of the buffer, then the letter works.
-		for m.focus != focusWorkdir {
-			m = drive(t, m, tea.KeyMsg{Type: tea.KeyTab})
-		}
-		m = drive(t, m, rkey("a"))
-		m = drive(t, m, New(repo).rescanCmd()())
-		staged := map[string]bool{}
-		for _, f := range m.index.files {
-			staged[f.Path] = true
-		}
-		if !staged["foo.txt"] {
-			t.Errorf("the letter did not stage after tabbing out; staged = %v", staged)
-		}
-		if m.commit.Value() != "a message" {
-			t.Errorf("the message was disturbed: %q", m.commit.Value())
-		}
-	})
-}
-
-// difftui binds no Ctrl command, so a Ctrl key that the message buffer uses
-// for editing must do nothing at all in a pane rather than firing something.
 func TestNoCtrlCommandsOutsideTheBuffer(t *testing.T) {
 	m := newTestModel(t)
-	if m.focus == focusCommit {
-		t.Fatal("expected to start outside the message buffer")
+	if m.compose != composeOff {
+		t.Fatal("expected the composer to be closed")
 	}
 	for _, k := range []tea.KeyMsg{
 		{Type: tea.KeyCtrlE},
@@ -1567,60 +1158,6 @@ func TestNoCtrlCommandsOutsideTheBuffer(t *testing.T) {
 	}
 }
 
-// Ctrl-Enter arrives as Ctrl-J on a terminal, so both have to commit. This
-// used to revert instead, which is the opposite of what the gesture means.
-func TestCtrlEnterCommits(t *testing.T) {
-	for _, k := range []struct {
-		name string
-		msg  tea.KeyMsg
-	}{
-		{"ctrl+j", tea.KeyMsg{Type: tea.KeyCtrlJ}},
-		{"alt+c", rkey("c")},
-	} {
-		t.Run(k.name, func(t *testing.T) {
-			repo := testRepo(t)
-			m := drive(t, New(repo),
-				tea.WindowSizeMsg{Width: 120, Height: 40},
-				New(repo).rescanCmd()(),
-			)
-			m.commit.SetValue("a commit from " + k.name)
-			m = drive(t, m, k.msg)
-			if m.dialog != nil {
-				t.Fatalf("%s was refused: %s / %s", k.name, m.dialog.title, m.dialog.body)
-			}
-			if got := repo.LastCommitMessage(); got != "a commit from "+k.name {
-				t.Errorf("HEAD message = %q, want the commit to have been made", got)
-			}
-		})
-	}
-}
-
-// And Ctrl-J must not revert, which is what it used to do.
-func TestCtrlJDoesNotRevert(t *testing.T) {
-	repo := testRepo(t)
-	m := drive(t, New(repo),
-		tea.WindowSizeMsg{Width: 120, Height: 40},
-		New(repo).rescanCmd()(),
-	)
-	before, err := repo.Git("diff")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// With an empty message the commit is refused, but nothing may be reverted.
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
-	if m.dialog != nil && strings.Contains(m.dialog.title, "Revert") {
-		t.Fatal("Ctrl-J opened the revert dialog")
-	}
-	after, err := repo.Git("diff")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if before != after {
-		t.Errorf("Ctrl-J changed the working tree:\nbefore:\n%s\nafter:\n%s", before, after)
-	}
-}
-
-// Every command is reachable by its own letter, with no modifier at all.
 func TestEveryCommandHasALetter(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1664,26 +1201,6 @@ func TestEveryCommandHasALetter(t *testing.T) {
 	}
 }
 
-// The bare letters must stay typable in the message buffer.
-func TestCommandLettersAreTextInTheMessageBuffer(t *testing.T) {
-	m := commitModel(t, "")
-	typed := "saucevoeckPMNKR"
-	for _, r := range typed {
-		m = drive(t, m, rkey(string(r)))
-	}
-	if m.focus != focusCommit {
-		t.Fatalf("typing moved focus to %v", m.focus)
-	}
-	if m.dialog != nil {
-		t.Fatalf("typing opened the %q dialog", m.dialog.title)
-	}
-	if m.commit.Value() != typed {
-		t.Errorf("commit buffer = %q, want %q", m.commit.Value(), typed)
-	}
-}
-
-// The cursor and the visual selection live in the left edge bar, so they never
-// compete with the diff's own background.
 func TestCursorAndSelectionUseTheEdgeBar(t *testing.T) {
 	m := cursorTo(t, diffModel(t), '+')
 	st := m.st
@@ -1737,5 +1254,208 @@ func TestBandsAreConfinedToTheDiff(t *testing.T) {
 				t.Errorf("row %d has a diff band: %q", i, view[i])
 			}
 		}
+	}
+}
+
+func TestCtrlEnterOpensTheComposer(t *testing.T) {
+	m := newTestModel(t)
+	if m.compose != composeOff {
+		t.Fatal("the composer should start closed")
+	}
+	// It is the only way in: there is no commit letter any more.
+	if got := drive(t, m, rkey("c")); got.compose != composeOff {
+		t.Error("a bare c opened the composer")
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if m.compose != composeEdit {
+		t.Fatalf("compose = %v, want composeEdit", m.compose)
+	}
+	view := m.View()
+	if !strings.Contains(view, "Commit Message") {
+		t.Errorf("the composer is not on screen:\n%s", view)
+	}
+	if !strings.Contains(view, "Ctrl-Enter to commit") {
+		t.Error("the composer should say how to commit")
+	}
+}
+
+// Esc closes the composer and keeps the message, so looking at the diff again
+// costs nothing.
+func TestComposerRemembersTheMessage(t *testing.T) {
+	m := composeModel(t, "half written")
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.compose != composeOff {
+		t.Fatal("Esc did not close the composer")
+	}
+	if strings.Contains(m.View(), "half written") {
+		t.Error("the composer is still on screen")
+	}
+	// Reopening brings it back.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if m.commit.Value() != "half written" {
+		t.Errorf("composer = %q, want the message kept", m.commit.Value())
+	}
+}
+
+// Committing takes two deliberate steps: Ctrl-Enter to ask, then y.
+func TestComposerCommitsInTwoSteps(t *testing.T) {
+	m := composeModel(t, "a real commit")
+	repo := m.repo
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if m.compose != composeConfirm {
+		t.Fatalf("compose = %v, want composeConfirm", m.compose)
+	}
+	view := m.View()
+	if !strings.Contains(view, "yes") || !strings.Contains(view, "no") {
+		t.Errorf("the confirmation should offer y/n:\n%s", view)
+	}
+	// Nothing has happened yet.
+	if got := repo.LastCommitMessage(); got == "a real commit" {
+		t.Fatal("the commit was made before it was confirmed")
+	}
+
+	// n goes back to editing, with the message intact.
+	back := drive(t, m, rkey("n"))
+	if back.compose != composeEdit {
+		t.Errorf("n left compose = %v, want composeEdit", back.compose)
+	}
+	if back.commit.Value() != "a real commit" {
+		t.Errorf("n lost the message: %q", back.commit.Value())
+	}
+
+	// y commits.
+	m = drive(t, m, rkey("y"))
+	if m.compose != composeOff {
+		t.Errorf("compose = %v, want it closed after committing", m.compose)
+	}
+	if got := repo.LastCommitMessage(); got != "a real commit" {
+		t.Errorf("HEAD message = %q", got)
+	}
+	if m.commit.Value() != "" {
+		t.Errorf("the composer kept %q after committing", m.commit.Value())
+	}
+	if _, ok := stateFile(t, repo, git.MsgFile); ok {
+		t.Error("the stashed message should be gone once committed")
+	}
+}
+
+// Esc from the confirmation returns to editing rather than closing.
+func TestComposerConfirmationCanBeBackedOutOf(t *testing.T) {
+	m := composeModel(t, "not yet")
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if m.compose != composeConfirm {
+		t.Fatal("did not reach the confirmation")
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.compose != composeEdit {
+		t.Errorf("compose = %v, want composeEdit", m.compose)
+	}
+}
+
+// The three refusals git-gui makes are reported inside the composer rather
+// than as another modal on top of it.
+func TestComposerRefusals(t *testing.T) {
+	t.Run("empty message", func(t *testing.T) {
+		m := composeModel(t, "   ")
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		if m.compose != composeEdit {
+			t.Errorf("compose = %v, want to stay in composeEdit", m.compose)
+		}
+		if !strings.Contains(m.composeErr, "commit message") {
+			t.Errorf("composeErr = %q", m.composeErr)
+		}
+		if !strings.Contains(m.View(), "commit message") {
+			t.Error("the refusal is not shown in the composer")
+		}
+		if m.dialog != nil {
+			t.Error("a dialog was stacked on top of the composer")
+		}
+	})
+
+	t.Run("nothing staged", func(t *testing.T) {
+		repo := testRepo(t)
+		// Unstage the fixture's one staged file.
+		if err := repo.Unstage([]string{"bar.txt"}, repo.StatusParent(false)); err != nil {
+			t.Fatal(err)
+		}
+		m := drive(t, New(repo),
+			tea.WindowSizeMsg{Width: 120, Height: 40},
+			New(repo).rescanCmd()(),
+		)
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		m.commit.SetValue("a message")
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		if m.compose != composeEdit {
+			t.Errorf("compose = %v, want to stay in composeEdit", m.compose)
+		}
+		if !strings.Contains(m.composeErr, "Stage at least one file") {
+			t.Errorf("composeErr = %q", m.composeErr)
+		}
+	})
+
+	t.Run("typing clears the refusal", func(t *testing.T) {
+		m := composeModel(t, "")
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		if m.composeErr == "" {
+			t.Fatal("expected a refusal")
+		}
+		m = drive(t, m, rkey("x"))
+		if m.composeErr != "" {
+			t.Errorf("composeErr = %q, want it cleared once typing resumed", m.composeErr)
+		}
+	})
+}
+
+// The composer is a full text field: letters are text and readline keys edit.
+func TestComposerIsATextField(t *testing.T) {
+	m := composeModel(t, "")
+	typed := "sauveoRPMNKc"
+	for _, r := range typed {
+		m = drive(t, m, rkey(string(r)))
+	}
+	if m.commit.Value() != typed {
+		t.Errorf("composer = %q, want %q", m.commit.Value(), typed)
+	}
+	if m.dialog != nil {
+		t.Fatalf("typing opened the %q dialog", m.dialog.title)
+	}
+
+	// Ctrl-A then Ctrl-K clears the line, as readline would.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlA})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlK})
+	if m.commit.Value() != "" {
+		t.Errorf("composer = %q, want Ctrl-A Ctrl-K to have cleared it", m.commit.Value())
+	}
+}
+
+// Sign off and amend are run before opening the composer, and both show up in
+// the message it presents.
+func TestSignOffAndAmendFeedTheComposer(t *testing.T) {
+	m := newTestModel(t)
+	m = drive(t, m, rkey("o"))
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if !strings.Contains(m.commit.Value(), "Signed-off-by:") {
+		t.Errorf("composer = %q, want the sign off", m.commit.Value())
+	}
+	if !strings.Contains(m.View(), "Signed-off-by:") {
+		t.Error("the sign off is not visible in the composer")
+	}
+}
+
+// The diff now owns the whole right column, so there is nothing below it.
+func TestDiffHasNoPaneBelow(t *testing.T) {
+	m := diffModel(t)
+	m.diff.moveTo(len(m.diff.lines) - 1)
+	got := drive(t, m, rkey("j"))
+	if got.focus != focusDiff {
+		t.Errorf("focus = %v, want to stay on the diff", got.focus)
+	}
+	if _, ok := paneBelow(focusDiff); ok {
+		t.Error("the diff should have no pane below it")
+	}
+	if _, ok := paneAbove(focusDiff); ok {
+		t.Error("the diff should have no pane above it")
 	}
 }

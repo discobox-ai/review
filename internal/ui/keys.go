@@ -7,10 +7,10 @@ import "github.com/charmbracelet/bubbles/key"
 //	a letter   runs a command, in the file lists and the diff.
 //	Ctrl       edits text, and is never a command.
 //
-// In the commit message a letter is text, so commands are not reachable there
-// — press Tab to leave the buffer first. The one exception is Ctrl-Enter,
-// which commits, because that is the whole reason you were in the buffer. A
-// terminal sends it as 0x0A, byte-identical to Ctrl-J, so both are bound.
+// Ctrl-Enter opens the commit composer, and inside it Ctrl-Enter asks to
+// commit. A terminal sends Ctrl-Enter as 0x0A, byte-identical to Ctrl-J, so
+// both are bound. Inside the composer a letter is text; Esc closes it, keeping
+// what was typed.
 //
 // Alt is used only to jump straight to a pane (Alt-1 to Alt-4); Tab does the
 // same thing without it, which matters on macOS where Option is not Meta
@@ -30,7 +30,6 @@ type keyMap struct {
 	FocusWorkdir key.Binding
 	FocusIndex   key.Binding
 	FocusDiff    key.Binding
-	FocusCommit  key.Binding
 	NextPane     key.Binding
 	PrevPane     key.Binding
 
@@ -41,7 +40,6 @@ type keyMap struct {
 	RevertKey       key.Binding
 	SignOffKey      key.Binding
 	AmendKey        key.Binding
-	CommitKey       key.Binding
 	PushKey         key.Binding
 	MergeKey        key.Binding
 	BranchKey       key.Binding
@@ -80,13 +78,12 @@ func newKeyMap() keyMap {
 		// Ctrl-J is what a terminal sends for Ctrl-Enter. This is the only
 		// command reachable from inside the message buffer, and the only one
 		// worth reaching from there.
-		Commit: key.NewBinding(key.WithKeys("ctrl+j", "ctrl+enter"), key.WithHelp("Ctrl-Enter", "commit")),
+		Commit: key.NewBinding(key.WithKeys("ctrl+j", "ctrl+enter"), key.WithHelp("Ctrl-Enter", "write a commit")),
 		Rescan: key.NewBinding(key.WithKeys("f5"), key.WithHelp("F5", "rescan")),
 
 		FocusWorkdir: key.NewBinding(key.WithKeys("alt+1"), key.WithHelp("Alt-1", "unstaged")),
 		FocusIndex:   key.NewBinding(key.WithKeys("alt+2"), key.WithHelp("Alt-2", "staged")),
 		FocusDiff:    key.NewBinding(key.WithKeys("alt+3"), key.WithHelp("Alt-3", "diff")),
-		FocusCommit:  key.NewBinding(key.WithKeys("alt+4"), key.WithHelp("Alt-4", "message")),
 		NextPane:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "next pane")),
 		PrevPane:     key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("Shift-Tab", "prev pane")),
 
@@ -96,7 +93,6 @@ func newKeyMap() keyMap {
 		RevertKey:       key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "revert changes")),
 		SignOffKey:      key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "sign off")),
 		AmendKey:        key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "amend last commit")),
-		CommitKey:       key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "commit")),
 		PushKey:         key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "push")),
 		MergeKey:        key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "local merge")),
 		BranchKey:       key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "new branch")),
