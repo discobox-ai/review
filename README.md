@@ -7,21 +7,18 @@ with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and
 
 ```
 Current Branch: main                                        difftui · F1 help · Ctrl-Q quit
- Unstaged Changes               2 files │ Modified, not staged   File: foo.txt        hunk 1/2
-  ✎ foo.txt                             │@@ -1,5 +1,5 @@
-  + new.txt                             │  one
-                                        │ -two
-                                        │+ TWO
-                                        │  three
- Staged Changes (Will Commit)    1 file │  four
-  ✔ bar.txt                             │
-                                        │Commit Message:              [ ] Amend Last Commit
-                                        │[ Rescan        F5 ] the commit message goes here
-                                        │[ Stage Changed  i ]
-                                        │[ Sign Off      ^S ]
-                                        │[ Commit        ^↵ ]
-                                        │[ Push          ^P ]
-Space stage hunk · v select lines · S stage lines · r revert hunk    U:2  S:1  ctx:5
+ Unstaged Changes               2 files │ Modified, not staged   File: foo.txt   hunk 1/1
+  ✎ foo.txt                             │    @@ -1,5 +1,5 @@
+  + new.txt                             │  1   one
+                                        │  2  -two
+                                        │  2 + TWO
+                                        │  3   three
+ Staged Changes (Will Commit)    1 file │  4   four
+  ✔ bar.txt                             │  5   five
+                                        │
+                                        │
+                                        │
+Space stage · s stage · a stage all · v revert · m mark      U:2  S:1  ctx:5
 ```
 
 ## Install
@@ -134,7 +131,7 @@ it, and clear as soon as you carry on typing.
 On startup the first file in **Unstaged Changes** is focused with its diff
 already loaded, so the command letters are live immediately.
 
-The four panes form a grid, and navigation walks it:
+The three panes form a grid, and navigation walks it:
 
 ```
 Unstaged │
@@ -197,7 +194,7 @@ Letters also need no modifier, which sidesteps macOS: Option is not Meta there
 unless the terminal is configured for it, so an `Alt`-based scheme would arrive
 as accented characters. (Option never maps to Cmd either, and Cmd is intercepted
 by the terminal itself, so it cannot be bound at all.) The only `Alt` bindings
-left are `Alt-1` … `Alt-4` for jumping straight to a pane, and `Tab` does the
+left are `Alt-1` … `Alt-3` for jumping straight to a pane, and `Tab` does the
 same thing without them.
 
 ## How a diff is drawn
@@ -342,12 +339,14 @@ every marked file. With nothing marked they apply to the file under the cursor.
 | `internal/git/git.go` | Every git invocation, the file state table and the scan |
 | `internal/git/patch.go` | Unified diff parsing, and building hunk/line patches |
 | `internal/ui/model.go` | The Bubble Tea model: layout, keys, actions |
+| `internal/ui/keys.go` | Every binding, and the one rule they follow |
 | `internal/ui/filelist.go` | The two file panes |
 | `internal/ui/diffview.go` | The diff pane, hunk cursor, line selection and row drawing |
 | `internal/ui/syntax.go` | Lexing a hunk and the syntax palette |
 | `internal/ui/emphasis.go` | Tabs, and finding the characters that changed |
-| `internal/ui/syntax.go` | Lexing a hunk and the highlighting palette |
 | `internal/ui/dialog.go` | The modal layer standing in for git gui's popups |
+| `internal/ui/theme.go` | The palette, echoing Tk git gui's colours |
+| `internal/ui/util.go` | Width-aware padding and truncation |
 
 Hunk and line staging work by rebuilding a minimal patch and feeding it to
 `git apply --cached`, reversing it to unstage — the same trick git gui uses.
@@ -380,3 +379,7 @@ thing: staging a single hunk out of two, unstaging one in reverse, staging one
 line out of several, reverting a hunk from the working tree, amending, and
 merge conflicts. The `internal/ui` tests drive the model with synthetic key
 messages and assert on the rendered frame.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
