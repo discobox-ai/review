@@ -27,7 +27,7 @@ Space stage hunk · v select lines · S stage lines · r revert hunk    U:2  S:1
 ## Install
 
 ```sh
-go install github.com/obot-platform/difftui@latest
+go install github.com/discobox-ai/difftui@latest
 ```
 
 Or from a checkout:

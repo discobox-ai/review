@@ -8,7 +8,7 @@ import (
 	"github.com/alecthomas/chroma/v2"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
-	"github.com/obot-platform/difftui/internal/git"
+	"github.com/discobox-ai/difftui/internal/git"
 )
 
 // Tests run without a terminal, where lipgloss resolves to no colour at all

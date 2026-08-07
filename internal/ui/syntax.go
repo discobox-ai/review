@@ -6,7 +6,7 @@ import (
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/obot-platform/difftui/internal/git"
+	"github.com/discobox-ai/difftui/internal/git"
 )
 
 // span is a run of one line that the lexer identified as a single token, in

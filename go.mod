@@ -1,4 +1,4 @@
-module github.com/obot-platform/difftui
+module github.com/discobox-ai/difftui
 
 go 1.26.5
 

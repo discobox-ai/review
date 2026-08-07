@@ -10,7 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/obot-platform/difftui/internal/git"
+	"github.com/discobox-ai/difftui/internal/git"
 )
 
 func testRepo(t *testing.T) *git.Repo {

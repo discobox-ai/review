@@ -5,7 +5,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
-	"github.com/obot-platform/difftui/internal/git"
+	"github.com/discobox-ai/difftui/internal/git"
 )
 
 // diffView is the diff pane. It keeps the parsed patch around so that hunks

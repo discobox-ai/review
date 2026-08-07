@@ -10,8 +10,8 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/obot-platform/difftui/internal/git"
-	"github.com/obot-platform/difftui/internal/ui"
+	"github.com/discobox-ai/difftui/internal/git"
+	"github.com/discobox-ai/difftui/internal/ui"
 )
 
 var version = "dev"

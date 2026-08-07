@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/obot-platform/difftui/internal/git"
+	"github.com/discobox-ai/difftui/internal/git"
 )
 
 // fileList is one of the two file panes. It renders an icon per file exactly

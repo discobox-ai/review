@@ -3,7 +3,7 @@ package ui
 import (
 	"strings"
 
-	"github.com/obot-platform/difftui/internal/git"
+	"github.com/discobox-ai/difftui/internal/git"
 )
 
 // tabWidth is what a tab expands to in the diff pane. Tabs are expanded before
