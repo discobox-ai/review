@@ -8,10 +8,13 @@ var (
 	colSalmon   = lipgloss.Color("216")
 	colGreen    = lipgloss.Color("120")
 	colGold     = lipgloss.Color("220")
+	colSky      = lipgloss.Color("153")
+	colLavender = lipgloss.Color("183")
 	colBlack    = lipgloss.Color("232")
 	colGrey     = lipgloss.Color("245")
 	colDim      = lipgloss.Color("240")
 	colSelBG    = lipgloss.Color("24")
+	colSelRange = lipgloss.Color("17")
 	colInactive = lipgloss.Color("236")
 	colAdd      = lipgloss.Color("77")
 	colDel      = lipgloss.Color("203")
@@ -37,10 +40,16 @@ type styles struct {
 	titleUnstaged lipgloss.Style
 	titleStaged   lipgloss.Style
 	titleDiff     lipgloss.Style
+	titleCommit   lipgloss.Style
+	titleCommits  lipgloss.Style
 	titleDim      lipgloss.Style
 
+	// sel is the row the cursor is on, selRange the dimmer band over a visual
+	// selection, and selInactive the cursor row in a pane without focus.
 	sel         lipgloss.Style
+	selRange    lipgloss.Style
 	selInactive lipgloss.Style
+	commitHead  lipgloss.Style // the working tree row in the branch history
 
 	body     lipgloss.Style
 	dimText  lipgloss.Style
@@ -82,9 +91,13 @@ func newStyles() *styles {
 	s.titleUnstaged = title.Background(colSalmon)
 	s.titleStaged = title.Background(colGreen)
 	s.titleDiff = title.Background(colGold)
+	s.titleCommit = title.Background(colSky)
+	s.titleCommits = title.Background(colLavender)
 	s.titleDim = lipgloss.NewStyle().Foreground(colGrey).Background(colInactive).Padding(0, 1)
 
 	s.sel = lipgloss.NewStyle().Background(colSelBG)
+	s.selRange = lipgloss.NewStyle().Background(colSelRange)
+	s.commitHead = lipgloss.NewStyle().Bold(true)
 	s.selInactive = lipgloss.NewStyle().Background(colInactive)
 
 	s.body = lipgloss.NewStyle()

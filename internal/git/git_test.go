@@ -553,6 +553,521 @@ func TestUnstageWhileAmending(t *testing.T) {
 	}
 }
 
+// Rescan answers in one call everything the display used to ask for one
+// command at a time, and hands back the parent it used so the diffs that
+// follow do not have to work it out again.
+func TestRescanGathersTheWholeScan(t *testing.T) {
+	r := testRepo(t)
+	write(t, r.Dir, "foo.txt", "one\nTWO\nthree\nfour\nfive\n")
+	write(t, r.Dir, "new.txt", "brand new\n")
+
+	scan, err := r.Rescan(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.Parent != "HEAD" {
+		t.Errorf("parent = %q, want HEAD", scan.Parent)
+	}
+	if !scan.HasHEAD {
+		t.Error("HasHEAD is false in a repository with a commit")
+	}
+	if scan.Branch != "main" {
+		t.Errorf("branch = %q, want main", scan.Branch)
+	}
+	if scan.Merging || scan.Merge != "" {
+		t.Errorf("merging = %v, message = %q", scan.Merging, scan.Merge)
+	}
+	got := map[string]State{}
+	for _, f := range scan.Files {
+		got[f.Path] = f.State
+	}
+	if got["foo.txt"] != "_M" || got["new.txt"] != "_O" {
+		t.Errorf("files = %v", got)
+	}
+
+	// And amending measures the index against HEAD's own parent, exactly as
+	// StatusParent does for a caller that asks separately.
+	amending, err := r.Rescan(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := r.StatusParent(true); amending.Parent != want {
+		t.Errorf("amending parent = %q, want %q", amending.Parent, want)
+	}
+}
+
+// withRemote gives a repository an origin holding its current history, so the
+// merge base has something to measure against.
+func withRemote(t *testing.T, r *Repo, setHead bool) {
+	t.Helper()
+	bare := t.TempDir()
+	if _, err := (Local{}).Git(bare, nil, "init", "-q", "--bare", "-b", "main", "."); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"remote", "add", "origin", bare},
+		{"push", "-q", "origin", "main"},
+	} {
+		if _, err := r.Git(args...); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	if setHead {
+		if _, err := r.Git("remote", "set-head", "origin", "main"); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The merge base is where the branch left the remote's default branch, and
+// ahead/behind is how far each has moved since.
+func TestMergeBaseMeasuresAgainstTheRemoteDefault(t *testing.T) {
+	r := testRepo(t)
+	withRemote(t, r, true)
+
+	forked, err := r.Git("rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	forked = strings.TrimSpace(forked)
+
+	base, ok := r.MergeBase()
+	if !ok {
+		t.Fatal("no merge base against a pushed branch")
+	}
+	if base.Ref != "origin/main" {
+		t.Errorf("ref = %q, want origin/main", base.Ref)
+	}
+	if !strings.HasPrefix(forked, base.Commit) {
+		t.Errorf("commit = %q, want a prefix of %q", base.Commit, forked)
+	}
+	if base.Ahead != 0 || base.Behind != 0 {
+		t.Errorf("a just-pushed branch is ↑%d ↓%d, want ↑0 ↓0", base.Ahead, base.Behind)
+	}
+
+	// Two commits on top of what was pushed, and the base stays put.
+	for _, body := range []string{"local one\n", "local two\n"} {
+		write(t, r.Dir, "foo.txt", body)
+		if err := r.Stage([]string{"foo.txt"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Commit("ahead", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base, ok = r.MergeBase()
+	if !ok {
+		t.Fatal("no merge base after committing")
+	}
+	if !strings.HasPrefix(forked, base.Commit) {
+		t.Errorf("the base moved to %q; it should stay at the fork %q", base.Commit, forked)
+	}
+	if base.Ahead != 2 || base.Behind != 0 {
+		t.Errorf("↑%d ↓%d, want ↑2 ↓0", base.Ahead, base.Behind)
+	}
+}
+
+// Behind counts what the remote branch has that HEAD does not.
+func TestMergeBaseCountsBehind(t *testing.T) {
+	r := testRepo(t)
+	withRemote(t, r, true)
+
+	// Move origin/main on without moving HEAD, the way a fetch would.
+	write(t, r.Dir, "foo.txt", "remote work\n")
+	if err := r.Stage([]string{"foo.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Commit("upstream", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Git("push", "-q", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Git("reset", "-q", "--hard", "HEAD^"); err != nil {
+		t.Fatal(err)
+	}
+
+	base, ok := r.MergeBase()
+	if !ok {
+		t.Fatal("no merge base")
+	}
+	if base.Ahead != 0 || base.Behind != 1 {
+		t.Errorf("↑%d ↓%d, want ↑0 ↓1", base.Ahead, base.Behind)
+	}
+}
+
+// What the branch tracks wins over the remote's default branch. This is the
+// shape you get from adding a second remote by hand and pointing the branch at
+// it: origin still has a recorded HEAD, but the branch was told to build on
+// something else, and that is what git status reports too.
+func TestMergeBaseFollowsTheUpstream(t *testing.T) {
+	r := testRepo(t)
+	withRemote(t, r, true) // origin, with origin/HEAD -> origin/main
+
+	fork := t.TempDir()
+	if _, err := (Local{}).Git(fork, nil, "init", "-q", "--bare", "-b", "main", "."); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"remote", "add", "fork", fork},
+		{"push", "-q", "fork", "main"},
+		{"branch", "--set-upstream-to", "fork/main", "main"},
+	} {
+		if _, err := r.Git(args...); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+
+	base, ok := r.MergeBase()
+	if !ok {
+		t.Fatal("no merge base against the upstream")
+	}
+	if base.Ref != "fork/main" {
+		t.Errorf("ref = %q, want fork/main — the branch tracks it, "+
+			"even though origin/HEAD names origin/main", base.Ref)
+	}
+	// And it agrees with what the rest of git reports for the same branch.
+	out, err := r.Git("rev-parse", "--abbrev-ref", "@{upstream}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.TrimSpace(out); base.Ref != want {
+		t.Errorf("ref = %q, but git says the upstream is %q", base.Ref, want)
+	}
+}
+
+// A branch that tracks nothing falls back to the remote's default branch, so
+// an unpushed branch still shows where it left trunk.
+func TestMergeBaseFallsBackWhenNothingIsTracked(t *testing.T) {
+	r := testRepo(t)
+	withRemote(t, r, true)
+	if _, err := r.Git("checkout", "-q", "-b", "feature"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Git("rev-parse", "--abbrev-ref", "@{upstream}"); err == nil {
+		t.Fatal("the new branch was expected to track nothing")
+	}
+
+	base, ok := r.MergeBase()
+	if !ok {
+		t.Fatal("no merge base on an untracked branch")
+	}
+	if base.Ref != "origin/main" {
+		t.Errorf("ref = %q, want origin/main", base.Ref)
+	}
+}
+
+// A remote whose HEAD was never recorded — a single-branch clone, a remote
+// added by hand — still resolves, by the usual branch names.
+func TestMergeBaseFallsBackToTheUsualNames(t *testing.T) {
+	r := testRepo(t)
+	withRemote(t, r, false)
+	if _, err := r.Git("symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
+		t.Skip("this git records origin/HEAD on push; the fallback is untested here")
+	}
+	base, ok := r.MergeBase()
+	if !ok {
+		t.Fatal("no merge base without origin/HEAD")
+	}
+	if base.Ref != "origin/main" {
+		t.Errorf("ref = %q, want origin/main", base.Ref)
+	}
+}
+
+// No remote is an ordinary state, not an error: there is simply no base.
+func TestMergeBaseWithoutARemote(t *testing.T) {
+	r := testRepo(t)
+	if base, ok := r.MergeBase(); ok {
+		t.Errorf("a repository with no remote reported a base: %+v", base)
+	}
+}
+
+// The scan carries the base along with everything else it learns.
+func TestRescanCarriesTheBase(t *testing.T) {
+	r := testRepo(t)
+	withRemote(t, r, true)
+	scan, err := r.Rescan(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.Base.Ref != "origin/main" {
+		t.Errorf("scan base = %+v, want origin/main", scan.Base)
+	}
+}
+
+// The branch's own commits are the ones the base does not have, newest first.
+func TestCommitsListsWhatTheBranchAdds(t *testing.T) {
+	r := testRepo(t)
+	withRemote(t, r, true)
+	for _, subject := range []string{"first on top", "second on top"} {
+		write(t, r.Dir, "foo.txt", subject+"\n")
+		if err := r.Stage([]string{"foo.txt"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Commit(subject, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	commits, err := r.Commits("origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 2 {
+		t.Fatalf("got %d commits, want the 2 added on top: %+v", len(commits), commits)
+	}
+	if commits[0].Subject != "second on top" {
+		t.Errorf("commits[0] = %q, want the newest first", commits[0].Subject)
+	}
+	if commits[1].Subject != "first on top" {
+		t.Errorf("commits[1] = %q", commits[1].Subject)
+	}
+	for _, c := range commits {
+		if len(c.Hash) < 40 || !strings.HasPrefix(c.Hash, c.Short) {
+			t.Errorf("hash %q / short %q do not agree", c.Hash, c.Short)
+		}
+	}
+
+	// The scan carries them, and only when the branch is ahead.
+	scan, err := r.Rescan(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan.Commits) != 2 {
+		t.Errorf("scan carried %d commits, want 2", len(scan.Commits))
+	}
+	if _, err := r.Git("push", "-q", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if scan, err = r.Rescan(false); err != nil {
+		t.Fatal(err)
+	}
+	if len(scan.Commits) != 0 {
+		t.Errorf("a branch level with its base listed %d commits", len(scan.Commits))
+	}
+}
+
+// A subject with spaces survives the parse, since only the first space
+// separates it from the hash.
+func TestCommitSubjectsKeepTheirSpaces(t *testing.T) {
+	r := testRepo(t)
+	withRemote(t, r, true)
+	subject := "Put every external call behind one System interface"
+	write(t, r.Dir, "foo.txt", "changed\n")
+	if err := r.Stage([]string{"foo.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Commit(subject, false); err != nil {
+		t.Fatal(err)
+	}
+	commits, err := r.Commits("origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 1 || commits[0].Subject != subject {
+		t.Errorf("commits = %+v, want the one subject %q", commits, subject)
+	}
+}
+
+// A commit's files are what it changed against its parent, with the status
+// character naming the change rather than a staging state.
+func TestCommitFilesAndDiff(t *testing.T) {
+	r := testRepo(t)
+	write(t, r.Dir, "foo.txt", "one\nCHANGED\nthree\nfour\nfive\n")
+	write(t, r.Dir, "added.txt", "brand new\n")
+	if err := r.Stage([]string{"foo.txt", "added.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Commit("a commit to inspect", false); err != nil {
+		t.Fatal(err)
+	}
+	head, err := r.Git("rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	head = strings.TrimSpace(head)
+
+	files, err := r.CommitFiles(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]State{}
+	for _, f := range files {
+		got[f.Path] = f.State
+	}
+	if got["foo.txt"] != "M_" || got["added.txt"] != "A_" {
+		t.Fatalf("files = %v, want foo.txt M_ and added.txt A_", got)
+	}
+	if d := State("M_").DescribeChange(); d != "Modified" {
+		t.Errorf("M_ describes as %q, want Modified", d)
+	}
+	if d := State("A_").DescribeChange(); d != "Added" {
+		t.Errorf("A_ describes as %q, want Added", d)
+	}
+
+	diff, err := r.CommitDiff(head, File{Path: "foo.txt", State: "M_"}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diff, "+CHANGED") || !strings.Contains(diff, "-two") {
+		t.Errorf("the commit's diff for foo.txt:\n%s", diff)
+	}
+	// The commit's own header must not be in it, only the patch.
+	if strings.Contains(diff, "a commit to inspect") {
+		t.Errorf("the commit message leaked into the diff:\n%s", diff)
+	}
+}
+
+// The very first commit has no parent, and still lists what it brought.
+func TestCommitFilesOnTheRootCommit(t *testing.T) {
+	r := testRepo(t)
+	root, err := r.Git("rev-list", "--max-parents=0", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := r.CommitFiles(strings.TrimSpace(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("the root commit listed no files")
+	}
+	if files[0].Path != "foo.txt" || files[0].State != "A_" {
+		t.Errorf("root commit files = %+v, want foo.txt added", files)
+	}
+}
+
+// A soft reset moves the branch and nothing else: the work in the popped
+// commits is still in the index afterwards, because the index never moved.
+func TestResetSoftPopsCommitsAndKeepsTheWork(t *testing.T) {
+	r := testRepo(t)
+	withRemote(t, r, true)
+	base, err := r.Git("rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base = strings.TrimSpace(base)
+
+	for _, body := range []string{"first\n", "second\n"} {
+		write(t, r.Dir, "foo.txt", body)
+		if err := r.Stage([]string{"foo.txt"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Commit("on top", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Something unstaged as well, which must survive untouched.
+	write(t, r.Dir, "loose.txt", "not staged\n")
+
+	commits, err := r.Commits("origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 2 {
+		t.Fatalf("want 2 commits ahead, got %d", len(commits))
+	}
+	// The parent of the older of the two is the base.
+	parent, ok := r.Parent(commits[1].Hash)
+	if !ok {
+		t.Fatal("the older commit has no parent")
+	}
+	if parent != base {
+		t.Fatalf("parent = %q, want the base %q", parent, base)
+	}
+
+	if err := r.ResetSoft(parent); err != nil {
+		t.Fatal(err)
+	}
+
+	if head, _ := r.Git("rev-parse", "HEAD"); strings.TrimSpace(head) != base {
+		t.Errorf("HEAD = %q, want the base %q", strings.TrimSpace(head), base)
+	}
+	if left, err := r.Commits("origin/main"); err != nil || len(left) != 0 {
+		t.Errorf("commits left = %+v (err %v), want none", left, err)
+	}
+	// foo.txt's change is staged, and the loose file is still just sitting there.
+	files, err := r.Status(r.StatusParent(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]State{}
+	for _, f := range files {
+		got[f.Path] = f.State
+	}
+	if got["foo.txt"] != "M_" {
+		t.Errorf("foo.txt = %q, want M_ (staged)", got["foo.txt"])
+	}
+	if got["loose.txt"] != "_O" {
+		t.Errorf("loose.txt = %q, want it left untracked", got["loose.txt"])
+	}
+	if body := read(t, r, "foo.txt"); body != "second\n" {
+		t.Errorf("the working tree was touched: foo.txt = %q", body)
+	}
+}
+
+// The root commit has nothing to reset back to.
+func TestParentOfTheRootCommit(t *testing.T) {
+	r := testRepo(t)
+	root, err := r.Git("rev-list", "--max-parents=0", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parent, ok := r.Parent(strings.TrimSpace(root)); ok {
+		t.Errorf("the root commit reported a parent %q", parent)
+	}
+}
+
+// The editor comes from $EDITOR, which may carry arguments of its own, and
+// falls back to vi when the environment says nothing.
+func TestEditorHonoursTheEnvironment(t *testing.T) {
+	r := testRepo(t)
+	for _, tc := range []struct {
+		env  string
+		want []string
+	}{
+		{"", []string{"vi"}},
+		{"nano", []string{"nano"}},
+		{"code -w", []string{"code", "-w"}},
+		{"  emacsclient   -nw  ", []string{"emacsclient", "-nw"}},
+	} {
+		t.Setenv("EDITOR", tc.env)
+		ed, err := r.Edit("foo.txt")
+		if err != nil {
+			t.Fatalf("EDITOR=%q: %v", tc.env, err)
+		}
+		cmd, ok := ed.(editorCmd)
+		if !ok {
+			t.Fatalf("EDITOR=%q: got %T", tc.env, ed)
+		}
+		want := append(append([]string{}, tc.want...), filepath.Join(r.Dir, "foo.txt"))
+		if len(cmd.Args) != len(want) {
+			t.Errorf("EDITOR=%q: args = %v, want %v", tc.env, cmd.Args, want)
+			continue
+		}
+		for i := range want {
+			if cmd.Args[i] != want[i] {
+				t.Errorf("EDITOR=%q: args = %v, want %v", tc.env, cmd.Args, want)
+				break
+			}
+		}
+		if cmd.Dir != r.Dir {
+			t.Errorf("EDITOR=%q: dir = %q, want the work tree", tc.env, cmd.Dir)
+		}
+	}
+}
+
+// A path that is not on disk is refused rather than created.
+func TestEditRefusesAMissingPath(t *testing.T) {
+	r := testRepo(t)
+	if _, err := r.Edit("never-existed.txt"); err == nil {
+		t.Error("editing a path that is not there was allowed")
+	}
+	if _, err := r.Edit("foo.txt"); err != nil {
+		t.Errorf("editing a real file was refused: %v", err)
+	}
+}
+
 func TestStatusParentPicksTheRightRevision(t *testing.T) {
 	r := testRepo(t)
 	if got := r.StatusParent(false); got != "HEAD" {

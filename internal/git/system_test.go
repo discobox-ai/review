@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"io/fs"
 	"path/filepath"
 	"strings"
@@ -199,6 +200,20 @@ func (f *fakeSystem) Stat(path string) (FileInfo, error) {
 		return FileInfo{}, fs.ErrNotExist
 	}
 	return FileInfo{ModTime: f.times[path], IsDir: f.dirs[path]}, nil
+}
+
+// fakeEditor stands in for a program that takes the terminal: it records that
+// it was asked for and returns without doing anything.
+type fakeEditor struct{ path string }
+
+func (fakeEditor) Run() error          { return nil }
+func (fakeEditor) SetStdin(io.Reader)  {}
+func (fakeEditor) SetStdout(io.Writer) {}
+func (fakeEditor) SetStderr(io.Writer) {}
+
+func (f *fakeSystem) Editor(dir, path string) Editor {
+	f.fileCalls = append(f.fileCalls, "edit "+path)
+	return fakeEditor{path: path}
 }
 
 func (f *fakeSystem) HomeDir() (string, error) { return "/home/fake", nil }

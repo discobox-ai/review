@@ -1,10 +1,14 @@
 package ui
 
 import (
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +18,17 @@ import (
 )
 
 func testRepo(t *testing.T) *git.Repo {
+	t.Helper()
+	r, err := git.Open(testRepoDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// testRepoDir builds the working tree the tests run against and returns its
+// path, for the few that want to open it through a System of their own.
+func testRepoDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	for _, args := range [][]string{
@@ -39,11 +54,7 @@ func testRepo(t *testing.T) *git.Repo {
 	gitRun(t, dir, "add", "bar.txt")
 	writeFile(t, dir, "new.txt", "brand new\n")
 
-	r, err := git.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return r
+	return dir
 }
 
 func writeFile(t *testing.T, dir, name, content string) {
@@ -121,6 +132,837 @@ func TestViewRenders(t *testing.T) {
 	}
 	if t.Failed() || testing.Verbose() {
 		t.Logf("\n%s", view)
+	}
+}
+
+// The branch bar names the remote branch this one is based on, where the two
+// last met, and how far each has moved since.
+func TestBranchBarShowsTheMergeBase(t *testing.T) {
+	dir := testRepoDir(t)
+	bare := t.TempDir()
+	gitRun(t, bare, "init", "-q", "--bare", "-b", "main", ".")
+	gitRun(t, dir, "remote", "add", "origin", bare)
+	gitRun(t, dir, "push", "-q", "origin", "main")
+	gitRun(t, dir, "remote", "set-head", "origin", "main")
+	// One commit past what origin has, so the counts are not both zero.
+	gitRun(t, dir, "commit", "-qm", "ahead")
+
+	repo, err := git.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	if m.base.Ref != "origin/main" {
+		t.Fatalf("base = %+v, want origin/main", m.base)
+	}
+	bar := m.viewBranchBar()
+	for _, want := range []string{"base: ", "origin/main", m.base.Commit, "↑1", "↓0"} {
+		if !strings.Contains(bar, want) {
+			t.Errorf("branch bar is missing %q:\n%s", want, bar)
+		}
+	}
+}
+
+// With no remote there is nothing to be based on, and the bar says nothing
+// rather than showing an empty base.
+func TestBranchBarWithoutARemote(t *testing.T) {
+	m := newTestModel(t)
+	if m.base.Ref != "" {
+		t.Fatalf("base = %+v, want none", m.base)
+	}
+	if bar := m.viewBranchBar(); strings.Contains(bar, "base:") {
+		t.Errorf("branch bar names a base with no remote:\n%s", bar)
+	}
+}
+
+// A narrow terminal drops the base rather than truncating the branch name.
+func TestNarrowBranchBarDropsTheBase(t *testing.T) {
+	m := newTestModel(t)
+	m.base = git.Base{Ref: "origin/main", Commit: "abc1234", Ahead: 3, Behind: 1}
+	if bar := m.viewBranchBar(); !strings.Contains(bar, "origin/main") {
+		t.Fatalf("the base should fit at %d columns:\n%s", m.width, bar)
+	}
+	m.width = 52
+	bar := m.viewBranchBar()
+	if strings.Contains(bar, "base:") {
+		t.Errorf("the base survived at 52 columns:\n%s", bar)
+	}
+	if !strings.Contains(bar, m.branch) {
+		t.Errorf("the branch name was dropped instead:\n%s", bar)
+	}
+}
+
+// aheadModel builds a repository with a base and n commits on top of it, plus
+// the fixture's uncommitted work, and drives a model to its first scan.
+func aheadModel(t *testing.T, n int) Model {
+	t.Helper()
+	dir := testRepoDir(t)
+	bare := t.TempDir()
+	gitRun(t, bare, "init", "-q", "--bare", "-b", "main", ".")
+	gitRun(t, dir, "stash", "-q", "-u")
+	gitRun(t, dir, "remote", "add", "origin", bare)
+	gitRun(t, dir, "push", "-q", "origin", "main")
+	gitRun(t, dir, "remote", "set-head", "origin", "main")
+	for i := 0; i < n; i++ {
+		writeFile(t, dir, "ahead.txt", strings.Repeat("x\n", i+1))
+		gitRun(t, dir, "add", "ahead.txt")
+		gitRun(t, dir, "commit", "-qm", "commit number "+itoa(i+1))
+	}
+	gitRun(t, dir, "stash", "pop", "-q")
+
+	repo, err := git.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+}
+
+// The branch history is a third pane on the left, and only when the branch has
+// commits of its own.
+func TestBranchHistoryAppearsWhenAhead(t *testing.T) {
+	m := aheadModel(t, 2)
+	if !m.showCommits() {
+		t.Fatal("showCommits() is false with two commits ahead")
+	}
+	if len(m.commits.commits) != 2 {
+		t.Fatalf("history holds %d commits, want 2", len(m.commits.commits))
+	}
+	view := m.View()
+	for _, want := range []string{"This Branch", "working tree", "commit number 2", "commit number 1"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the history pane is missing %q:\n%s", want, view)
+		}
+	}
+	// Newest first, under the working tree row.
+	if m.commits.commits[0].Subject != "commit number 2" {
+		t.Errorf("commits[0] = %q, want the newest", m.commits.commits[0].Subject)
+	}
+
+	// A branch level with its base has no pane.
+	level := newTestModel(t)
+	if level.showCommits() {
+		t.Error("a branch with no base and no commits still showed the pane")
+	}
+	if strings.Contains(level.View(), "This Branch") {
+		t.Errorf("the history pane is on screen with nothing to show:\n%s", level.View())
+	}
+}
+
+// The cursor starts on the working tree, and the two working lists are what is
+// on screen until a commit is picked.
+func TestHistoryStartsOnTheWorkingTree(t *testing.T) {
+	m := aheadModel(t, 2)
+	if m.browsing() {
+		t.Fatal("the history should start on the working tree")
+	}
+	view := m.View()
+	if !strings.Contains(view, "Unstaged Changes") || !strings.Contains(view, "Staged Changes") {
+		t.Errorf("the working lists should be on screen:\n%s", view)
+	}
+	if strings.Contains(view, "Files in ") {
+		t.Errorf("a commit's files are on screen already:\n%s", view)
+	}
+}
+
+// Selecting a commit swaps the two working lists for its files, and the diff
+// follows to the file under the cursor.
+func TestSelectingACommitSwapsTheLists(t *testing.T) {
+	m := aheadModel(t, 2)
+	m = drive(t, m, altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+
+	c, ok := m.commits.selected()
+	if !ok {
+		t.Fatal("down from the working tree did not reach a commit")
+	}
+	if c.Subject != "commit number 2" {
+		t.Errorf("selected %q, want the newest commit", c.Subject)
+	}
+	if !m.browsing() {
+		t.Fatal("browsing() is false with a commit selected")
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "Files in "+c.Short) {
+		t.Errorf("the commit's files are not on screen:\n%s", view)
+	}
+	if strings.Contains(view, "Unstaged Changes") || strings.Contains(view, "Staged Changes") {
+		t.Errorf("the working lists survived the swap:\n%s", view)
+	}
+	if len(m.history.files) != 1 || m.history.files[0].Path != "ahead.txt" {
+		t.Errorf("the commit's files = %+v, want ahead.txt", m.history.files)
+	}
+
+	// The diff is that commit's own change to the file, keyed to the commit.
+	if m.diff.shown.commit != c.Hash {
+		t.Errorf("diff commit = %q, want %q", m.diff.shown.commit, c.Hash)
+	}
+	if m.diff.side != git.SideCommit {
+		t.Errorf("diff side = %v, want SideCommit", m.diff.side)
+	}
+	status, path := m.diff.headerText()
+	if path != "ahead.txt" || !strings.Contains(status, c.Short) {
+		t.Errorf("diff header = %q / %q, want it to name the commit", status, path)
+	}
+
+	// And picking the working tree again brings the lists back.
+	m = drive(t, m, altKey("5"), tea.KeyMsg{Type: tea.KeyUp})
+	if m.browsing() {
+		t.Fatal("up from the first commit did not reach the working tree")
+	}
+	if !strings.Contains(m.View(), "Unstaged Changes") {
+		t.Errorf("the working lists did not come back:\n%s", m.View())
+	}
+}
+
+// History is read only: nothing that changes the tree or the index is reachable
+// while an earlier commit is on screen.
+func TestHistoryIsReadOnly(t *testing.T) {
+	base := drive(t, aheadModel(t, 1), altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+	if !base.browsing() {
+		t.Fatal("not browsing")
+	}
+	before, err := base.repo.Git("status", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// U is not here: it pops commits, which is the one change history allows.
+	// TestPopMeansTheSameThingEverywhere covers it.
+	for _, k := range []tea.KeyMsg{
+		rkey("s"), rkey("u"), rkey("a"), rkey("v"), rkey("e"), rkey("D"),
+		rkey("L"), rkey("r"), {Type: tea.KeySpace},
+	} {
+		m := drive(t, base, k)
+		if !m.statusEr {
+			t.Errorf("%v was allowed against history", k)
+		}
+		if m.dialog != nil {
+			t.Errorf("%v opened the %q dialog against history", k, m.dialog.title)
+		}
+	}
+	after, err := base.repo.Git("status", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Errorf("the working tree moved:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// Right chains down the column: history, then the commit's files, then the
+// diff. It is the only arrow route into the files pane, since leaving the
+// history upwards means passing its top row and so dropping the commit.
+func TestRightChainsFromHistoryToTheDiff(t *testing.T) {
+	m := drive(t, aheadModel(t, 1), altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+	if m.focus != focusCommits {
+		t.Fatalf("focus = %v, want focusCommits", m.focus)
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRight})
+	if m.focus != focusHistory {
+		t.Fatalf("focus = %v, want the commit's files", m.focus)
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRight})
+	if m.focus != focusDiff {
+		t.Fatalf("focus = %v, want the diff", m.focus)
+	}
+	// And on the working tree, right from the history goes straight to the diff.
+	w := drive(t, aheadModel(t, 1), altKey("5"), tea.KeyMsg{Type: tea.KeyRight})
+	if w.focus != focusDiff {
+		t.Errorf("focus = %v, want the diff from the working tree row", w.focus)
+	}
+}
+
+// Tab reaches only the panes that are on screen, which differ between the
+// working tree and a commit.
+func TestTabVisitsWhatIsOnScreen(t *testing.T) {
+	m := aheadModel(t, 1)
+	seen := map[focusArea]bool{}
+	for i := 0; i < int(focusCount)*2; i++ {
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyTab})
+		if m.focus == focusHistory {
+			t.Fatal("Tab reached the commit files pane from the working tree")
+		}
+		seen[m.focus] = true
+	}
+	for _, want := range []focusArea{focusWorkdir, focusIndex, focusCommits, focusDiff} {
+		if !seen[want] {
+			t.Errorf("Tab never reached pane %v", want)
+		}
+	}
+
+	b := drive(t, aheadModel(t, 1), altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+	for i := 0; i < int(focusCount)*2; i++ {
+		b = drive(t, b, tea.KeyMsg{Type: tea.KeyTab})
+		if b.focus == focusWorkdir || b.focus == focusIndex {
+			t.Fatalf("Tab reached pane %v while browsing a commit", b.focus)
+		}
+	}
+}
+
+// A commit that is no longer on the branch takes the cursor back to the
+// working tree rather than leaving it pointing at nothing.
+func TestHistoryDropsACommitThatWentAway(t *testing.T) {
+	m := drive(t, aheadModel(t, 2), altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+	if !m.browsing() {
+		t.Fatal("not browsing")
+	}
+	// Rewrite the branch so the selected commit no longer exists.
+	if _, err := m.repo.Git("reset", "-q", "--hard", "HEAD~2"); err != nil {
+		t.Fatal(err)
+	}
+	m = drive(t, m, rkey("R"))
+	if m.browsing() {
+		t.Errorf("still browsing a commit that is gone: %+v", m.commits.commits)
+	}
+	if len(m.commits.commits) != 0 {
+		t.Errorf("history still lists %+v", m.commits.commits)
+	}
+	if !strings.Contains(m.View(), "Unstaged Changes") {
+		t.Errorf("the working lists did not come back:\n%s", m.View())
+	}
+}
+
+// A commit's diff is its own change, not the working tree's.
+func TestCommitDiffIsTheCommitsOwnChange(t *testing.T) {
+	m := drive(t, aheadModel(t, 2), altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+	var text []string
+	for _, l := range m.diff.lines {
+		text = append(text, l.Text)
+	}
+	joined := strings.Join(text, "\n")
+	// The second commit added one line to ahead.txt; it did not create it.
+	if strings.Contains(joined, "new file") {
+		t.Errorf("the second commit's diff reads as if it created the file:\n%s", joined)
+	}
+	if !strings.Contains(joined, "+x") {
+		t.Errorf("the commit's own added line is missing:\n%s", joined)
+	}
+}
+
+// U on a commit pops it and everything after it off the branch, leaving the
+// work staged. Selecting the oldest of a run undoes the whole run at once.
+func TestPopTakesTheCommitAndEverythingAfter(t *testing.T) {
+	m := aheadModel(t, 2)
+	repo := m.repo
+	before, err := repo.Git("rev-parse", "HEAD~2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before = strings.TrimSpace(before)
+
+	// Down twice reaches the older of the two commits.
+	m = drive(t, m, altKey("5"), tea.KeyMsg{Type: tea.KeyDown}, tea.KeyMsg{Type: tea.KeyDown})
+	c, ok := m.commits.selected()
+	if !ok || c.Subject != "commit number 1" {
+		t.Fatalf("selected %+v, want the older commit", c)
+	}
+
+	// It asks first, and says how many come off.
+	m = drive(t, m, rkey("U"))
+	if m.dialog == nil {
+		t.Fatal("U did not ask")
+	}
+	if !strings.Contains(m.dialog.body, "2 commits") {
+		t.Errorf("the question does not say how many come off: %q", m.dialog.body)
+	}
+	if head, _ := repo.Git("rev-parse", "HEAD"); strings.TrimSpace(head) == before {
+		t.Fatal("the reset happened before it was confirmed")
+	}
+
+	// n backs out.
+	if back := drive(t, m, rkey("n")); back.dialog != nil {
+		t.Error("n left the question up")
+	}
+	if head, _ := repo.Git("rev-parse", "HEAD"); strings.TrimSpace(head) == before {
+		t.Fatal("n reset anyway")
+	}
+
+	m = drive(t, m, rkey("y"))
+	head, err := repo.Git("rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(head) != before {
+		t.Errorf("HEAD = %q, want %q", strings.TrimSpace(head), before)
+	}
+	// Both commits are gone, so the pane is too.
+	if m.showCommits() {
+		t.Errorf("the history pane survived with %+v", m.commits.commits)
+	}
+	if m.browsing() {
+		t.Error("still browsing a commit that no longer exists")
+	}
+	// And their work is staged rather than lost.
+	staged := map[string]bool{}
+	for _, f := range m.index.files {
+		staged[f.Path] = true
+	}
+	if !staged["ahead.txt"] {
+		t.Errorf("the popped commits' file is not staged; staged = %v", m.index.files)
+	}
+}
+
+// A soft reset leaves the working tree exactly as it was.
+func TestPopDoesNotTouchTheWorkingTree(t *testing.T) {
+	m := aheadModel(t, 1)
+	repo := m.repo
+	// The fixture leaves foo.txt modified but unstaged; it must stay that way.
+	beforeBody, err := repo.Git("show", ":foo.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = drive(t, m, altKey("5"), tea.KeyMsg{Type: tea.KeyDown}, rkey("U"), rkey("y"))
+	if m.showCommits() {
+		t.Fatal("the commit was not popped")
+	}
+	unstaged := map[string]bool{}
+	for _, f := range m.workdir.files {
+		unstaged[f.Path] = true
+	}
+	if !unstaged["foo.txt"] {
+		t.Errorf("foo.txt stopped being unstaged; unstaged = %v", m.workdir.files)
+	}
+	afterBody, err := repo.Git("show", ":foo.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterBody != beforeBody {
+		t.Error("the reset changed foo.txt in the index")
+	}
+}
+
+// U with the history cursor on the working tree row has nothing to pop.
+func TestPopOnTheWorkingTreeRow(t *testing.T) {
+	m := drive(t, aheadModel(t, 1), altKey("5"), rkey("U"))
+	if m.dialog != nil {
+		t.Errorf("U asked about popping the working tree: %q", m.dialog.body)
+	}
+	if !m.statusEr {
+		t.Error("U should say why it did nothing")
+	}
+}
+
+// U means one thing wherever it is pressed: pop whatever the branch history
+// has selected. It is not a pane-local key, so it works from the diff and the
+// file lists too, and says so when there is no commit to act on.
+func TestPopMeansTheSameThingEverywhere(t *testing.T) {
+	for _, pane := range []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{"this branch", altKey("5")},
+		{"the commit's files", altKey("5")},
+		{"the diff", altKey("3")},
+	} {
+		t.Run(pane.name, func(t *testing.T) {
+			m := drive(t, aheadModel(t, 1), altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+			m = drive(t, m, pane.key, rkey("U"))
+			if m.dialog == nil {
+				t.Fatalf("U from %s did not ask", pane.name)
+			}
+			m = drive(t, m, rkey("y"))
+			if m.showCommits() {
+				t.Errorf("U from %s did not pop: %+v", pane.name, m.commits.commits)
+			}
+		})
+	}
+
+	// From the working tree the history cursor is on its own row, so there is
+	// nothing selected to pop and it says so rather than guessing.
+	t.Run("a file list, nothing selected", func(t *testing.T) {
+		m := drive(t, aheadModel(t, 1), altKey("1"), rkey("U"))
+		if m.dialog != nil {
+			t.Errorf("U from a file list asked about %q", m.dialog.body)
+		}
+		if !m.statusEr {
+			t.Error("U should say there is no commit selected")
+		}
+		if !m.showCommits() {
+			t.Error("U popped something without asking")
+		}
+	})
+}
+
+// p is the previous hunk and nothing else now, and r is revert-hunk and nothing
+// else; both are refused against history along with the rest.
+func TestOldPopKeysMeanOnlyTheirDiffCommands(t *testing.T) {
+	m := drive(t, aheadModel(t, 1), altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+	before := len(m.commits.commits)
+	for _, k := range []tea.KeyMsg{rkey("p"), rkey("r")} {
+		got := drive(t, m, altKey("3"), k)
+		if got.dialog != nil {
+			t.Errorf("%v in the diff opened %q", k, got.dialog.title)
+		}
+		if len(got.commits.commits) != before {
+			t.Errorf("%v popped a commit", k)
+		}
+	}
+	// And in the history pane neither does anything at all.
+	for _, k := range []tea.KeyMsg{rkey("p")} {
+		got := drive(t, m, k)
+		if got.dialog != nil || len(got.commits.commits) != before {
+			t.Errorf("%v in the history pane did something", k)
+		}
+	}
+}
+
+// p still walks hunks in the diff, where popping means nothing. A file long
+// enough for two hunks to stay apart at the default context is built for it.
+func TestPrevHunkStillWorksInTheDiff(t *testing.T) {
+	dir := testRepoDir(t)
+	var lines []string
+	for i := 1; i <= 40; i++ {
+		lines = append(lines, "line "+itoa(i))
+	}
+	writeFile(t, dir, "long.txt", strings.Join(lines, "\n")+"\n")
+	gitRun(t, dir, "add", "long.txt")
+	gitRun(t, dir, "commit", "-qm", "add a long file")
+	lines[1] = "CHANGED NEAR THE TOP"
+	lines[37] = "CHANGED NEAR THE BOTTOM"
+	writeFile(t, dir, "long.txt", strings.Join(lines, "\n")+"\n")
+
+	repo, err := git.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("1"))
+	for m.workdir.currentPath() != "long.txt" {
+		if m.workdir.cursor >= len(m.workdir.files)-1 {
+			t.Fatalf("long.txt is not in the list: %v", m.workdir.files)
+		}
+		m = drive(t, m, rkey("j"))
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRight})
+	if m.diff.hunkCount() != 2 {
+		t.Fatalf("hunks = %d, want 2 to move between", m.diff.hunkCount())
+	}
+
+	first := m.diff.currentHunk()
+	m = drive(t, m, rkey("n"))
+	if m.diff.currentHunk() == first {
+		t.Fatalf("n did not move forward from hunk %d", first)
+	}
+	m = drive(t, m, rkey("p"))
+	if got := m.diff.currentHunk(); got != first {
+		t.Errorf("p left the cursor on hunk %d, want back on %d", got, first)
+	}
+	if m.dialog != nil {
+		t.Errorf("p in the diff opened the %q dialog", m.dialog.title)
+	}
+}
+
+// On a narrow window the left column gives up its space to the diff, and takes
+// it back the moment the focus returns.
+func TestNarrowWindowCollapsesTheLeftColumn(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 80, Height: 24},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("1"))
+	if m.leftCollapsed() {
+		t.Fatal("the column collapsed while a list had the focus")
+	}
+	if !strings.Contains(m.View(), "Unstaged Changes") {
+		t.Fatalf("the lists should be on screen:\n%s", m.View())
+	}
+	listWidth := m.diff.width
+
+	// Right onto the diff hands it the whole window.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRight})
+	if m.focus != focusDiff {
+		t.Fatalf("focus = %v, want the diff", m.focus)
+	}
+	if !m.leftCollapsed() {
+		t.Fatal("the column did not collapse at 80 columns")
+	}
+	if m.diff.width != 80 {
+		t.Errorf("diff width = %d, want the full 80", m.diff.width)
+	}
+	if m.diff.width <= listWidth {
+		t.Errorf("the diff did not gain any room: %d then %d", listWidth, m.diff.width)
+	}
+	view := m.View()
+	if strings.Contains(view, "Unstaged Changes") || strings.Contains(view, "This Branch") {
+		t.Errorf("the left column is still on screen:\n%s", view)
+	}
+	if strings.Contains(view, "│") {
+		t.Errorf("the column separator survived the collapse:\n%s", view)
+	}
+	if !strings.Contains(view, "← lists") {
+		t.Errorf("nothing says how to get the lists back:\n%s", view)
+	}
+
+	// The message buffer is the same column, so it stays collapsed there.
+	m = drive(t, m, altKey("4"))
+	if !m.leftCollapsed() {
+		t.Error("moving to the message brought the lists back")
+	}
+
+	// Left brings them back.
+	m = drive(t, m, altKey("3"), tea.KeyMsg{Type: tea.KeyLeft})
+	if m.leftCollapsed() {
+		t.Fatal("left did not bring the lists back")
+	}
+	if !strings.Contains(m.View(), "Unstaged Changes") {
+		t.Errorf("the lists did not come back:\n%s", m.View())
+	}
+	if m.diff.width != listWidth {
+		t.Errorf("diff width = %d, want it back to %d", m.diff.width, listWidth)
+	}
+}
+
+// A window with room for both columns never collapses, whatever has the focus.
+func TestWideWindowKeepsBothColumns(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: narrowWidth, Height: 24},
+		New(repo).rescanCmd()(),
+	)
+	for _, f := range []tea.KeyMsg{altKey("1"), altKey("3"), altKey("4")} {
+		m = drive(t, m, f)
+		if m.leftCollapsed() {
+			t.Errorf("the column collapsed at %d columns with focus %v", m.width, m.focus)
+		}
+		if !strings.Contains(m.View(), "Unstaged Changes") {
+			t.Errorf("the lists left the screen at %d columns:\n%s", m.width, m.View())
+		}
+	}
+}
+
+// Staging takes the file out of the list, so the row the cursor is on becomes
+// the next file down. Pressing Space repeatedly therefore walks down the list
+// rather than jumping back to the top or chasing the file that just left.
+func TestStagingWalksDownTheList(t *testing.T) {
+	dir := testRepoDir(t)
+	for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt"} {
+		writeFile(t, dir, name, "one\n")
+	}
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "commit", "-qm", "add four files")
+	for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt"} {
+		writeFile(t, dir, name, "changed\n")
+	}
+	repo, err := git.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("1"))
+
+	// Start on the second file, so a jump to the top would be visible.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	start := m.workdir.currentPath()
+	if start != "b.txt" {
+		t.Fatalf("expected to start on b.txt, got %q", start)
+	}
+
+	var staged []string
+	for i := 0; i < 3; i++ {
+		staged = append(staged, m.workdir.currentPath())
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	want := []string{"b.txt", "c.txt", "d.txt"}
+	if !slices.Equal(staged, want) {
+		t.Errorf("three presses staged %v, want %v", staged, want)
+	}
+	for _, p := range want {
+		found := false
+		for _, f := range m.index.files {
+			if f.Path == p {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s is not staged; staged = %v", p, m.index.files)
+		}
+	}
+	// a.txt was above the cursor and must have been left alone.
+	if len(m.workdir.files) != 1 || m.workdir.files[0].Path != "a.txt" {
+		t.Errorf("unstaged list = %v, want just a.txt", m.workdir.files)
+	}
+}
+
+// At the end of the list there is no next file, so the cursor settles on the
+// last one rather than running off.
+func TestStagingTheLastFileStepsBack(t *testing.T) {
+	m := drive(t, newTestModel(t), altKey("1"), rkey("G"))
+	last := m.workdir.currentPath()
+	if last == "" || len(m.workdir.files) < 2 {
+		t.Fatalf("need a list with a last file, got %v", m.workdir.files)
+	}
+	above := m.workdir.files[len(m.workdir.files)-2].Path
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if got := m.workdir.currentPath(); got != above {
+		t.Errorf("after staging the last file the cursor is on %q, want %q", got, above)
+	}
+	if m.workdir.cursor != len(m.workdir.files)-1 {
+		t.Errorf("cursor = %d, want the new last row %d", m.workdir.cursor, len(m.workdir.files)-1)
+	}
+}
+
+// A rescan that changes nothing leaves the cursor on the file it was on, which
+// is what keeps R and the automatic rescans from moving it about.
+func TestRescanKeepsTheCursorOnItsFile(t *testing.T) {
+	m := drive(t, newTestModel(t), altKey("1"), tea.KeyMsg{Type: tea.KeyDown})
+	before := m.workdir.currentPath()
+	if before == "" {
+		t.Fatal("no file under the cursor")
+	}
+	m = drive(t, m, rkey("R"))
+	if got := m.workdir.currentPath(); got != before {
+		t.Errorf("the rescan moved the cursor from %q to %q", before, got)
+	}
+}
+
+// Unstaging walks down the staged list the same way.
+func TestUnstagingWalksDownTheList(t *testing.T) {
+	m := drive(t, newTestModel(t), altKey("1"), rkey("V"), rkey("G"), rkey("s"))
+	m = drive(t, m, altKey("2"))
+	if len(m.index.files) < 3 {
+		t.Fatalf("need three staged files, got %v", m.index.files)
+	}
+	var unstaged []string
+	for i := 0; i < 2; i++ {
+		unstaged = append(unstaged, m.index.currentPath())
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	if unstaged[0] == unstaged[1] {
+		t.Errorf("two presses unstaged the same file twice: %v", unstaged)
+	}
+	for _, p := range unstaged {
+		for _, f := range m.index.files {
+			if f.Path == p {
+				t.Errorf("%s is still staged; staged = %v", p, m.index.files)
+			}
+		}
+	}
+}
+
+// e opens the file in view in the user's editor, and rescans afterwards since
+// the editor may well have changed it.
+func TestEditOpensTheFileInView(t *testing.T) {
+	sys := &recordingSystem{}
+	repo, err := git.OpenWith(sys, testRepoDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("1"))
+	want := m.workdir.currentPath()
+	if want == "" {
+		t.Fatal("no file under the cursor")
+	}
+
+	m = drive(t, m, rkey("e"))
+	if len(sys.edited) != 1 {
+		t.Fatalf("e opened %v, want the one file", sys.edited)
+	}
+	if !strings.HasSuffix(sys.edited[0], want) {
+		t.Errorf("e opened %q, want the file in view %q", sys.edited[0], want)
+	}
+	// It means the same thing from the diff pane, which shows the same file.
+	sys.edited = nil
+	m = drive(t, m, altKey("3"), rkey("e"))
+	if len(sys.edited) != 1 || !strings.HasSuffix(sys.edited[0], want) {
+		t.Errorf("e from the diff opened %v, want %q", sys.edited, want)
+	}
+}
+
+// What happens once the editor exits: the file is rescanned, since it may have
+// changed under the lists and the diff. bubbletea runs this in the runtime
+// rather than through Update, so it is checked directly.
+func TestEditorClosedRescans(t *testing.T) {
+	msg, ok := editorClosed("foo.txt")(nil).(opMsg)
+	if !ok {
+		t.Fatalf("editorClosed returned %T, want an opMsg", editorClosed("foo.txt")(nil))
+	}
+	if !msg.rescan {
+		t.Error("a finished edit must trigger a rescan")
+	}
+	if msg.err != nil || !strings.Contains(msg.text, "foo.txt") {
+		t.Errorf("msg = %+v, want it to name the file and carry no error", msg)
+	}
+
+	failed, ok := editorClosed("foo.txt")(errors.New("editor blew up")).(opMsg)
+	if !ok {
+		t.Fatal("a failed edit did not produce an opMsg")
+	}
+	if failed.err == nil {
+		t.Error("a failed edit lost its error")
+	}
+	if failed.rescan {
+		t.Error("a failed edit should not claim the file changed")
+	}
+}
+
+// A file that is not on disk cannot be edited; opening it would create it.
+func TestEditRefusesAMissingFile(t *testing.T) {
+	sys := &recordingSystem{}
+	dir := testRepoDir(t)
+	repo, err := git.OpenWith(sys, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "foo.txt")); err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("1"))
+	for m.workdir.currentPath() != "foo.txt" {
+		if m.workdir.cursor >= len(m.workdir.files)-1 {
+			t.Fatalf("foo.txt is not in the unstaged list: %v", m.workdir.files)
+		}
+		m = drive(t, m, rkey("j"))
+	}
+	m = drive(t, m, rkey("e"))
+	if len(sys.edited) != 0 {
+		t.Errorf("e opened %v for a file that is not there", sys.edited)
+	}
+	if !m.statusEr {
+		t.Error("e should say why it did nothing")
+	}
+}
+
+// Only the working tree is editable; a file from an earlier commit is not.
+func TestEditRefusedAgainstHistory(t *testing.T) {
+	m := drive(t, aheadModel(t, 1), altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+	if !m.browsing() {
+		t.Fatal("not browsing")
+	}
+	before, err := m.repo.Git("status", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRight}, rkey("e"))
+	if !m.statusEr {
+		t.Error("e was allowed against a commit's files")
+	}
+	after, err := m.repo.Git("status", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Errorf("the working tree moved:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
 
@@ -270,6 +1112,135 @@ func TestDiffPaneLoadsForSelectedFile(t *testing.T) {
 	}
 }
 
+// countingSystem is the real System with a tally of the git commands run
+// through it, so a test can say how much work moving the cursor costs.
+type countingSystem struct {
+	git.Local
+	mu   sync.Mutex
+	runs []string
+}
+
+func (c *countingSystem) Git(dir string, stdin []byte, args ...string) (string, error) {
+	c.mu.Lock()
+	c.runs = append(c.runs, strings.Join(args, " "))
+	c.mu.Unlock()
+	return c.Local.Git(dir, stdin, args...)
+}
+
+// since returns the commands run after a mark taken from count.
+func (c *countingSystem) since(mark int) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string{}, c.runs[mark:]...)
+}
+
+func (c *countingSystem) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.runs)
+}
+
+// Moving over a file list is the one thing done over and over, so it is the
+// one thing that has to be cheap: one git for a file not seen yet, and none at
+// all for one already looked at, or for arriving back on the file already on
+// screen.
+func TestSelectingAFileRunsAtMostOneGit(t *testing.T) {
+	sys := &countingSystem{}
+	repo, err := git.OpenWith(sys, testRepoDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo), tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = drive(t, m, New(repo).rescanCmd()())
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1"), Alt: true})
+	if len(m.workdir.files) < 2 {
+		t.Fatalf("need two unstaged files to move between, got %v", m.workdir.files)
+	}
+	first := m.diff.file.Path
+
+	// Down onto a file not looked at yet: its diff, and nothing else.
+	mark := sys.count()
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	moved := sys.since(mark)
+	if len(moved) != 1 || !strings.HasPrefix(moved[0], "diff ") {
+		t.Errorf("moving to a new file ran %d git commands, want 1 diff: %q", len(moved), moved)
+	}
+	if m.diff.file.Path == first {
+		t.Fatalf("the diff still shows %q", first)
+	}
+
+	// Back up to the file whose diff was already taken: nothing at all.
+	mark = sys.count()
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if back := sys.since(mark); len(back) != 0 {
+		t.Errorf("returning to a file already looked at ran %v", back)
+	}
+	if m.diff.file.Path != first {
+		t.Errorf("the diff shows %q, want %q", m.diff.file.Path, first)
+	}
+
+	// Leaving for the diff pane and coming back is the same file again.
+	mark = sys.count()
+	m = drive(t, m,
+		tea.KeyMsg{Type: tea.KeyRight},
+		tea.KeyMsg{Type: tea.KeyLeft},
+	)
+	if idle := sys.since(mark); len(idle) != 0 {
+		t.Errorf("stepping into the diff and back ran %v", idle)
+	}
+}
+
+// A diff is taken against the scan that asked for it, so the one arriving from
+// a scan since replaced is dropped rather than shown over the current one.
+func TestStaleDiffIsIgnored(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1"), Alt: true})
+	shown := m.diff.shown
+
+	stale := diffMsg{
+		file: m.workdir.files[0],
+		key:  diffID{path: m.workdir.files[0].Path, side: git.SideWorkdir, context: m.context, gen: m.gen - 1},
+		text: "@@ -1 +1 @@\n-gone\n+stale\n",
+	}
+	next, _ := m.Update(stale)
+	m = next.(Model)
+	if m.diff.shown != shown {
+		t.Errorf("a diff from an old scan replaced the one on screen")
+	}
+	if _, ok := m.diffs[stale.key]; ok {
+		t.Error("a diff from an old scan was kept")
+	}
+}
+
+// Everything a rescan learns is thrown away with it: the tree has moved under
+// every diff taken against it.
+func TestRescanDropsKeptDiffs(t *testing.T) {
+	repo := testRepo(t)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1"), Alt: true})
+	if len(m.diffs) == 0 {
+		t.Fatal("no diff was kept to begin with")
+	}
+	before := m.gen
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	if m.gen <= before {
+		t.Errorf("the scan count did not move: %d", m.gen)
+	}
+	for key := range m.diffs {
+		if key.gen != m.gen {
+			t.Errorf("a diff from scan %d outlived it", key.gen)
+		}
+	}
+}
+
 func TestQuitKeys(t *testing.T) {
 	repo := testRepo(t)
 	base := drive(t, New(repo),
@@ -289,13 +1260,13 @@ func TestQuitKeys(t *testing.T) {
 	if m := drive(t, fromList, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}); !m.quit {
 		t.Error("q did not quit from the unstaged list")
 	}
-	inCompose := drive(t, base, tea.KeyMsg{Type: tea.KeyCtrlJ})
-	inCompose = drive(t, inCompose, rkey("q"))
-	if inCompose.quit {
-		t.Error("q must not quit while the composer is open")
+	inBuffer := drive(t, base, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	inBuffer = drive(t, inBuffer, rkey("q"))
+	if inBuffer.quit {
+		t.Error("q must not quit from the message buffer")
 	}
-	if inCompose.commit.Value() != "q" {
-		t.Errorf("composer = %q, want \"q\"", inCompose.commit.Value())
+	if inBuffer.commit.Value() != "q" {
+		t.Errorf("buffer = %q, want \"q\"", inBuffer.commit.Value())
 	}
 }
 
@@ -314,6 +1285,120 @@ func newTestModel(t *testing.T) Model {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
+}
+
+// V selects a run of files the way it selects a run of lines in the diff, and
+// Space acts on the whole run.
+func TestVisualSelectsARangeOfFiles(t *testing.T) {
+	m := drive(t, newTestModel(t), altKey("1"))
+	if len(m.workdir.files) < 2 {
+		t.Fatalf("need two unstaged files to select, got %v", m.workdir.files)
+	}
+	want := []string{m.workdir.files[0].Path, m.workdir.files[1].Path}
+
+	m = drive(t, m, rkey("V"))
+	if !m.workdir.visual() {
+		t.Fatal("V did not start a selection")
+	}
+	if got := m.workdir.targets(); !slices.Equal(got, want[:1]) {
+		t.Errorf("a fresh selection covers %v, want just the cursor file", got)
+	}
+
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if got := m.workdir.targets(); !slices.Equal(got, want) {
+		t.Errorf("selection = %v, want %v", got, want)
+	}
+
+	// Another down would cross into the staged list; a selection holds the
+	// cursor, since leaving would abandon it mid-gesture.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.focus != focusWorkdir {
+		t.Errorf("focus left the list mid-selection: %v", m.focus)
+	}
+	if got := m.workdir.targets(); !slices.Equal(got, want) {
+		t.Errorf("at the end of the list, selection = %v, want %v", got, want)
+	}
+
+	m = drive(t, m, rkey(" "))
+	staged := map[string]bool{}
+	for _, f := range m.index.files {
+		staged[f.Path] = true
+	}
+	for _, p := range want {
+		if !staged[p] {
+			t.Errorf("%s was not staged; staged list = %v", p, m.index.files)
+		}
+	}
+	if m.workdir.visual() {
+		t.Error("the selection should end once it has been staged")
+	}
+}
+
+// Selecting upwards covers the same range: the anchor is where V was pressed,
+// not the top of the range.
+func TestVisualSelectsUpwards(t *testing.T) {
+	m := drive(t, newTestModel(t), altKey("1"))
+	if len(m.workdir.files) < 2 {
+		t.Fatalf("need two unstaged files to select, got %v", m.workdir.files)
+	}
+	want := []string{m.workdir.files[0].Path, m.workdir.files[1].Path}
+
+	m = drive(t, m, rkey("j"), rkey("V"), rkey("k"))
+	if got := m.workdir.targets(); !slices.Equal(got, want) {
+		t.Errorf("selection = %v, want %v", got, want)
+	}
+	// And it does not run off the top either.
+	m = drive(t, m, rkey("k"))
+	if m.focus != focusWorkdir {
+		t.Errorf("focus left the list mid-selection: %v", m.focus)
+	}
+	if got := m.workdir.targets(); !slices.Equal(got, want) {
+		t.Errorf("at the top of the list, selection = %v, want %v", got, want)
+	}
+}
+
+// A selection belongs to the pane and the moment it was made in.
+func TestVisualSelectionEnds(t *testing.T) {
+	for _, tc := range []struct {
+		how string
+		key tea.KeyMsg
+	}{
+		{"Esc", tea.KeyMsg{Type: tea.KeyEsc}},
+		{"V again", rkey("V")},
+		{"leaving for the diff pane", altKey("3")},
+		{"a rescan", rkey("R")},
+	} {
+		t.Run(tc.how, func(t *testing.T) {
+			m := drive(t, newTestModel(t), altKey("1"), rkey("V"), rkey("j"))
+			if !m.workdir.visual() {
+				t.Fatal("no selection to end")
+			}
+			m = drive(t, m, tc.key)
+			if m.workdir.visual() {
+				t.Errorf("the selection outlived %s", tc.how)
+			}
+		})
+	}
+}
+
+// The staged list selects the same way, and Space unstages the lot.
+func TestVisualUnstagesFromTheStagedList(t *testing.T) {
+	m := drive(t, newTestModel(t), altKey("1"), rkey("V"), rkey("j"), rkey(" "))
+	if len(m.index.files) < 2 {
+		t.Fatalf("need two staged files to select, got %v", m.index.files)
+	}
+	m = drive(t, m, altKey("2"))
+	picked := []string{m.index.files[0].Path, m.index.files[1].Path}
+	m = drive(t, m, rkey("V"), rkey("j"))
+	if got := m.index.targets(); !slices.Equal(got, picked) {
+		t.Fatalf("selection = %v, want %v", got, picked)
+	}
+	m = drive(t, m, rkey(" "))
+	for _, f := range m.index.files {
+		if slices.Contains(picked, f.Path) {
+			t.Errorf("%s is still staged; staged list = %v", f.Path, m.index.files)
+		}
+	}
 }
 
 func TestDownAtEndOfListEntersPaneBelow(t *testing.T) {
@@ -551,10 +1636,10 @@ func TestMergeMessageSeedsBuffer(t *testing.T) {
 	if m.commit.Value() != "Merge branch 'other'" {
 		t.Errorf("buffer = %q, want the merge message", m.commit.Value())
 	}
-	// The composer names the kind of commit being written.
+	// The buffer's title names the kind of commit being written.
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
 	if !strings.Contains(m.View(), "Merge Commit Message") {
-		t.Errorf("the composer should say Merge Commit Message:\n%s", m.View())
+		t.Errorf("the buffer should say Merge Commit Message:\n%s", m.View())
 	}
 }
 
@@ -584,27 +1669,27 @@ func TestAmendLoadsAndRestoresBuffer(t *testing.T) {
 	)
 	m.commit.SetValue("work in progress")
 
-	// Ctrl-E turns on amend and pulls in HEAD's message.
-	m = drive(t, m, rkey("e"))
+	// A turns on amend and pulls in HEAD's message.
+	m = drive(t, m, rkey("A"))
 	if !m.amend {
-		t.Fatal("Ctrl-E did not turn on amend")
+		t.Fatal("A did not turn on amend")
 	}
 	if m.commit.Value() != "initial" {
 		t.Errorf("buffer = %q, want HEAD's message", m.commit.Value())
 	}
-	// Amending is announced in the branch bar, and again by the composer.
+	// Amending is announced in the branch bar, and again by the buffer.
 	if !strings.Contains(m.View(), "[amending]") {
 		t.Errorf("the branch bar should show the amend state:\n%s", m.View())
 	}
 	opened := drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
 	if !strings.Contains(opened.View(), "Amend Last Commit") {
-		t.Errorf("the composer should say Amend Last Commit:\n%s", opened.View())
+		t.Errorf("the buffer should say Amend Last Commit:\n%s", opened.View())
 	}
 
 	// Turning it back off restores what was being typed.
-	m = drive(t, m, rkey("e"))
+	m = drive(t, m, rkey("A"))
 	if m.amend {
-		t.Fatal("Ctrl-E did not turn amend back off")
+		t.Fatal("A did not turn amend back off")
 	}
 	if m.commit.Value() != "work in progress" {
 		t.Errorf("buffer = %q, want the previous message back", m.commit.Value())
@@ -619,7 +1704,7 @@ func TestAmendMessageIsNotSavedOnQuitAfterABackup(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, rkey("e"))
+	m = drive(t, m, rkey("A"))
 	if !m.amend {
 		t.Fatal("amend was not enabled")
 	}
@@ -650,7 +1735,7 @@ func TestAmendMessageIsNotSavedOnQuit(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, rkey("e"))
+	m = drive(t, m, rkey("A"))
 	if !m.amend {
 		t.Fatal("amend was not enabled")
 	}
@@ -984,6 +2069,24 @@ func TestSpaceStagesTheHunkWhenNotSelecting(t *testing.T) {
 	}
 }
 
+// Staging redraws the pane off the rescan that follows it, and nothing else:
+// the diff on screen was taken against a working tree that has since moved.
+func TestStagingAHunkRedrawsTheDiff(t *testing.T) {
+	m := diffModel(t)
+	before := m.diff.shown
+	m = drive(t, m, rkey(" "))
+
+	if m.diff.shown == before {
+		t.Error("the pane is still showing the diff taken before the hunk was staged")
+	}
+	for _, l := range m.diff.lines {
+		if l.Kind == '+' || l.Kind == '-' {
+			t.Errorf("the staged hunk is still in the unstaged diff: %q", l.Text)
+			break
+		}
+	}
+}
+
 func TestLStagesJustTheCursorLine(t *testing.T) {
 	m := diffModel(t)
 	repo := m.repo
@@ -1017,7 +2120,7 @@ func TestAmendRefreshesTheStagedList(t *testing.T) {
 		t.Fatalf("nothing should be staged to begin with, got %v", m.index.files)
 	}
 
-	m = drive(t, m, rkey("e"))
+	m = drive(t, m, rkey("A"))
 	if !m.amend {
 		t.Fatal("amend did not turn on")
 	}
@@ -1040,7 +2143,7 @@ func TestAmendRefreshesTheStagedList(t *testing.T) {
 	}
 
 	// Switching back returns the lists to the plain view.
-	m = drive(t, m, rkey("e"))
+	m = drive(t, m, rkey("A"))
 	if m.amend {
 		t.Fatal("amend did not turn off")
 	}
@@ -1059,7 +2162,7 @@ func TestAmendRefreshesTheStagedDiff(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, rkey("e"))
+	m = drive(t, m, rkey("A"))
 	m = drive(t, m, altKey("2"))
 	if m.focus != focusIndex {
 		t.Fatalf("focus = %v, want focusIndex", m.focus)
@@ -1102,8 +2205,8 @@ func TestAmendToggleLeavesTheIndexAlone(t *testing.T) {
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
 	)
-	m = drive(t, m, rkey("e"))
-	m = drive(t, m, rkey("e"))
+	m = drive(t, m, rkey("A"))
+	m = drive(t, m, rkey("A"))
 	if m.amend {
 		t.Fatal("amend should be off again")
 	}
@@ -1117,26 +2220,10 @@ func TestAmendToggleLeavesTheIndexAlone(t *testing.T) {
 	}
 }
 
-// composeModel opens the commit composer with some text already typed.
-func composeModel(t *testing.T, text string) Model {
-	t.Helper()
-	repo := testRepo(t)
-	m := drive(t, New(repo),
-		tea.WindowSizeMsg{Width: 120, Height: 40},
-		New(repo).rescanCmd()(),
-	)
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
-	if m.compose != composeEdit {
-		t.Fatalf("compose = %v, want composeEdit", m.compose)
-	}
-	m.commit.SetValue(text)
-	return m
-}
-
 func TestNoCtrlCommandsOutsideTheBuffer(t *testing.T) {
 	m := newTestModel(t)
-	if m.compose != composeOff {
-		t.Fatal("expected the composer to be closed")
+	if m.focus == focusCommit {
+		t.Fatal("the cursor should not start in the buffer")
 	}
 	for _, k := range []tea.KeyMsg{
 		{Type: tea.KeyCtrlE},
@@ -1165,7 +2252,7 @@ func TestEveryCommandHasALetter(t *testing.T) {
 		setup  func(*testing.T, *git.Repo)
 		check  func(Model) bool
 	}{
-		{"amend", "e", nil, func(m Model) bool { return m.amend }},
+		{"amend", "A", nil, func(m Model) bool { return m.amend }},
 		{"sign off", "o", nil, func(m Model) bool { return strings.Contains(m.commit.Value(), "Signed-off-by:") }},
 		{"push", "P", nil, func(m Model) bool { return m.dialog != nil && strings.Contains(m.dialog.title, "Push") }},
 		{"merge", "M",
@@ -1257,126 +2344,312 @@ func TestBandsAreConfinedToTheDiff(t *testing.T) {
 	}
 }
 
-func TestCtrlEnterOpensTheComposer(t *testing.T) {
+// Nothing puts the message on screen but Ctrl-Enter — not staging, not an
+// amend, not a merge. The diff keeps the whole right column until you say you
+// are writing a commit.
+func TestMessageStaysHiddenUntilAskedFor(t *testing.T) {
 	m := newTestModel(t)
-	if m.compose != composeOff {
-		t.Fatal("the composer should start closed")
+	if len(m.index.files) == 0 {
+		t.Fatal("the fixture should start with something staged")
 	}
-	// It is the only way in: there is no commit letter any more.
-	if got := drive(t, m, rkey("c")); got.compose != composeOff {
-		t.Error("a bare c opened the composer")
+	if m.composeOpen || strings.Contains(m.View(), "Commit Message") {
+		t.Errorf("the message is on screen with nothing having opened it:\n%s", m.View())
+	}
+	// An amend does not open it either, though it changes what it will hold.
+	amending := drive(t, m, rkey("A"))
+	if !amending.amend {
+		t.Fatal("A did not turn on amend")
+	}
+	if amending.composeOpen {
+		t.Error("amending opened the message on its own")
 	}
 
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
-	if m.compose != composeEdit {
-		t.Fatalf("compose = %v, want composeEdit", m.compose)
+	if !m.composeOpen {
+		t.Fatal("Ctrl-Enter did not open the message")
 	}
-	view := m.View()
-	if !strings.Contains(view, "Commit Message") {
-		t.Errorf("the composer is not on screen:\n%s", view)
+	if !strings.Contains(m.View(), "Commit Message") {
+		t.Errorf("the message is not on screen after Ctrl-Enter:\n%s", m.View())
 	}
-	if !strings.Contains(view, "Ctrl-Enter to commit") {
-		t.Error("the composer should say how to commit")
+	if m.focus != focusCommit {
+		t.Errorf("focus = %v, want the message", m.focus)
+	}
+	// It is ready to type into straight away.
+	m = drive(t, m, rkey("h"), rkey("i"))
+	if m.commit.Value() != "hi" {
+		t.Errorf("buffer = %q, want the typing to have landed", m.commit.Value())
 	}
 }
 
-// Esc closes the composer and keeps the message, so looking at the diff again
-// costs nothing.
-func TestComposerRemembersTheMessage(t *testing.T) {
-	m := composeModel(t, "half written")
+// Esc puts it away and keeps what was typed; Tab only moves the cursor off it.
+func TestEscClosesTheMessageAndTabDoesNot(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m.commit.SetValue("half written")
+
+	tabbed := drive(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	if !tabbed.composeOpen {
+		t.Error("Tab closed the message instead of leaving it open")
+	}
+	if tabbed.focus == focusCommit {
+		t.Error("Tab did not move the cursor off the message")
+	}
+
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
-	if m.compose != composeOff {
-		t.Fatal("Esc did not close the composer")
+	if m.composeOpen {
+		t.Error("Esc did not close the message")
 	}
-	if strings.Contains(m.View(), "half written") {
-		t.Error("the composer is still on screen")
+	if strings.Contains(m.View(), "Commit Message") {
+		t.Errorf("the message is still on screen after Esc:\n%s", m.View())
 	}
-	// Reopening brings it back.
+	if m.commit.Value() != "half written" {
+		t.Errorf("buffer = %q, want the message kept", m.commit.Value())
+	}
+	// And reopening brings it back.
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
 	if m.commit.Value() != "half written" {
-		t.Errorf("composer = %q, want the message kept", m.commit.Value())
+		t.Errorf("buffer = %q after reopening", m.commit.Value())
 	}
 }
 
-// Committing takes two deliberate steps: Ctrl-Enter to ask, then y.
-func TestComposerCommitsInTwoSteps(t *testing.T) {
-	m := composeModel(t, "a real commit")
-	repo := m.repo
+// Alt-4 means "take me to the message", so it brings it up when it is not
+// already there. Asking for the pane is asking for the pane.
+func TestAltFourOpensTheMessage(t *testing.T) {
+	m := newTestModel(t)
+	if m.composeOpen {
+		t.Fatal("the message should start closed")
+	}
+	m = drive(t, m, altKey("4"))
+	if !m.composeOpen {
+		t.Fatal("Alt-4 did not bring the message up")
+	}
+	if m.focus != focusCommit {
+		t.Errorf("focus = %v, want the message", m.focus)
+	}
+	if !strings.Contains(m.View(), "Commit Message") {
+		t.Errorf("the message is not on screen:\n%s", m.View())
+	}
+	if m.statusEr {
+		t.Errorf("Alt-4 complained: %q", m.status)
+	}
+
+	// From there Ctrl-Enter is the press that asks, as it would be had
+	// Ctrl-Enter opened it.
+	m.commit.SetValue("opened with Alt-4")
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if m.dialog == nil {
+		t.Fatal("Ctrl-Enter from an Alt-4 opened message did not ask")
+	}
+	m = drive(t, m, rkey("y"))
+	if got := m.repo.LastCommitMessage(); got != "opened with Alt-4" {
+		t.Errorf("HEAD message = %q", got)
+	}
+
+	// Esc still puts it away, and Alt-4 brings it back.
+	m = drive(t, m, altKey("4"), tea.KeyMsg{Type: tea.KeyEsc})
+	if m.composeOpen {
+		t.Fatal("Esc did not close it")
+	}
+	if m = drive(t, m, altKey("4")); !m.composeOpen {
+		t.Error("Alt-4 did not reopen it after Esc")
+	}
+}
+
+// Alt-5 does still refuse, because that pane has nothing to show when the
+// branch has no commits of its own. The two are not the same case.
+func TestAltFiveRefusesWithNoCommits(t *testing.T) {
+	m := drive(t, newTestModel(t), altKey("5"))
+	if m.focus == focusCommits {
+		t.Error("Alt-5 focused a pane with nothing in it")
+	}
+	if !m.statusEr {
+		t.Error("Alt-5 should say why it did nothing")
+	}
+}
+
+// Tab steps over the message until it is opened, and through it after.
+func TestTabSkipsTheMessageUntilItIsOpen(t *testing.T) {
+	m := newTestModel(t)
+	for i := 0; i < int(focusCount)+1; i++ {
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyTab})
+		if m.focus == focusCommit {
+			t.Fatal("Tab landed on a message that is not on screen")
+		}
+	}
 
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
-	if m.compose != composeConfirm {
-		t.Fatalf("compose = %v, want composeConfirm", m.compose)
+	seen := false
+	for i := 0; i < int(focusCount); i++ {
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyTab})
+		if m.focus == focusCommit {
+			seen = true
+		}
 	}
-	view := m.View()
-	if !strings.Contains(view, "yes") || !strings.Contains(view, "no") {
-		t.Errorf("the confirmation should offer y/n:\n%s", view)
+	if !seen {
+		t.Error("Tab never reached the message once it was open")
 	}
-	// Nothing has happened yet.
+}
+
+// Once open the message sits under the diff: down reaches it, up leaves it.
+func TestDiffAndMessageAreNeighbours(t *testing.T) {
+	m := drive(t, diffModel(t), tea.KeyMsg{Type: tea.KeyCtrlJ}, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.composeOpen {
+		t.Fatal("the message should be closed to begin with")
+	}
+	m = drive(t, m, altKey("3"))
+	m.diff.moveTo(len(m.diff.lines) - 1)
+	m = drive(t, m, rkey("j"))
+	if m.focus != focusDiff {
+		t.Errorf("focus = %v; with the message closed there is nothing below the diff", m.focus)
+	}
+
+	// Open it and the diff gains a neighbour.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ}, altKey("3"))
+	m.diff.moveTo(len(m.diff.lines) - 1)
+	m = drive(t, m, rkey("j"))
+	if m.focus != focusCommit {
+		t.Fatalf("focus = %v, want the message", m.focus)
+	}
+	// j is text in there, not a move.
+	m = drive(t, m, rkey("j"))
+	if m.focus != focusCommit || m.commit.Value() != "j" {
+		t.Errorf("j moved instead of typing: focus %v, buffer %q", m.focus, m.commit.Value())
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlA}, tea.KeyMsg{Type: tea.KeyCtrlK})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.focus != focusDiff {
+		t.Errorf("focus = %v, want up from the first line to reach the diff", m.focus)
+	}
+}
+
+// Ctrl-Enter escalates one step per press: open the message, put the cursor
+// back in it if it has wandered, then ask. Nothing commits without a y.
+func TestCtrlEnterEscalatesOneStepPerPress(t *testing.T) {
+	m := newTestModel(t)
+	repo := m.repo
+
+	// 1. opens and focuses.
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if !m.composeOpen || m.focus != focusCommit {
+		t.Fatalf("first press: open=%v focus=%v", m.composeOpen, m.focus)
+	}
+	if m.dialog != nil {
+		t.Fatal("the first press asked to commit")
+	}
+	m.commit.SetValue("a real commit")
+
+	// 2. from another pane it only brings the cursor back.
+	away := drive(t, m, altKey("1"), tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if away.dialog != nil {
+		t.Error("Ctrl-Enter from another pane asked to commit rather than returning")
+	}
+	if away.focus != focusCommit {
+		t.Errorf("focus = %v, want it back in the message", away.focus)
+	}
+	if got := repo.LastCommitMessage(); got == "a real commit" {
+		t.Fatal("something committed on the way")
+	}
+
+	// 3. from the message itself it asks.
+	m = drive(t, away, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	if m.dialog == nil {
+		t.Fatal("the press from the message did not ask")
+	}
+	if !strings.Contains(m.View(), "yes") || !strings.Contains(m.View(), "no") {
+		t.Errorf("the question should offer y/n:\n%s", m.View())
+	}
 	if got := repo.LastCommitMessage(); got == "a real commit" {
 		t.Fatal("the commit was made before it was confirmed")
 	}
 
-	// n goes back to editing, with the message intact.
+	// n backs out with the message intact and still on screen.
 	back := drive(t, m, rkey("n"))
-	if back.compose != composeEdit {
-		t.Errorf("n left compose = %v, want composeEdit", back.compose)
+	if back.dialog != nil {
+		t.Error("n left the question up")
 	}
-	if back.commit.Value() != "a real commit" {
-		t.Errorf("n lost the message: %q", back.commit.Value())
+	if !back.composeOpen || back.commit.Value() != "a real commit" {
+		t.Errorf("n lost the message: open=%v %q", back.composeOpen, back.commit.Value())
 	}
 
-	// y commits.
+	// y commits, empties the buffer and puts it away.
 	m = drive(t, m, rkey("y"))
-	if m.compose != composeOff {
-		t.Errorf("compose = %v, want it closed after committing", m.compose)
-	}
 	if got := repo.LastCommitMessage(); got != "a real commit" {
 		t.Errorf("HEAD message = %q", got)
 	}
 	if m.commit.Value() != "" {
-		t.Errorf("the composer kept %q after committing", m.commit.Value())
+		t.Errorf("the buffer kept %q after committing", m.commit.Value())
+	}
+	if m.composeOpen {
+		t.Error("the message stayed on screen after committing")
+	}
+	if m.focus == focusCommit {
+		t.Error("focus stayed on a message that is no longer there")
 	}
 	if _, ok := stateFile(t, repo, git.MsgFile); ok {
 		t.Error("the stashed message should be gone once committed")
 	}
 }
 
-// Esc from the confirmation returns to editing rather than closing.
-func TestComposerConfirmationCanBeBackedOutOf(t *testing.T) {
-	m := composeModel(t, "not yet")
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
-	if m.compose != composeConfirm {
-		t.Fatal("did not reach the confirmation")
-	}
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
-	if m.compose != composeEdit {
-		t.Errorf("compose = %v, want composeEdit", m.compose)
+// Ctrl-Enter starts the sequence from any pane, since every other key in the
+// message is text and this is the one that has to reach it.
+func TestCtrlEnterOpensFromAnyPane(t *testing.T) {
+	for _, pane := range []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{"unstaged", altKey("1")},
+		{"staged", altKey("2")},
+		{"diff", altKey("3")},
+	} {
+		t.Run(pane.name, func(t *testing.T) {
+			m := drive(t, newTestModel(t), pane.key, tea.KeyMsg{Type: tea.KeyCtrlJ})
+			if !m.composeOpen || m.focus != focusCommit {
+				t.Fatalf("from %s: open=%v focus=%v", pane.name, m.composeOpen, m.focus)
+			}
+			m.commit.SetValue("from " + pane.name)
+			m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+			if m.dialog == nil {
+				t.Fatal("the second press did not ask")
+			}
+			m = drive(t, m, rkey("y"))
+			if got := m.repo.LastCommitMessage(); got != "from "+pane.name {
+				t.Errorf("HEAD message = %q", got)
+			}
+		})
 	}
 }
 
-// The three refusals git-gui makes are reported inside the composer rather
-// than as another modal on top of it.
-func TestComposerRefusals(t *testing.T) {
-	t.Run("empty message", func(t *testing.T) {
-		m := composeModel(t, "   ")
+// The refusals git-gui makes are reported in the status bar rather than as a
+// dialog, and an empty message puts the cursor where it has to be typed.
+func TestCommitRefusals(t *testing.T) {
+	t.Run("empty message keeps the cursor in it", func(t *testing.T) {
+		m := drive(t, newTestModel(t), tea.KeyMsg{Type: tea.KeyCtrlJ})
+		m.commit.SetValue("   ")
 		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
-		if m.compose != composeEdit {
-			t.Errorf("compose = %v, want to stay in composeEdit", m.compose)
-		}
-		if !strings.Contains(m.composeErr, "commit message") {
-			t.Errorf("composeErr = %q", m.composeErr)
-		}
-		if !strings.Contains(m.View(), "commit message") {
-			t.Error("the refusal is not shown in the composer")
-		}
 		if m.dialog != nil {
-			t.Error("a dialog was stacked on top of the composer")
+			t.Errorf("a dialog was raised: %q / %q", m.dialog.title, m.dialog.body)
+		}
+		if !m.statusEr || !strings.Contains(m.status, "Enter a commit message") {
+			t.Errorf("status = %q (error=%v), want the refusal in the status bar",
+				m.status, m.statusEr)
+		}
+		if m.focus != focusCommit {
+			t.Errorf("focus = %v, want the message buffer", m.focus)
+		}
+		if !m.composeOpen {
+			t.Error("the refusal closed the message")
+		}
+		// And it is ready to type into, with the refusal clearing as you do.
+		m = drive(t, m, rkey("f"), rkey("i"), rkey("x"))
+		if m.commit.Value() != "   fix" {
+			t.Errorf("buffer = %q, want the typing to have landed", m.commit.Value())
+		}
+		if m.statusEr {
+			t.Error("the refusal outlived the next keystroke")
 		}
 	})
 
-	t.Run("nothing staged", func(t *testing.T) {
+	t.Run("nothing staged says so and stays put", func(t *testing.T) {
 		repo := testRepo(t)
-		// Unstage the fixture's one staged file.
 		if err := repo.Unstage([]string{"bar.txt"}, repo.StatusParent(false)); err != nil {
 			t.Fatal(err)
 		}
@@ -1384,78 +2657,106 @@ func TestComposerRefusals(t *testing.T) {
 			tea.WindowSizeMsg{Width: 120, Height: 40},
 			New(repo).rescanCmd()(),
 		)
+		// The first press opens the message even with nothing staged; the
+		// second is where it refuses.
 		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
 		m.commit.SetValue("a message")
 		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
-		if m.compose != composeEdit {
-			t.Errorf("compose = %v, want to stay in composeEdit", m.compose)
+		if m.dialog != nil {
+			t.Errorf("a dialog was raised: %q / %q", m.dialog.title, m.dialog.body)
 		}
-		if !strings.Contains(m.composeErr, "Stage at least one file") {
-			t.Errorf("composeErr = %q", m.composeErr)
+		if !strings.Contains(m.status, "Nothing staged") {
+			t.Errorf("status = %q, want the nothing-staged refusal", m.status)
 		}
 	})
 
-	t.Run("typing clears the refusal", func(t *testing.T) {
-		m := composeModel(t, "")
-		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
-		if m.composeErr == "" {
-			t.Fatal("expected a refusal")
+	t.Run("nothing staged beats an empty message", func(t *testing.T) {
+		repo := testRepo(t)
+		if err := repo.Unstage([]string{"bar.txt"}, repo.StatusParent(false)); err != nil {
+			t.Fatal(err)
 		}
-		m = drive(t, m, rkey("x"))
-		if m.composeErr != "" {
-			t.Errorf("composeErr = %q, want it cleared once typing resumed", m.composeErr)
+		m := drive(t, New(repo),
+			tea.WindowSizeMsg{Width: 120, Height: 40},
+			New(repo).rescanCmd()(),
+		)
+		if !m.messageEmpty() {
+			t.Fatal("the buffer should start empty")
+		}
+		m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ}, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		if !strings.Contains(m.status, "Nothing staged") {
+			t.Errorf("status = %q; with both wrong, the one you can act on wins", m.status)
+		}
+	})
+
+	// The status bar is one line, so a refusal has to fit on it.
+	t.Run("refusals fit the status bar", func(t *testing.T) {
+		m := newTestModel(t)
+		m.commit.SetValue("")
+		if p := m.commitProblem(); len(p) > 60 {
+			t.Errorf("refusal is %d characters: %q", len(p), p)
 		}
 	})
 }
 
-// The composer is a full text field: letters are text and readline keys edit.
-func TestComposerIsATextField(t *testing.T) {
-	m := composeModel(t, "")
-	typed := "sauveoRPMNKc"
+// The buffer is a full text field: letters are text and readline keys edit.
+func TestCommitBufferIsATextField(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.KeyMsg{Type: tea.KeyCtrlJ})
+	typed := "sauveoRPMNKcVD"
 	for _, r := range typed {
 		m = drive(t, m, rkey(string(r)))
 	}
 	if m.commit.Value() != typed {
-		t.Errorf("composer = %q, want %q", m.commit.Value(), typed)
+		t.Errorf("buffer = %q, want %q", m.commit.Value(), typed)
 	}
 	if m.dialog != nil {
 		t.Fatalf("typing opened the %q dialog", m.dialog.title)
 	}
+	if m.amend {
+		t.Error("typing e toggled amend")
+	}
 
 	// Ctrl-A then Ctrl-K clears the line, as readline would.
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlA})
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlK})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlA}, tea.KeyMsg{Type: tea.KeyCtrlK})
 	if m.commit.Value() != "" {
-		t.Errorf("composer = %q, want Ctrl-A Ctrl-K to have cleared it", m.commit.Value())
+		t.Errorf("buffer = %q, want Ctrl-A Ctrl-K to have cleared it", m.commit.Value())
 	}
 }
 
-// Sign off and amend are run before opening the composer, and both show up in
-// the message it presents.
-func TestSignOffAndAmendFeedTheComposer(t *testing.T) {
-	m := newTestModel(t)
-	m = drive(t, m, rkey("o"))
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+// Sign off and amend both feed the buffer, and show up in it.
+func TestSignOffAndAmendFeedTheBuffer(t *testing.T) {
+	m := drive(t, newTestModel(t), rkey("o"))
 	if !strings.Contains(m.commit.Value(), "Signed-off-by:") {
-		t.Errorf("composer = %q, want the sign off", m.commit.Value())
+		t.Errorf("buffer = %q, want the sign off", m.commit.Value())
 	}
+	// It is in the buffer whether or not the buffer is on screen, and shows up
+	// when Ctrl-Enter brings it up.
+	if strings.Contains(m.View(), "Signed-off-by:") {
+		t.Errorf("the message is on screen without having been opened:\n%s", m.View())
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyCtrlJ})
 	if !strings.Contains(m.View(), "Signed-off-by:") {
-		t.Error("the sign off is not visible in the composer")
+		t.Errorf("the sign off is not visible once opened:\n%s", m.View())
 	}
 }
 
-// The diff now owns the whole right column, so there is nothing below it.
-func TestDiffHasNoPaneBelow(t *testing.T) {
-	m := diffModel(t)
-	m.diff.moveTo(len(m.diff.lines) - 1)
-	got := drive(t, m, rkey("j"))
-	if got.focus != focusDiff {
-		t.Errorf("focus = %v, want to stay on the diff", got.focus)
-	}
-	if _, ok := paneBelow(focusDiff); ok {
-		t.Error("the diff should have no pane below it")
-	}
-	if _, ok := paneAbove(focusDiff); ok {
-		t.Error("the diff should have no pane above it")
-	}
+// recordingSystem is the real one with the editor stubbed out: a test must not
+// hand the terminal to vi, but it can check which file would have been opened.
+type recordingSystem struct {
+	git.Local
+	mu     sync.Mutex
+	edited []string
 }
+
+func (s *recordingSystem) Editor(dir, path string) git.Editor {
+	s.mu.Lock()
+	s.edited = append(s.edited, path)
+	s.mu.Unlock()
+	return noopEditor{}
+}
+
+type noopEditor struct{}
+
+func (noopEditor) Run() error          { return nil }
+func (noopEditor) SetStdin(io.Reader)  {}
+func (noopEditor) SetStdout(io.Writer) {}
+func (noopEditor) SetStderr(io.Writer) {}

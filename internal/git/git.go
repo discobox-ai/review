@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -148,12 +149,69 @@ var stateDescriptions = map[State]string{
 	"CM": "Portions staged for commit",
 }
 
+// changeDescriptions names the raw status characters diff-tree reports for a
+// commit, which mean something different from the staging states above.
+var changeDescriptions = map[byte]string{
+	'M': "Modified", 'A': "Added", 'D': "Deleted",
+	'R': "Renamed", 'C': "Copied", 'T': "File type changed",
+}
+
+// DescribeChange names the change a commit made, for a State whose index
+// character came from diff-tree rather than from a working tree scan.
+func (s State) DescribeChange() string {
+	if d, ok := changeDescriptions[s.Index()]; ok {
+		return d
+	}
+	return "Changed"
+}
+
 // Describe returns the human readable status shown in the diff header.
 func (s State) Describe() string {
 	if d, ok := stateDescriptions[s]; ok {
 		return d
 	}
 	return "Unknown state " + string(s)
+}
+
+// Scan is everything one rescan learns about the repository: the file states
+// and the facts the display needs alongside them.
+//
+// Parent is the revision the scan was taken against, and the one every diff
+// from it has to be taken against too. Handing it back means the caller keeps
+// it for the diffs that follow rather than asking git again for each.
+type Scan struct {
+	Files   []File
+	Branch  string
+	Parent  string
+	Base    Base     // empty Ref when there is no remote to measure against
+	Commits []Commit // the branch's own commits, newest first
+	HasHEAD bool
+	Merging bool
+	Merge   string // the prepared merge message, when a merge is in progress
+}
+
+// Rescan collects the whole scan in one go, running each git command once.
+// amend picks the parent, as in Status.
+func (r *Repo) Rescan(amend bool) (Scan, error) {
+	s := Scan{HasHEAD: r.HasHEAD()}
+	s.Parent = r.statusParent(s.HasHEAD, amend)
+	s.Branch = r.CurrentBranch()
+	if s.HasHEAD {
+		s.Base, _ = r.MergeBase()
+		if s.Base.Ahead > 0 {
+			s.Commits, _ = r.Commits(s.Base.Ref)
+		}
+	}
+	s.Merging = r.IsMerging()
+	if s.Merging {
+		s.Merge = r.MergeMessage()
+	}
+	files, err := r.Status(s.Parent)
+	if err != nil {
+		return s, err
+	}
+	s.Files = files
+	return s, nil
 }
 
 // Status scans the working tree, comparing the index against parent.
@@ -287,13 +345,20 @@ func parseRawDiff(out string, fn func(status byte, path, from string)) {
 // HEAD normally, HEAD's own parent while amending, and the empty tree when
 // there is no commit yet.
 func (r *Repo) StatusParent(amend bool) string {
-	if !r.HasHEAD() {
+	return r.statusParent(r.HasHEAD(), amend)
+}
+
+// statusParent is StatusParent with the HEAD check already made, so a rescan
+// that has to know about HEAD anyway does not run rev-parse for it twice.
+func (r *Repo) statusParent(hasHEAD, amend bool) string {
+	switch {
+	case !hasHEAD:
 		return EmptyTree
-	}
-	if amend {
+	case amend:
 		return r.AmendParent()
+	default:
+		return "HEAD"
 	}
-	return "HEAD"
 }
 
 // AmendParent returns the revision the index should be compared against while
@@ -360,6 +425,231 @@ func (r *Repo) IsMerging() bool {
 func (r *Repo) MergeMessage() string {
 	msg, _ := r.ReadStateFile("MERGE_MSG")
 	return msg
+}
+
+// Base is where the current branch stands against the ref it is built on: the
+// commit the two last had in common, and how far each has moved since.
+type Base struct {
+	Ref    string // the branch measured against, "origin/main"
+	Commit string // abbreviated hash of the merge base
+	Ahead  int    // commits on HEAD since the merge base
+	Behind int    // commits on Ref since the merge base
+}
+
+// MergeBase measures HEAD against the ref it is built on. It reports false
+// when there is nothing to measure against, or no commit yet — both ordinary
+// states rather than errors.
+func (r *Repo) MergeBase() (Base, bool) {
+	ref, ok := r.baseRef()
+	if !ok {
+		return Base{}, false
+	}
+	out, err := r.run("merge-base", "HEAD", ref)
+	if err != nil {
+		// Unrelated histories have no merge base at all.
+		return Base{}, false
+	}
+	sha := strings.TrimSpace(out)
+	if sha == "" {
+		return Base{}, false
+	}
+	b := Base{Ref: ref, Commit: abbrev(sha)}
+	// --left-right counts both sides of the fork in one pass: commits reachable
+	// only from HEAD, then only from ref.
+	if out, err := r.run("rev-list", "--left-right", "--count", "HEAD..."+ref); err == nil {
+		if fields := strings.Fields(out); len(fields) == 2 {
+			b.Ahead, _ = strconv.Atoi(fields[0])
+			b.Behind, _ = strconv.Atoi(fields[1])
+		}
+	}
+	return b, true
+}
+
+// abbrevLen is how much of a hash is shown, matching git's own default.
+const abbrevLen = 7
+
+func abbrev(sha string) string {
+	if len(sha) > abbrevLen {
+		return sha[:abbrevLen]
+	}
+	return sha
+}
+
+// baseRef is the ref the branch is measured against: what it tracks, when it
+// tracks anything, and otherwise the remote's default branch.
+//
+// Tracking comes first because it is what the branch was told to build on,
+// rather than a guess at where it probably started, and because it is what
+// the rest of git already reports — git status, git branch -vv, and the
+// target of a bare push or pull all name the same ref. A tool that disagreed
+// with those about where the branch stands would be worse than one that said
+// nothing, since you would have to remember which to believe.
+func (r *Repo) baseRef() (string, bool) {
+	if ref, ok := r.upstreamRef(); ok {
+		return ref, true
+	}
+	return r.defaultRemoteBranch()
+}
+
+// upstreamRef is the branch this one is configured to build on: git's
+// @{upstream}, from branch.<name>.remote and branch.<name>.merge. git treats a
+// branch that tracks nothing as an error rather than an empty answer.
+func (r *Repo) upstreamRef() (string, bool) {
+	out, err := r.run("rev-parse", "--abbrev-ref", "@{upstream}")
+	if err != nil {
+		return "", false
+	}
+	ref := strings.TrimSpace(out)
+	return ref, ref != ""
+}
+
+// defaultRemoteBranch is the remote's own HEAD — origin/main on most
+// repositories. git records it only when the clone set it up, so a remote
+// without one is tried for the usual names instead.
+func (r *Repo) defaultRemoteBranch() (string, bool) {
+	// origin is much the commonest case, and asking for its HEAD straight off
+	// saves listing the remotes at all.
+	if ref, ok := r.remoteHEAD("origin"); ok {
+		return ref, true
+	}
+	remotes, err := r.Remotes()
+	if err != nil {
+		return "", false
+	}
+	for _, remote := range remotes {
+		if remote == "origin" {
+			continue // already tried, and its fallbacks are covered below
+		}
+		if ref, ok := r.remoteHEAD(remote); ok {
+			return ref, true
+		}
+	}
+	for _, remote := range remotes {
+		for _, name := range []string{"main", "master"} {
+			ref := remote + "/" + name
+			if _, err := r.run("rev-parse", "--verify", "--quiet",
+				"refs/remotes/"+ref); err == nil {
+				return ref, true
+			}
+		}
+	}
+	return "", false
+}
+
+// remoteHEAD is the branch a remote points its own HEAD at.
+func (r *Repo) remoteHEAD(remote string) (string, bool) {
+	out, err := r.run("symbolic-ref", "--short", "refs/remotes/"+remote+"/HEAD")
+	if err != nil {
+		return "", false
+	}
+	ref := strings.TrimSpace(out)
+	return ref, ref != ""
+}
+
+// Commit is one entry of the branch's own history: a commit made since the
+// merge base, and so one of the commits this branch is adding.
+type Commit struct {
+	Hash    string
+	Short   string
+	Subject string
+}
+
+// Commits lists the commits on HEAD that base does not have, newest first.
+// This is the same set rev-list counts as "ahead".
+func (r *Repo) Commits(base string) ([]Commit, error) {
+	if base == "" {
+		return nil, nil
+	}
+	out, err := r.run("log", "--format=%H %s", base+"..HEAD")
+	if err != nil {
+		return nil, err
+	}
+	var commits []Commit
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		hash, subject, _ := strings.Cut(line, " ")
+		if hash == "" {
+			continue
+		}
+		commits = append(commits, Commit{
+			Hash: hash, Short: abbrev(hash), Subject: subject,
+		})
+	}
+	return commits, nil
+}
+
+// CommitFiles lists what a commit changed, against its parent. The status
+// character lands on the index side of the state, so "M_" reads as "this
+// commit modified it"; DescribeChange names them.
+//
+// --root makes the very first commit on a branch list its files rather than
+// nothing, having no parent to be compared against.
+func (r *Repo) CommitFiles(hash string) ([]File, error) {
+	out, err := r.run("diff-tree", "--no-commit-id", "--root", "-M",
+		"--ignore-submodules=dirty", "-r", "-z", hash)
+	if err != nil {
+		return nil, err
+	}
+	var files []File
+	froms := map[string]string{}
+	parseRawDiff(out, func(status byte, path, from string) {
+		if from != "" {
+			froms[path] = from
+		}
+		files = append(files, File{
+			Path: path, From: from, State: State([]byte{status, '_'}),
+		})
+	})
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files, nil
+}
+
+// CommitDiff is the change one commit made to one file, against its parent.
+func (r *Repo) CommitDiff(hash string, f File, context int) (string, error) {
+	out, err := r.run("show", "--no-color", "--no-ext-diff", "--format=",
+		fmt.Sprintf("-U%d", context), "-M", hash, "--", f.Path)
+	if err != nil && strings.TrimSpace(out) == "" {
+		return "", err
+	}
+	if strings.TrimSpace(out) == "" {
+		return "* No differences detected.\n", nil
+	}
+	return out, nil
+}
+
+// Parent returns a commit's first parent, and false when it has none — which
+// only the root commit of a repository does.
+func (r *Repo) Parent(hash string) (string, bool) {
+	out, err := r.run("rev-parse", "--verify", "--quiet", hash+"^")
+	if err != nil {
+		return "", false
+	}
+	parent := strings.TrimSpace(out)
+	return parent, parent != ""
+}
+
+// ResetSoft moves the current branch to rev and touches nothing else: the
+// index and the working tree are left exactly as they were.
+//
+// This is how commits are popped off a branch without losing the work in them.
+// Everything the popped commits contained is still in the index afterwards,
+// because the index never moved — it is the branch that came back to meet it.
+func (r *Repo) ResetSoft(rev string) error {
+	_, err := r.run("reset", "--soft", rev)
+	return err
+}
+
+// Edit opens a file from the working tree in the user's editor. It refuses a
+// path that is not on disk — a file staged for deletion, say — since opening
+// that would create it rather than edit it.
+func (r *Repo) Edit(path string) (Editor, error) {
+	full := filepath.Join(r.Dir, path)
+	if _, err := r.sys.Stat(full); err != nil {
+		return nil, fmt.Errorf("%s is not in the working tree", path)
+	}
+	return r.sys.Editor(r.Dir, full), nil
 }
 
 // Branches lists local branch names.
@@ -493,6 +783,9 @@ const (
 	SideWorkdir Side = iota
 	// SideIndex is the "Staged Changes (Will Commit)" list.
 	SideIndex
+	// SideCommit is a file as one of the branch's own commits changed it,
+	// which is history rather than anything stageable.
+	SideCommit
 )
 
 // Diff produces the unified diff git-gui shows for a file, with the given

@@ -30,6 +30,8 @@ type keyMap struct {
 	FocusWorkdir key.Binding
 	FocusIndex   key.Binding
 	FocusDiff    key.Binding
+	FocusCommit  key.Binding
+	FocusCommits key.Binding
 	NextPane     key.Binding
 	PrevPane     key.Binding
 
@@ -40,6 +42,7 @@ type keyMap struct {
 	RevertKey       key.Binding
 	SignOffKey      key.Binding
 	AmendKey        key.Binding
+	EditKey         key.Binding
 	PushKey         key.Binding
 	MergeKey        key.Binding
 	BranchKey       key.Binding
@@ -48,11 +51,11 @@ type keyMap struct {
 	HelpKey         key.Binding
 	QuitKey         key.Binding
 	Toggle          key.Binding
-	Mark            key.Binding
 	Visual          key.Binding
 	StageLine       key.Binding
 	Delete          key.Binding
 	RevertHunk      key.Binding
+	PopKey          key.Binding
 	NextHunk        key.Binding
 	PrevHunk        key.Binding
 	LessContextKey  key.Binding
@@ -84,6 +87,8 @@ func newKeyMap() keyMap {
 		FocusWorkdir: key.NewBinding(key.WithKeys("alt+1"), key.WithHelp("Alt-1", "unstaged")),
 		FocusIndex:   key.NewBinding(key.WithKeys("alt+2"), key.WithHelp("Alt-2", "staged")),
 		FocusDiff:    key.NewBinding(key.WithKeys("alt+3"), key.WithHelp("Alt-3", "diff")),
+		FocusCommit:  key.NewBinding(key.WithKeys("alt+4"), key.WithHelp("Alt-4", "message")),
+		FocusCommits: key.NewBinding(key.WithKeys("alt+5"), key.WithHelp("Alt-5", "this branch")),
 		NextPane:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "next pane")),
 		PrevPane:     key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("Shift-Tab", "prev pane")),
 
@@ -92,7 +97,8 @@ func newKeyMap() keyMap {
 		UnstageKey:      key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "unstage")),
 		RevertKey:       key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "revert changes")),
 		SignOffKey:      key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "sign off")),
-		AmendKey:        key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "amend last commit")),
+		AmendKey:        key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "amend last commit")),
+		EditKey:         key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit the file")),
 		PushKey:         key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "push")),
 		MergeKey:        key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "local merge")),
 		BranchKey:       key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "new branch")),
@@ -102,11 +108,11 @@ func newKeyMap() keyMap {
 		HelpKey:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		QuitKey:        key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Toggle:         key.NewBinding(key.WithKeys(" ", "enter"), key.WithHelp("Space", "stage / unstage")),
-		Mark:           key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "mark file")),
-		Visual:         key.NewBinding(key.WithKeys("V"), key.WithHelp("V", "visual line select")),
+		Visual:         key.NewBinding(key.WithKeys("V"), key.WithHelp("V", "visual select")),
 		StageLine:      key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "stage this line")),
 		Delete:         key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete untracked")),
 		RevertHunk:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "revert hunk")),
+		PopKey:         key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "pop commits off")),
 		NextHunk:       key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next hunk")),
 		PrevHunk:       key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "previous hunk")),
 		LessContextKey: key.NewBinding(key.WithKeys("-"), key.WithHelp("-", "less context")),

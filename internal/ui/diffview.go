@@ -4,8 +4,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 	"github.com/discobox-ai/difftui/internal/git"
+	"github.com/mattn/go-runewidth"
 )
 
 // diffView is the diff pane. It keeps the parsed patch around so that hunks
@@ -14,6 +14,7 @@ import (
 type diffView struct {
 	file  *git.File
 	side  git.Side
+	shown diffID // which diff is on screen, so an unchanged one is left alone
 	patch *git.Patch
 	lines []git.DiffLine
 	texts []string   // code text with tabs expanded, parallel to lines
@@ -36,6 +37,7 @@ func (d *diffView) clear() {
 	d.file, d.patch, d.lines, d.text = nil, nil, nil, ""
 	d.texts, d.spans, d.emph, d.numW = nil, nil, nil, 0
 	d.cursor, d.offset, d.anchor = 0, 0, -1
+	d.shown = diffID{}
 }
 
 func (d *diffView) setMessage(msg string) {
@@ -43,10 +45,15 @@ func (d *diffView) setMessage(msg string) {
 	d.numW = 0
 	d.text = msg
 	d.cursor, d.offset, d.anchor = 0, 0, -1
+	// A message is what is left when a diff could not be taken, so nothing is
+	// recorded as shown: the next move asks for it again.
+	d.shown = diffID{}
 }
 
-func (d *diffView) setPatch(f *git.File, side git.Side, raw string) {
-	d.file, d.side, d.text = f, side, ""
+// setPatch renders the diff named by key. The file is copied rather than
+// referred to, since the list it came from is replaced by the next rescan.
+func (d *diffView) setPatch(f git.File, key diffID, raw string) {
+	d.file, d.side, d.shown, d.text = &f, key.side, key, ""
 	d.patch = git.ParsePatch(raw)
 	d.lines = d.patch.Render()
 
@@ -191,11 +198,23 @@ func (d *diffView) headerText() (string, string) {
 	if d.file == nil {
 		return "", ""
 	}
-	status := d.file.State.Describe()
-	if d.side == git.SideIndex {
-		status += " (staged)"
+	switch d.side {
+	case git.SideCommit:
+		// A commit's status says what it did, not what is staged.
+		return d.file.State.DescribeChange() + " in " + abbrevHash(d.shown.commit), d.file.Path
+	case git.SideIndex:
+		return d.file.State.Describe() + " (staged)", d.file.Path
 	}
-	return status, d.file.Path
+	return d.file.State.Describe(), d.file.Path
+}
+
+// abbrevHash shortens a hash for the diff header, matching what the branch
+// history shows beside each commit.
+func abbrevHash(hash string) string {
+	if len(hash) > 7 {
+		return hash[:7]
+	}
+	return hash
 }
 
 func (d *diffView) view(st *styles, focused bool) string {

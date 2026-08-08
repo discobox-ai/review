@@ -3,6 +3,7 @@ package git
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -32,12 +33,27 @@ type System interface {
 	Rename(oldPath, newPath string) error
 	Stat(path string) (FileInfo, error)
 
+	// Editor builds the command that opens path in the user's editor, run in
+	// dir. It is the only thing difftui runs that is not git, and the only
+	// one that takes the terminal over while it lasts.
+	Editor(dir, path string) Editor
+
 	// HomeDir expands a leading "~" in configuration such as commit.template.
 	HomeDir() (string, error)
 
 	// DevNull is the null device, which the diff of an untracked file is taken
 	// against.
 	DevNull() string
+}
+
+// Editor is a command that owns the terminal until it exits. The shape is what
+// bubbletea's exec support wants, written out here so that nothing above this
+// file has to know what a process is.
+type Editor interface {
+	Run() error
+	SetStdin(io.Reader)
+	SetStdout(io.Writer)
+	SetStderr(io.Writer)
 }
 
 // FileInfo is the part of a stat difftui uses. It is deliberately small: a
@@ -111,6 +127,31 @@ func (Local) Stat(path string) (FileInfo, error) {
 		return FileInfo{}, err
 	}
 	return FileInfo{ModTime: info.ModTime(), IsDir: info.IsDir()}, nil
+}
+
+// defaultEditor is what to open a file with when the environment says nothing.
+const defaultEditor = "vi"
+
+// editorCmd adapts an exec.Cmd to the Editor interface, which differs from it
+// only in wanting the three streams set through methods.
+type editorCmd struct{ *exec.Cmd }
+
+func (c editorCmd) SetStdin(r io.Reader)  { c.Stdin = r }
+func (c editorCmd) SetStdout(w io.Writer) { c.Stdout = w }
+func (c editorCmd) SetStderr(w io.Writer) { c.Stderr = w }
+
+// Editor opens path in $EDITOR, or in vi when that is unset. EDITOR may carry
+// arguments of its own — "code -w", "emacsclient -nw" — so it is split on
+// whitespace rather than taken as a bare program name.
+func (Local) Editor(dir, path string) Editor {
+	fields := strings.Fields(os.Getenv("EDITOR"))
+	if len(fields) == 0 {
+		fields = []string{defaultEditor}
+	}
+	cmd := exec.Command(fields[0], append(fields[1:], path)...)
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	return editorCmd{cmd}
 }
 
 // HomeDir is the current user's home directory.

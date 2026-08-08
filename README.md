@@ -5,20 +5,29 @@ with git. Same window, same panes, same accelerators — driven from a terminal
 with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and
 [Lip Gloss](https://github.com/charmbracelet/lipgloss).
 
+Ctrl-Enter has been pressed once here, which is the only thing that brings the
+commit message up:
+
 ```
-Current Branch: main                                        difftui · F1 help · Ctrl-Q quit
- Unstaged Changes               2 files │ Modified, not staged   File: foo.txt   hunk 1/1
-  ✎ foo.txt                             │    @@ -1,5 +1,5 @@
-  + new.txt                             │  1   one
-                                        │  2  -two
-                                        │  2 + TWO
-                                        │  3   three
- Staged Changes (Will Commit)    1 file │  4   four
-  ✔ bar.txt                             │  5   five
-                                        │
-                                        │
-                                        │
-Space stage · s stage · a stage all · v revert · m mark      U:2  S:1  ctx:5
+Current Branch: main  ·  base: origin/main 80e97d7 ↑3 ↓0    difftui · F1 help · Ctrl-Q quit
+ Unstaged Changes      2 files │ Modified, not staged   File: foo.txt              hunk 1/1
+  ✎ foo.txt                    │     @@ -1,5 +1,5 @@
+  + new.txt                    │   1   one
+                               │   2  -two
+                               │   2 + TWO
+                               │   3   three
+                               │   4   four
+                               │   5   five
+                               │
+ Staged Changes (Will Commit)  │
+  ✔ bar.txt                    │ Commit Message                               1 file staged
+                               │ Rename two to TWO
+                               │
+ This Branch         3 commits │
+  ● working tree               │
+  51ae6f4 Document it and drop…│
+  5d7241d Add the beta module  │
+Ctrl-Enter commits · Tab or Esc leaves the message · F1 keys                 U:2  S:1  ctx:5
 ```
 
 ## Install
@@ -47,16 +56,147 @@ The window reproduces git gui's paned layout exactly:
 
 | Region | Contents |
 | --- | --- |
-| Top bar | `Current Branch: <name>`, and `[amending]` when that is on |
+| Top bar | `Current Branch: <name>`, the [merge base](#the-merge-base), and `[amending]` when that is on |
 | Left, upper | **Unstaged Changes** — the working directory vs the index |
-| Left, lower | **Staged Changes (Will Commit)** — the index vs HEAD |
-| Right | The diff for the selected file, with its status in the header |
+| Left, middle | **Staged Changes (Will Commit)** — the index vs HEAD |
+| Left, lower | **This Branch** — the commits this branch adds, when it is ahead of its base |
+| Right, upper | The diff for the selected file, with its status in the header |
+| Right, lower | The commit message, once `Ctrl-Enter` has opened it |
 | Bottom bar | Status messages, file counts, current diff context |
 
-git gui keeps a commit message buffer and a column of buttons on screen at all
-times. Here the message is a composer that opens on `Ctrl-Enter` (see
-[Committing](#committing)) and the buttons are just keys, so the diff gets the
-whole right hand column.
+### This Branch
+
+When the branch is ahead of its [base](#the-merge-base), a third pane on the
+left lists the commits it adds, newest first, under a row standing for the
+working tree:
+
+```
+ This Branch         3 commits
+  ● working tree
+  51ae6f4 Document it and drop…
+  5d7241d Add the beta module
+  929ddbd Rename two to TWO
+```
+
+The working tree row is where the rest of the window normally lives: the two
+file lists above it, staging, committing. Pick a commit instead and those two
+lists give way to one holding what that commit changed, and the diff beside
+them becomes that commit's own change to the file — against its parent, so it
+reads as *what did this commit do* rather than what the branch looks like so
+far:
+
+```
+ Files in 51ae6f4      2 files │ Modified in 51ae6f4   File: README.md
+  ✎ README.md                  │     @@ -1 +1,2 @@
+  ✘ alpha.go                   │   1   x
+                               │   2 + y
+```
+
+Pick the working tree again and the lists come back, still on the file they
+were on.
+
+`Alt-5` jumps to the pane. `→` walks down the chain — this branch, then the
+commit's files, then the diff — and it is the way in, since going *up* past the
+top row means dropping the commit and returning to the working tree.
+
+#### Popping commits back off
+
+`U` on a commit resets the branch to that commit's **parent**, taking it and
+everything committed after it off the branch. It is a soft reset: their changes
+land in **Staged Changes** and the working tree is not touched.
+
+So the common case — *"I made two commits and want both back"* — is: select the
+**older** of the two and press `U`. It asks first, naming how many come off and
+where the branch lands, and nothing is lost either way since the commits stay
+in the reflog.
+
+```
+ This Branch            2 commits      Pop 2 commits off main, back to 7875f80?
+  ● working tree
+  547b64d Add the beta module          Everything they contained stays staged,
+▸ 9d5d79a Rename two to TWO            and the working tree is not touched.
+```
+
+Anything you had staged before stays staged, and anything unstaged stays
+unstaged; the popped work simply joins it in the index.
+
+**Otherwise history is read only.** `s`, `u`, `a`, `v`, `e`, `D`, `L`, `r` and
+`Space` all have nothing to act on while an earlier commit is on screen, so
+they say so rather than acting on the working tree behind your back.
+
+`U` works from any pane, since it acts on whatever the branch history has
+selected rather than on the pane you happen to be in. From a file list, where
+the history cursor is necessarily on the working tree row, it says there is no
+commit to pop.
+
+Costs one `git log` per rescan, and only when the branch is ahead. Selecting a
+commit costs two commands — its file list and the first diff — and none at all
+to go back to one already looked at, or to the working tree.
+
+### The merge base
+
+Next to the branch name the top bar shows where the branch stands against the
+ref it is built on:
+
+```
+base: origin/main 80e97d7 ↑2 ↓1
+```
+
+| Part | Meaning |
+| --- | --- |
+| `origin/main` | The ref the branch is measured against |
+| `80e97d7` | The merge base — the commit the two last had in common |
+| `↑2` | Commits on HEAD since the base |
+| `↓1` | Commits on the ref since the base, in amber when there are any |
+
+The merge base is where this branch left that one, so `↑` is how much of the
+history is yours and `↓` is how much has landed on the base since. Behind is
+called out because it is the half you can act on.
+
+#### Which ref
+
+Whatever the branch tracks, and otherwise the remote's default branch:
+
+1. **`@{upstream}`** — `branch.<name>.remote` and `branch.<name>.merge`, what
+   `git branch -u` sets.
+2. **`<remote>/HEAD`** — the remote's own default branch, `origin` first. Set
+   by `git clone` or `git remote set-head`.
+3. **`<remote>/main`, then `<remote>/master`** — for a remote that never
+   recorded a `HEAD`, such as a single-branch clone or one added by hand.
+4. Nothing, in which case the bar simply omits the base.
+
+Tracking comes first because it is what the branch was *told* to build on
+rather than a guess at where it probably started, and because it is the ref the
+rest of git already reports — `git status`, `git branch -vv`, and the target of
+a bare `git push` or `git pull` all name the same one. A tool that disagreed
+with those about where the branch stands would be worse than one that said
+nothing, since you would have to remember which to believe.
+
+The fallback matters for a branch you have not pushed yet: it tracks nothing,
+so the base becomes the fork point from trunk, which is what you would want to
+see there anyway.
+
+Note that against a tracked branch the merge base is usually just the last
+commit you and the remote agree on, so `↑↓` carries most of the meaning — it is
+"what is unpushed, what is unpulled". Against trunk, the merge base is your
+fork point and the commit itself is worth reading.
+
+#### Cost
+
+Three git commands per rescan on a tracked branch — `rev-parse @{upstream}`,
+`merge-base`, `rev-list` — taking a rescan from 8 commands to 11, and to 12 on
+an untracked branch, where the upstream lookup fails before the fallback runs.
+Nothing is added to moving around the file lists, which is the path that has to
+stay quick.
+
+The base is also the first thing dropped when the terminal is too narrow to
+hold the whole bar, since the branch name and the way out matter more.
+
+git gui keeps the message buffer and a column of buttons on screen at all
+times. The buffer is here too, but only when there is a commit to write — see
+[Committing](#committing). The buttons are gone: Rescan, Stage Changed, Sign
+Off, Commit and Push were each a label for a key that already exists, so the
+field takes the whole width instead.
 
 Files are routed to the two lists using git gui's own rule: a path appears in
 the staged list when its index status is neither unmodified nor unmerged, and
@@ -83,60 +223,101 @@ difftui keeps git gui's accelerators wherever a terminal can deliver them.
 
 ### One rule
 
-Every command is **one letter**, pressed in a file list or the diff.
+Every command is **one letter**, pressed in a file list or the diff — and no
+two commands share one. A key may act on whatever is under the cursor: `Space`
+stages a file in a list and a hunk in the diff, `V` selects in whichever pane
+you are in, `e` edits whichever file is on screen. That is one verb reaching
+different objects. What you will not find is a letter that means two unrelated
+things depending on where you are; `TestNoTwoCommandsShareAKey` keeps it that
+way.
+
+Lowercase acts on the working tree and the index, uppercase on the repository.
 
 | | | | |
 | --- | --- | --- | --- |
 | `s` | stage | `u` | unstage |
 | `a` | stage all changed | `v` | revert changes |
-| `o` | sign off | `e` | amend last commit |
-| `R` | rescan (also `F5`) | `-` / `=` | less / more diff context |
+| `o` | sign off | `A` | amend last commit |
+| `e` | edit the file in `$EDITOR` | | |
+| `R` | rescan (also `F5`) | `U` | pop commits off this branch |
+| `-` / `=` | less / more diff context | | |
 | `P` | push | `M` | local merge / abort merge |
 | `N` | new branch | `K` | checkout branch |
 
 `Ctrl-Enter` writes a commit. `Ctrl-C` or `q` quits, `F1` or `?` shows the keys.
 
-**Ctrl is never a command.** The commit composer keeps every readline key:
+**Ctrl is never a command.** The message buffer keeps every readline key:
 `Ctrl-A`, `Ctrl-E`, `Ctrl-K`, `Ctrl-U`, `Ctrl-W`, `Ctrl-D`, `Ctrl-B`, `Ctrl-F`,
 `Ctrl-N`, `Ctrl-P`, `Ctrl-T`.
 
 ### Committing
 
-`Ctrl-Enter` opens the message composer. It is a full text field, so every
-readline key edits it.
+`Ctrl-Enter` escalates one step per press, from any pane:
 
-- **`Ctrl-Enter` again** asks *"Commit N staged files to `<branch>`?"*, answered
-  `y` or `n`. Committing is two deliberate steps; nothing happens on the first.
-- **`Esc`** closes the composer and **keeps what you typed**, so going back to
-  read the diff costs nothing. It is still there when you reopen — and it
-  survives quitting difftui entirely, see [Saved state](#saved-state).
-- **`n`** or `Esc` at the question returns to editing rather than closing.
+| Press | What happens |
+| --- | --- |
+| 1st | The message comes up under the diff, with the cursor in it |
+| 2nd | *"Commit N staged files to `<branch>`?"* |
+| `y` | The commit is made |
 
-Sign off with `o` and switch to amend with `e` *before* opening it; both change
-the message the composer will show. When amending, the top bar reads
-`[amending]` and the composer is titled `Amend Last Commit`.
+**Nothing puts the message on screen unless you ask** — not staging, not an
+amend, not a merge. Until then the diff has the whole right column. `Ctrl-Enter`
+and `Alt-4` are both ways of asking; everything else leaves it alone.
+
+If the cursor has wandered off the message, `Ctrl-Enter` only brings it back.
+So the press that asks is always made from the message itself, with what you
+wrote in front of you, and there is no way to commit without having just looked
+at it.
+
+- **`Esc`** puts it away and **keeps what you typed**, so going back to read the
+  diff costs nothing. It survives quitting difftui too, see
+  [Saved state](#saved-state). **`Tab`** only moves the cursor off it, leaving
+  it up. **`Alt-4`** goes to the message, bringing it up first if it is not
+  already there — asking for the pane is asking for the pane.
+- **`n`** or `Esc` at the question backs out with the message intact and still
+  on screen.
+- The buffer is emptied, and put away, only once a commit has actually been
+  made, so a failure never costs you what you wrote.
+
+It is a full text field, so every readline key edits it and **every letter is
+text**: the command letters are out of reach until you leave.
+
+Sign off with `o` and switch to amend with `A`; both change what the buffer
+holds whether or not it is on screen. Its title says which kind of commit this
+will be — `Commit Message`, `Amend Last Commit`, `Merge Commit Message`,
+`Initial Commit Message` — and when amending the top bar reads `[amending]` as
+well.
 
 The three things git gui refuses — an empty message, nothing staged, unmerged
-files — are reported inside the composer rather than as another box on top of
-it, and clear as soon as you carry on typing.
+files — are reported **in the status bar**, never as a dialog. A dialog would
+cover the message buffer, which is the one thing that needs doing about it.
+
+With nothing written, the second press says `Enter a commit message` and leaves
+the cursor where it already is, in the buffer, so the answer to the complaint is
+simply to type; it clears itself on the first keystroke.
+
+They are checked in the order you would have to fix them — something to commit,
+then something to commit it as — so staging nothing and writing nothing reports
+`Nothing staged to commit` rather than the message you have not written yet.
 
 ### Panes
 
 | Key | Action |
 | --- | --- |
 | `Tab`, `Shift-Tab` | Cycle focus |
-| `Alt-1` … `Alt-3` | Jump straight to unstaged / staged / diff |
+| `Alt-1` … `Alt-5` | Jump straight to unstaged / staged / diff / message / this branch |
 | `←` `↓` `↑` `→`, `h` `j` `k` `l` | Move, crossing into the neighbouring pane at the edges |
 
 On startup the first file in **Unstaged Changes** is focused with its diff
 already loaded, so the command letters are live immediately.
 
-The three panes form a grid, and navigation walks it:
+The panes form a grid, and navigation walks it:
 
 ```
-Unstaged │
-─────────┤ Diff
-Staged   │
+Unstaged    │ Diff
+Staged      │
+────────────┼─────────
+This Branch │ Message
 ```
 
 Moving down past the last file in **Unstaged Changes** carries on into
@@ -147,13 +328,66 @@ goes back to the bottom of the unstaged one.
 is showing — git gui tracks the same thing as `current_diff_side` — so `←` comes
 back to *that* list with the same file still selected.
 
+**Under 100 columns the left column folds away** when the focus moves to the
+diff or the message: a pane taking a third of a narrow window leaves the diff
+too tight to read code in, which is the one thing the window is for. `→` gives
+the diff the whole width, `←` brings the lists back, and the status bar says so
+while they are away. At 100 columns or wider nothing moves.
+
+```
+80 columns, on a list                    80 columns, after →
+─────────────────────────────────────    ─────────────────────────────────────
+ Unstaged Changes   1 file │ Modified…    Modified, not staged   File: server.go
+  ✎ server.go              │   3   func     3   func handler(w http.ResponseWri…
+                           │   4  -    r     4  -    return nil
+                           │   4 +     r     4 +     return writeJSON(w, http.S…
+```
+
+`↓` past the end of the diff reaches the message buffer, when there is one. Out
+of it, only `↑` from the first line and `←` from the first column walk away —
+everywhere else in the text the arrows move the cursor, as they must. `Esc`
+leaves from anywhere. `Tab` steps over the buffer entirely when it is not on
+screen.
+
 ### On a file
 
 | Key | Action |
 | --- | --- |
-| `Space` | Stage, or unstage from the staged list |
-| `m` | Mark a file, so a command acts on several at once |
+| `Space` / `Enter` | Stage, or unstage from the staged list |
+| `e` | Open it in `$EDITOR` (see below) |
+| `V` | Visual select (see below) |
 | `D` | Delete untracked files |
+
+Staging takes the file out of the list, and **the cursor holds its row** rather
+than following the file into the other list. That row now holds the next file
+down, so `Space` `Space` `Space` stages the next three — press it from the
+second file and the first is left alone. On the last file there is no next one,
+so the cursor comes to rest on the one above.
+
+A rescan that changes nothing leaves the cursor on the file it was on, so `R`
+and the automatic rescans after each command never move it about.
+
+#### Editing a file
+
+`e` opens the file in view in **`$EDITOR`**, or in `vi` when that is unset.
+`$EDITOR` may carry arguments of its own — `code -w`, `emacsclient -nw` — and
+they are passed through. `VISUAL` and git's `core.editor` are not consulted.
+
+The whole terminal goes to the editor until it exits, and difftui rescans when
+it comes back, so the lists and the diff pick up whatever you did. It means the
+same thing from either file list and from the diff, since all three are showing
+the same file.
+
+Only the **working tree** can be edited. A file selected from an earlier commit
+is refused, as is a path that is not on disk — a file staged for deletion, say,
+where opening it would create it rather than edit it.
+
+### In This Branch
+
+| Key | Action |
+| --- | --- |
+| `→` | The commit's files, then the diff |
+| `U` | Pop this commit and everything after it off the branch |
 
 ### In the diff
 
@@ -167,12 +401,25 @@ back to *that* list with the same file still selected.
 
 On the staged side each of these unstages instead.
 
-#### Visual line select
+#### Visual select
 
-`V` behaves like vim's visual line mode. It starts with the current line
-selected; `↑`/`↓` (or `k`/`j`) extend the selection; `V` again or `Esc` cancels.
-`Space` or `Enter` then stages the selected lines — the same key that stages in
-the file lists.
+`V` behaves like vim's visual line mode, and works the same way in the file
+lists and in the diff. It starts with the current row selected; `↑`/`↓` (or
+`k`/`j`) extend the selection; `V` again or `Esc` cancels. `Space` or `Enter`
+then acts on the whole selection — staging the selected files in the unstaged
+list, unstaging them in the staged list, and staging the selected lines in the
+diff.
+
+While a selection is open the cursor stays in its pane: running off the end
+would abandon the gesture halfway. Leaving the pane another way — `Tab`, `Alt-1`
+to `Alt-3`, `←`/`→` — cancels it, as does a rescan, since the rows it covered
+now hold different files.
+
+The two panes draw it differently, for one reason. In the lists nothing else is
+using the row background, so the selection is a band across the row, in a dimmer
+shade of the cursor's own. In the diff the background is already carrying the
+diff, so the cursor and the selection move out to a one column bar at the left
+edge. Same gesture, different ink.
 
 While a selection is open the status bar switches to say so, counting the lines,
 and the cursor stays inside the diff rather than running off into the next pane.
@@ -272,7 +519,7 @@ in the middle of a band.
 
 ## Amending
 
-`e` switches to amending. The top bar then reads `[amending]`, and the composer
+`A` switches to amending. The top bar then reads `[amending]`, and the buffer
 is titled `Amend Last Commit`.
 
 Switching to amend also changes what the file lists mean, the way git gui does
@@ -314,9 +561,10 @@ gui's order.
 
 ## Multi-file commands
 
-git gui lets you Ctrl-click several files and act on all of them. Here, `m`
-marks a file (shown with a `•`); staging, unstaging and reverting then apply to
-every marked file. With nothing marked they apply to the file under the cursor.
+git gui lets you Ctrl-click several files and act on all of them. Here, `V`
+selects a run of them, the same gesture the diff uses to select a run of lines:
+staging, unstaging, reverting and deleting then apply to every file in the
+selection. With nothing selected they apply to the file under the cursor.
 
 ## What it does
 
