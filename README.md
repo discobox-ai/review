@@ -238,7 +238,7 @@ Lowercase acts on the working tree and the index, uppercase on the repository.
 | `s` | stage | `u` | unstage |
 | `a` | stage all changed | `v` | revert changes |
 | `o` | sign off | `A` | amend last commit |
-| `e` | edit the file in `$EDITOR` | | |
+| `e` | edit the file in `$EDITOR` | `m` | read a markdown file, rendered |
 | `R` | rescan (also `F5`) | `U` | pop commits off this branch |
 | `-` / `=` | less / more diff context | | |
 | `P` | push | `M` | local merge / abort merge |
@@ -355,6 +355,7 @@ screen.
 | --- | --- |
 | `Space` / `Enter` | Stage, or unstage from the staged list |
 | `e` | Open it in `$EDITOR` (see below) |
+| `m` | Read a markdown file, rendered, full screen (see below) |
 | `V` | Visual select (see below) |
 | `D` | Delete untracked files |
 
@@ -379,8 +380,35 @@ same thing from either file list and from the diff, since all three are showing
 the same file.
 
 Only the **working tree** can be edited. A file selected from an earlier commit
-is refused, as is a path that is not on disk — a file staged for deletion, say,
-where opening it would create it rather than edit it.
+still opens — the editor is the most familiar place to read one — but what it
+gets is that commit's version, copied to a **read-only** temporary file, so
+history can be read there and never rewritten. The copy is swept up when the
+editor exits. A working-tree path that is not on disk — a file staged for
+deletion, say — is refused, since opening it would create it rather than
+edit it.
+
+#### Reading markdown
+
+`m` opens the file in view in a full screen markdown reader, rendered with
+[glamour](https://github.com/charmbracelet/glamour). Like `e`, it acts on
+whichever version the window is showing: the working tree's copy, or the
+selected commit's when one is picked in This Branch — reading is the one thing
+history is happy to allow. Arrows and `PgUp`/`PgDn` scroll, `g`/`G` jump to
+either end, and `Esc`, `q` or `m` again puts it away. A file that is not
+markdown (`.md`, `.markdown`, `.mdown`, `.mkd`) is refused with a note rather
+than rendered as gibberish.
+
+When the file has changes — the same ones the diff pane would show — the
+touched text carries a **`▍` marker** in the left margin, and `n`/`p` hop to
+the next and previous marked spot, the same keys that walk hunks in the diff.
+It is not a diff: just a "look here" in the margin of the rendered page.
+Rendered lines do not map one-to-one onto source lines, so the marker lands on
+whole blocks — a changed line marks its paragraph, which is the honest
+granularity and the one a reader wants anyway. (To keep that map, the source
+is rendered a block at a time; constructs that reach across a blank line, such
+as reference-style link definitions, render less faithfully than a
+whole-document pass would.) A deleted block has no lines of its own to mark,
+so the seam it left behind is marked instead.
 
 ### In This Branch
 

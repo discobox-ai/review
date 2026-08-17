@@ -219,3 +219,24 @@ func TestRenderLineNumbers(t *testing.T) {
 		}
 	}
 }
+
+// ChangedNewLines names the new-side lines the diff touched: additions mark
+// themselves, and a deletion marks the seam it left behind.
+func TestChangedNewLines(t *testing.T) {
+	got := ParsePatch(sample).ChangedNewLines()
+	// "two" was deleted where new line 2 now stands, "TWO" and "two and a
+	// half" are new lines 2 and 3, "eleven" deleted at the seam of 12, and
+	// "ELEVEN" added as 12.
+	want := map[int]bool{2: true, 3: true, 12: true}
+	if len(got) != len(want) {
+		t.Fatalf("ChangedNewLines = %v, want %v", got, want)
+	}
+	for k := range want {
+		if !got[k] {
+			t.Errorf("line %d not marked; got %v", k, got)
+		}
+	}
+	if len(ParsePatch("* No differences detected.\n").ChangedNewLines()) != 0 {
+		t.Error("a diff with no hunks marked something")
+	}
+}

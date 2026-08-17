@@ -14,6 +14,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/discobox-ai/difftui/internal/git"
 )
 
@@ -199,6 +200,14 @@ func TestNarrowBranchBarDropsTheBase(t *testing.T) {
 // the fixture's uncommitted work, and drives a model to its first scan.
 func aheadModel(t *testing.T, n int) Model {
 	t.Helper()
+	m, _ := aheadModelWith(t, n, git.Local{})
+	return m
+}
+
+// aheadModelWith is aheadModel on a chosen System, for tests that need to see
+// what the model asked of the machine.
+func aheadModelWith(t *testing.T, n int, sys git.System) (Model, *git.Repo) {
+	t.Helper()
 	dir := testRepoDir(t)
 	bare := t.TempDir()
 	gitRun(t, bare, "init", "-q", "--bare", "-b", "main", ".")
@@ -213,14 +222,14 @@ func aheadModel(t *testing.T, n int) Model {
 	}
 	gitRun(t, dir, "stash", "pop", "-q")
 
-	repo, err := git.Open(dir)
+	repo, err := git.OpenWith(sys, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return drive(t, New(repo),
 		tea.WindowSizeMsg{Width: 120, Height: 40},
 		New(repo).rescanCmd()(),
-	)
+	), repo
 }
 
 // The branch history is a third pane on the left, and only when the branch has
@@ -333,8 +342,10 @@ func TestHistoryIsReadOnly(t *testing.T) {
 	}
 	// U is not here: it pops commits, which is the one change history allows.
 	// TestPopMeansTheSameThingEverywhere covers it.
+	// e is not here either: it opens the commit's version of the file as a
+	// read-only copy, which changes nothing. TestEditAgainstHistory covers it.
 	for _, k := range []tea.KeyMsg{
-		rkey("s"), rkey("u"), rkey("a"), rkey("v"), rkey("e"), rkey("D"),
+		rkey("s"), rkey("u"), rkey("a"), rkey("v"), rkey("D"),
 		rkey("L"), rkey("r"), {Type: tea.KeySpace},
 	} {
 		m := drive(t, base, k)
@@ -889,9 +900,13 @@ func TestEditOpensTheFileInView(t *testing.T) {
 // changed under the lists and the diff. bubbletea runs this in the runtime
 // rather than through Update, so it is checked directly.
 func TestEditorClosedRescans(t *testing.T) {
-	msg, ok := editorClosed("foo.txt")(nil).(opMsg)
+	repo, err := git.OpenWith(&recordingSystem{}, testRepoDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, ok := editorClosed(repo, "foo.txt", "")(nil).(opMsg)
 	if !ok {
-		t.Fatalf("editorClosed returned %T, want an opMsg", editorClosed("foo.txt")(nil))
+		t.Fatalf("editorClosed returned %T, want an opMsg", editorClosed(repo, "foo.txt", "")(nil))
 	}
 	if !msg.rescan {
 		t.Error("a finished edit must trigger a rescan")
@@ -900,7 +915,7 @@ func TestEditorClosedRescans(t *testing.T) {
 		t.Errorf("msg = %+v, want it to name the file and carry no error", msg)
 	}
 
-	failed, ok := editorClosed("foo.txt")(errors.New("editor blew up")).(opMsg)
+	failed, ok := editorClosed(repo, "foo.txt", "")(errors.New("editor blew up")).(opMsg)
 	if !ok {
 		t.Fatal("a failed edit did not produce an opMsg")
 	}
@@ -944,25 +959,189 @@ func TestEditRefusesAMissingFile(t *testing.T) {
 }
 
 // Only the working tree is editable; a file from an earlier commit is not.
-func TestEditRefusedAgainstHistory(t *testing.T) {
-	m := drive(t, aheadModel(t, 1), altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+func TestEditAgainstHistory(t *testing.T) {
+	sys := &recordingSystem{}
+	m, repo := aheadModelWith(t, 1, sys)
+	m = drive(t, m, altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
 	if !m.browsing() {
 		t.Fatal("not browsing")
 	}
-	before, err := m.repo.Git("status", "--porcelain")
+	before, err := repo.Git("status", "--porcelain")
 	if err != nil {
 		t.Fatal(err)
 	}
 	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRight}, rkey("e"))
-	if !m.statusEr {
-		t.Error("e was allowed against a commit's files")
+	if len(sys.edited) != 1 {
+		t.Fatalf("e opened %v, want the commit's copy of the one file", sys.edited)
 	}
-	after, err := m.repo.Git("status", "--porcelain")
+	// The editor got a copy, never the working tree's own file, and the copy
+	// keeps the file's name so the editor knows what it is looking at.
+	tmp := sys.edited[0]
+	if strings.HasPrefix(tmp, repo.Dir) {
+		t.Errorf("e against history opened %q, inside the working tree", tmp)
+	}
+	if filepath.Base(tmp) != "ahead.txt" {
+		t.Errorf("the copy is named %q, want the file's own name", filepath.Base(tmp))
+	}
+	b, err := os.ReadFile(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "x\n" {
+		t.Errorf("the copy holds %q, want the committed content", b)
+	}
+	after, err := repo.Git("status", "--porcelain")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if after != before {
 		t.Errorf("the working tree moved:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	// The runtime hands editorClosed the exit; the copy goes with it, and no
+	// rescan is claimed since nothing can have changed.
+	msg, ok := editorClosed(repo, "ahead.txt", tmp)(nil).(opMsg)
+	if !ok || msg.rescan {
+		t.Errorf("closing a history edit produced %+v, want no rescan", msg)
+	}
+	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+		t.Errorf("the read-only copy %q was not cleaned up", tmp)
+	}
+}
+
+// m opens the markdown reader on the file in view, full screen, and the same
+// keys that opened it put it away.
+func TestMarkdownReader(t *testing.T) {
+	dir := testRepoDir(t)
+	writeFile(t, dir, "README.md", "# A Heading\n\nSome body text here.\n")
+	repo, err := git.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	// README.md sorts first in the unstaged list, so it is the file in view.
+	m = drive(t, m, altKey("1"))
+	if got := m.workdir.currentPath(); got != "README.md" {
+		t.Fatalf("file in view is %q, want README.md", got)
+	}
+	m = drive(t, m, rkey("m"))
+	if m.md == nil {
+		t.Fatalf("m did not open the reader; status %q", m.status)
+	}
+	// glamour styles the text word by word, so matching is done on the plain
+	// text under the styling.
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "A Heading") || !strings.Contains(view, "Some body text here.") {
+		t.Errorf("the reader does not show the rendered file:\n%s", view)
+	}
+	if !strings.Contains(view, "README.md") {
+		t.Errorf("the reader does not name the file:\n%s", view)
+	}
+	m = drive(t, m, rkey("q"))
+	if m.md != nil {
+		t.Error("q did not close the reader")
+	}
+	if m.quit {
+		t.Error("q in the reader quit the program")
+	}
+}
+
+// m refuses a file it cannot render, and reads history when a commit is
+// selected — reading is the one thing history is happy to allow.
+func TestMarkdownReaderScope(t *testing.T) {
+	m := drive(t, aheadModel(t, 1), altKey("1"), rkey("m"))
+	if m.md != nil || !m.statusEr {
+		t.Errorf("m on a .txt file opened the reader; status %q", m.status)
+	}
+	m = drive(t, m, altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+	if !m.browsing() {
+		t.Fatal("not browsing")
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRight}, rkey("m"))
+	if m.md != nil || !m.statusEr {
+		t.Errorf("m against a commit's .txt file opened the reader; status %q", m.status)
+	}
+}
+
+// The reader marks the blocks the diff touched, so a modified file shows
+// where to look — and only there.
+func TestMarkdownReaderMarksChanges(t *testing.T) {
+	dir := testRepoDir(t)
+	writeFile(t, dir, "NOTES.md", "# Title\n\nfirst paragraph\n\nsecond paragraph\n")
+	gitRun(t, dir, "add", "NOTES.md")
+	gitRun(t, dir, "commit", "-qm", "add notes")
+	writeFile(t, dir, "NOTES.md", "# Title\n\nfirst paragraph\n\nsecond paragraph, edited\n")
+
+	repo, err := git.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("1"))
+	if got := m.workdir.currentPath(); got != "NOTES.md" {
+		t.Fatalf("file in view is %q, want NOTES.md", got)
+	}
+	m = drive(t, m, rkey("m"))
+	if m.md == nil {
+		t.Fatalf("m did not open the reader; status %q", m.status)
+	}
+	if len(m.md.jumps) != 1 {
+		t.Fatalf("jumps = %v, want the one edited paragraph", m.md.jumps)
+	}
+	for _, line := range strings.Split(ansi.Strip(m.View()), "\n") {
+		marked := strings.HasPrefix(line, "▍")
+		if marked && !strings.Contains(line, "second paragraph, edited") {
+			t.Errorf("an untouched line is marked: %q", line)
+		}
+		if !marked && strings.Contains(line, "second paragraph, edited") {
+			t.Errorf("the edited paragraph is not marked: %q", line)
+		}
+	}
+}
+
+// The reader shows the version the window is showing: the selected commit's,
+// not the working tree's.
+func TestMarkdownReaderReadsHistory(t *testing.T) {
+	dir := testRepoDir(t)
+	bare := t.TempDir()
+	gitRun(t, bare, "init", "-q", "--bare", "-b", "main", ".")
+	gitRun(t, dir, "stash", "-q", "-u")
+	gitRun(t, dir, "remote", "add", "origin", bare)
+	gitRun(t, dir, "push", "-q", "origin", "main")
+	gitRun(t, dir, "remote", "set-head", "origin", "main")
+	writeFile(t, dir, "NOTES.md", "committed version\n")
+	gitRun(t, dir, "add", "NOTES.md")
+	gitRun(t, dir, "commit", "-qm", "add notes")
+	gitRun(t, dir, "stash", "pop", "-q")
+	writeFile(t, dir, "NOTES.md", "working tree version\n")
+
+	repo, err := git.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("5"), tea.KeyMsg{Type: tea.KeyDown})
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyRight}, rkey("m"))
+	if m.md == nil {
+		t.Fatalf("m did not open the reader; status %q", m.status)
+	}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "committed version") {
+		t.Errorf("the reader does not show the commit's version:\n%s", view)
+	}
+	if strings.Contains(view, "working tree version") {
+		t.Errorf("the reader shows the working tree against a commit:\n%s", view)
+	}
+	if !strings.Contains(view, "NOTES.md @") {
+		t.Errorf("the reader title does not name the commit:\n%s", view)
 	}
 }
 

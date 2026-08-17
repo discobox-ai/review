@@ -43,6 +43,7 @@ type keyMap struct {
 	SignOffKey      key.Binding
 	AmendKey        key.Binding
 	EditKey         key.Binding
+	MarkdownKey     key.Binding
 	PushKey         key.Binding
 	MergeKey        key.Binding
 	BranchKey       key.Binding
@@ -99,6 +100,7 @@ func newKeyMap() keyMap {
 		SignOffKey:      key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "sign off")),
 		AmendKey:        key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "amend last commit")),
 		EditKey:         key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit the file")),
+		MarkdownKey:     key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "read markdown")),
 		PushKey:         key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "push")),
 		MergeKey:        key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "local merge")),
 		BranchKey:       key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "new branch")),

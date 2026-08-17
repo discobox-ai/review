@@ -1068,6 +1068,78 @@ func TestEditRefusesAMissingPath(t *testing.T) {
 	}
 }
 
+// FileContent reads the working tree when no commit is given, and the
+// commit's recorded version when one is.
+func TestFileContent(t *testing.T) {
+	r := testRepo(t)
+	head, err := r.Git("rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := strings.TrimSpace(head)
+	write(t, r.Dir, "foo.txt", "rewritten\n")
+
+	if got, err := r.FileContent("", "foo.txt"); err != nil || got != "rewritten\n" {
+		t.Errorf("FileContent(\"\") = %q, %v; want the working tree", got, err)
+	}
+	if got, err := r.FileContent(hash, "foo.txt"); err != nil || got != "one\ntwo\nthree\nfour\nfive\n" {
+		t.Errorf("FileContent(HEAD) = %q, %v; want the committed version", got, err)
+	}
+	if _, err := r.FileContent("", "never-existed.txt"); err == nil {
+		t.Error("reading a file that is not there was allowed")
+	}
+	if _, err := r.FileContent(hash, "never-existed.txt"); err == nil {
+		t.Error("reading a file the commit does not have was allowed")
+	}
+}
+
+// EditAt against a commit hands the editor a read-only copy of the file as
+// the commit recorded it, and RemoveTempCopy sweeps the copy up again.
+func TestEditAtServesAReadOnlyCopy(t *testing.T) {
+	r := testRepo(t)
+	head, err := r.Git("rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, r.Dir, "foo.txt", "rewritten\n")
+
+	// The empty commit is the working tree, and Edit's own rules: the file
+	// itself, no copy to clean up.
+	if _, tmp, err := r.EditAt("", "foo.txt"); err != nil || tmp != "" {
+		t.Errorf("EditAt(\"\") = copy %q, %v; want the file itself", tmp, err)
+	}
+
+	_, tmp, err := r.EditAt(strings.TrimSpace(head), "foo.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tmp == "" || strings.HasPrefix(tmp, r.Dir) {
+		t.Fatalf("the copy is %q, want a file outside the working tree", tmp)
+	}
+	if filepath.Base(tmp) != "foo.txt" {
+		t.Errorf("the copy is named %q, want the file's own name", filepath.Base(tmp))
+	}
+	b, err := os.ReadFile(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "one\ntwo\nthree\nfour\nfive\n" {
+		t.Errorf("the copy holds %q, want the committed content", b)
+	}
+	info, err := os.Stat(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o222 != 0 {
+		t.Errorf("the copy is writable (%v); history must not be", info.Mode())
+	}
+	r.RemoveTempCopy(tmp)
+	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+		t.Errorf("RemoveTempCopy left %q behind", tmp)
+	}
+	r.RemoveTempCopy("") // the working tree's "no copy" is fine to hand back
+}
+
 func TestStatusParentPicksTheRightRevision(t *testing.T) {
 	r := testRepo(t)
 	if got := r.StatusParent(false); got != "HEAD" {

@@ -136,6 +136,35 @@ func (p *Patch) Render() []DiffLine {
 	return out
 }
 
+// ChangedNewLines reports which line numbers on the new side of the diff were
+// touched. An added line marks its own number. A removed line has no number on
+// the new side, so it marks the line now standing where it stood — the seam is
+// the one place a reader of the new text can be pointed at.
+func (p *Patch) ChangedNewLines() map[int]bool {
+	changed := map[int]bool{}
+	for _, h := range p.Hunks {
+		newNo := h.NewStart
+		for _, l := range h.Lines {
+			kind := byte(' ')
+			if l != "" {
+				kind = l[0]
+			}
+			switch kind {
+			case ' ':
+				newNo++
+			case '+':
+				changed[newNo] = true
+				newNo++
+			case '-':
+				// A deletion at the very end of the file has no line after it;
+				// the seam clamps to the last line there is.
+				changed[max(newNo, 1)] = true
+			}
+		}
+	}
+	return changed
+}
+
 // fileHeader rebuilds the minimal preamble that git apply needs.
 func (p *Patch) fileHeader() []string {
 	var out []string

@@ -652,6 +652,53 @@ func (r *Repo) Edit(path string) (Editor, error) {
 	return r.sys.Editor(r.Dir, full), nil
 }
 
+// FileContent is a file's whole text: as the working tree has it when commit
+// is empty, or as commit recorded it.
+func (r *Repo) FileContent(commit, path string) (string, error) {
+	if commit == "" {
+		b, err := r.sys.ReadFile(filepath.Join(r.Dir, path))
+		if err != nil {
+			return "", fmt.Errorf("%s is not in the working tree", path)
+		}
+		return string(b), nil
+	}
+	return r.run("show", commit+":"+path)
+}
+
+// EditAt opens a file as it stands in a commit, or in the working tree when
+// commit is empty, where it defers to Edit.
+//
+// History cannot be edited, but the editor is still the most familiar place
+// to read a file in, so the commit's version is copied to a read-only
+// temporary file and the editor opened on that. The copy keeps the file's own
+// name, in a directory of its own, so the editor still recognises what it is.
+// The returned path is that copy — empty for the working tree — and the
+// caller hands it back to RemoveTempCopy once the editor exits.
+func (r *Repo) EditAt(commit, path string) (Editor, string, error) {
+	if commit == "" {
+		ed, err := r.Edit(path)
+		return ed, "", err
+	}
+	content, err := r.FileContent(commit, path)
+	if err != nil {
+		return nil, "", err
+	}
+	tmp, err := r.sys.WriteTempFile(filepath.Base(path), []byte(content))
+	if err != nil {
+		return nil, "", err
+	}
+	return r.sys.Editor(r.Dir, tmp), tmp, nil
+}
+
+// RemoveTempCopy deletes a copy made by EditAt, the directory holding it and
+// all. It must only be given a path EditAt returned; the empty path for "the
+// working tree itself" is accepted and is nothing to clean up.
+func (r *Repo) RemoveTempCopy(path string) {
+	if path != "" {
+		_ = r.sys.RemoveAll(filepath.Dir(path))
+	}
+}
+
 // Branches lists local branch names.
 func (r *Repo) Branches() ([]string, error) {
 	out, err := r.run("for-each-ref", "--format=%(refname:short)", "refs/heads")

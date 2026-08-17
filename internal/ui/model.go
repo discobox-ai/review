@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -93,6 +94,10 @@ type Model struct {
 
 	dialog *dialog
 	quit   bool
+
+	// md is the full screen markdown reader, on screen while non-nil. It sits
+	// over everything the way a dialog does, and takes the keys the same way.
+	md *mdView
 
 	// composeOpen is whether the commit message is on screen. Nothing opens it
 	// but Ctrl-Enter, so the diff keeps the whole right column until the
@@ -235,6 +240,17 @@ type historyMsg struct {
 	err   error
 }
 
+// markdownMsg is a file's text arriving for the markdown reader. It carries
+// the scan generation so a reader is never opened over a window that has
+// moved on to a different scan.
+type markdownMsg struct {
+	title   string
+	gen     int
+	text    string
+	changed map[int]bool // source lines the diff touched, for the gutter marks
+	err     error
+}
+
 // committedMsg is the result of the commit itself, kept apart from opMsg
 // because what follows a commit — emptying the buffer, leaving amend mode —
 // must happen only when one was really made.
@@ -298,6 +314,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
 		m.layout()
+		if m.md != nil {
+			m.md.resize(m.width, m.height)
+		}
 		return m, nil
 
 	case rescanMsg:
@@ -308,6 +327,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case historyMsg:
 		return m.onHistory(msg)
+
+	case markdownMsg:
+		return m.onMarkdown(msg)
 
 	case committedMsg:
 		return m.onCommitted(msg)
@@ -610,6 +632,11 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// The markdown reader owns the screen, so it owns the keys.
+	if m.md != nil {
+		return m.markdownKey(msg)
+	}
+
 	// A status message lasts until the next key press. Clearing it here
 	// rather than after dispatch means an action that sets its own message
 	// still gets to show it.
@@ -672,7 +699,6 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.browsing() {
 		switch {
 		case key.Matches(msg, m.keys.Toggle),
-			key.Matches(msg, m.keys.EditKey),
 			key.Matches(msg, m.keys.StageKey),
 			key.Matches(msg, m.keys.StageChangedKey),
 			key.Matches(msg, m.keys.UnstageKey),
@@ -707,6 +733,8 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.toggleAmend()
 	case key.Matches(msg, m.keys.EditKey):
 		return m.doEdit()
+	case key.Matches(msg, m.keys.MarkdownKey):
+		return m.doMarkdown()
 	case key.Matches(msg, m.keys.LessContextKey):
 		return m.changeContext(-1)
 	case key.Matches(msg, m.keys.MoreContextKey):
@@ -1381,38 +1409,152 @@ func lastLineIsTrailer(msg string) bool {
 	return true
 }
 
-// doEdit opens the file in view in the user's editor, handing it the terminal
-// until it exits. The file in view is the one the diff is showing, so e means
-// the same thing from either list and from the diff itself.
-func (m Model) doEdit() (tea.Model, tea.Cmd) {
-	list, _ := m.activeList()
+// fileInView is the file the window is about right now — the one the diff is
+// showing — and the commit it is being looked at in, empty for the working
+// tree. It is what both e and m act on, so each means the same thing from
+// either list and from the diff itself.
+func (m *Model) fileInView() (*git.File, string, git.Side) {
+	list, side := m.activeList()
 	f := list.current()
+	var commit string
+	if c, ok := m.commits.selected(); ok {
+		commit = c.Hash
+	}
+	return f, commit, side
+}
+
+// doEdit opens the file in view in the user's editor, handing it the terminal
+// until it exits. While an earlier commit is on screen the editor gets that
+// commit's version of the file, as a read-only copy: history reads well in an
+// editor, it just cannot be written there.
+func (m Model) doEdit() (tea.Model, tea.Cmd) {
+	f, commit, _ := m.fileInView()
 	if f == nil {
 		m.setError("No file to edit")
 		return m, nil
 	}
-	editor, err := m.repo.Edit(f.Path)
+	editor, tmp, err := m.repo.EditAt(commit, f.Path)
 	if err != nil {
 		m.setError(err.Error())
 		return m, nil
 	}
-	return m, tea.Exec(editor, editorClosed(f.Path))
+	return m, tea.Exec(editor, editorClosed(m.repo, f.Path, tmp))
 }
 
-// editorClosed is what happens once the editor exits. The rescan is not
-// optional: the editor may well have changed the file, and the scan is how the
-// lists and the diff catch up with it.
+// editorClosed is what happens once the editor exits. For a working tree file
+// the rescan is not optional: the editor may well have changed the file, and
+// the scan is how the lists and the diff catch up with it. A commit's file
+// was only a read-only copy, so there is nothing to rescan — only the copy to
+// sweep up.
 //
 // It is a function of its own rather than a closure inside doEdit because
 // bubbletea runs it in the runtime rather than through Update, which puts it
 // out of reach of a test driving the model directly.
-func editorClosed(path string) func(error) tea.Msg {
+func editorClosed(repo *git.Repo, path, tmp string) func(error) tea.Msg {
 	return func(err error) tea.Msg {
+		repo.RemoveTempCopy(tmp)
 		if err != nil {
 			return opMsg{text: "Edit " + path, err: err}
 		}
+		if tmp != "" {
+			return opMsg{text: "Closed " + path}
+		}
 		return opMsg{text: "Edited " + path, rescan: true}
 	}
+}
+
+// isMarkdown reports whether a path names a markdown file, which is the one
+// kind the reader knows how to render.
+func isMarkdown(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown", ".mdown", ".mkd":
+		return true
+	}
+	return false
+}
+
+// doMarkdown opens the file in view in the full screen markdown reader. It
+// reads whichever version the window is showing: the working tree's, or the
+// selected commit's — reading is the one thing history is happy to allow.
+func (m Model) doMarkdown() (tea.Model, tea.Cmd) {
+	f, commit, side := m.fileInView()
+	if f == nil {
+		m.setError("No file to read")
+		return m, nil
+	}
+	if !isMarkdown(f.Path) {
+		m.setError(f.Path + " is not a markdown file")
+		return m, nil
+	}
+	title := f.Path
+	if c, ok := m.commits.selected(); ok {
+		title += " @ " + c.Short
+	}
+	repo, gen, parent, file := m.repo, m.gen, m.parent, *f
+	return m, func() tea.Msg {
+		text, err := repo.FileContent(commit, file.Path)
+		if err != nil {
+			return markdownMsg{title: title, gen: gen, err: err}
+		}
+		// The same diff the pane shows, taken again at minimal context, marks
+		// the changed lines in the margin. Failing to take it only costs the
+		// marks, never the text.
+		var diff string
+		if commit != "" {
+			diff, _ = repo.CommitDiff(commit, file, 1)
+		} else {
+			diff, _ = repo.Diff(file, side, 1, parent)
+		}
+		var changed map[int]bool
+		if diff != "" {
+			changed = git.ParsePatch(diff).ChangedNewLines()
+		}
+		return markdownMsg{title: title, gen: gen, text: text, changed: changed}
+	}
+}
+
+// onMarkdown puts the reader up once the text arrives, unless the window has
+// been rescanned out from under the request.
+func (m Model) onMarkdown(msg markdownMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.gen {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.setError(msg.title + ": " + firstLine(msg.err.Error()))
+		return m, nil
+	}
+	m.md = newMdView(msg.title, msg.text, msg.changed, m.width, m.height)
+	return m, nil
+}
+
+// markdownKey drives the reader: scrolling, and the keys that put it away.
+func (m Model) markdownKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return m.doQuit()
+	case key.Matches(msg, m.keys.Cancel),
+		key.Matches(msg, m.keys.QuitKey),
+		key.Matches(msg, m.keys.MarkdownKey):
+		m.md = nil
+		return m, nil
+	case key.Matches(msg, m.keys.Up):
+		m.md.move(-1)
+	case key.Matches(msg, m.keys.Down):
+		m.md.move(1)
+	case key.Matches(msg, m.keys.PageUp):
+		m.md.move(-max(m.md.body()-1, 1))
+	case key.Matches(msg, m.keys.PageDown):
+		m.md.move(max(m.md.body()-1, 1))
+	case key.Matches(msg, m.keys.Home):
+		m.md.moveTo(0)
+	case key.Matches(msg, m.keys.End):
+		m.md.moveTo(len(m.md.lines))
+	case key.Matches(msg, m.keys.NextHunk):
+		m.md.jump(1)
+	case key.Matches(msg, m.keys.PrevHunk):
+		m.md.jump(-1)
+	}
+	return m, nil
 }
 
 // closeCompose puts the message away, keeping what was typed for next time.
@@ -1823,6 +1965,9 @@ func (m Model) View() string {
 	if m.dialog != nil {
 		return m.dialog.view(m.st, m.width, m.height)
 	}
+	if m.md != nil {
+		return m.md.view(m.st)
+	}
 	return view
 }
 
@@ -1982,6 +2127,7 @@ func helpText() string {
 		"    a  stage all changed  v  revert changes",
 		"    o  sign off           A  amend last commit",
 		"    e  edit the file in $EDITOR",
+		"    m  read a markdown file, rendered, full screen",
 		"    R  rescan (also F5)   U  pop commits off this branch",
 		"    -  /  =              less / more diff context",
 		"    P  push               M  local merge / abort merge",
@@ -2073,17 +2219,26 @@ func helpText() string {
 		"  in the reflog.",
 		"",
 		"  Otherwise history is read only. Nothing that would change the",
-		"  tree or the index — s, u, a, v, e, D, L, r, Space — does",
+		"  tree or the index — s, u, a, v, D, L, r, Space — does",
 		"  anything while an earlier commit is on screen; each says so",
-		"  rather than acting.",
+		"  rather than acting. Reading is still allowed: e opens the",
+		"  commit's version of the file as a read-only copy, and m reads",
+		"  it in the markdown reader.",
 		"",
 		"───────────────────────────────────────────────────────────────",
 		"On a file, beyond the commands above",
 		"",
 		"  e       open it in $EDITOR, or vi. The whole terminal goes to",
 		"          the editor until it exits, and difftui rescans after,",
-		"          since the file may have changed. Only the working",
-		"          tree can be edited, never a file from a commit.",
+		"          since the file may have changed. From a commit the",
+		"          editor gets that commit's version as a read-only copy,",
+		"          so history can be read there but never rewritten.",
+		"",
+		"  m       read a markdown file, rendered, filling the screen —",
+		"          the working tree's copy, or the selected commit's.",
+		"          Arrows and PgUp/PgDn scroll; Esc, q or m again closes.",
+		"          When the file has changes, the touched blocks carry a",
+		"          ▍ marker in the margin and n/p hop between them.",
 		"",
 		"  Space   stage, or unstage from the staged list. The cursor",
 		"          holds its row rather than following the file, so the",

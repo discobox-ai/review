@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -32,6 +33,13 @@ type System interface {
 	RemoveAll(path string) error
 	Rename(oldPath, newPath string) error
 	Stat(path string) (FileInfo, error)
+
+	// WriteTempFile writes data to a fresh read-only file named name, in a
+	// directory of its own outside the repository, and returns its path. It
+	// carries a file as it stood in a commit out to the editor: the copy is
+	// there to be looked at, so nothing that opens it can write into history.
+	// The caller removes the copy's directory when it is done with it.
+	WriteTempFile(name string, data []byte) (string, error)
 
 	// Editor builds the command that opens path in the user's editor, run in
 	// dir. It is the only thing difftui runs that is not git, and the only
@@ -119,6 +127,23 @@ func (Local) RemoveAll(path string) error { return os.RemoveAll(path) }
 
 // Rename moves a file over another.
 func (Local) Rename(oldPath, newPath string) error { return os.Rename(oldPath, newPath) }
+
+// WriteTempFile puts data in a read-only file of its own under the system
+// temporary directory. Keeping the given name, rather than the mangled one
+// os.CreateTemp would pick, is what lets an editor recognise the file type;
+// the fresh directory is what keeps the name from colliding.
+func (Local) WriteTempFile(name string, data []byte) (string, error) {
+	dir, err := os.MkdirTemp("", "difftui-")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, data, 0o444); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", err
+	}
+	return path, nil
+}
 
 // Stat reports what difftui needs to know about a path.
 func (Local) Stat(path string) (FileInfo, error) {

@@ -185,6 +185,16 @@ func (f *fakeSystem) RemoveAll(path string) error {
 	return nil
 }
 
+func (f *fakeSystem) WriteTempFile(name string, data []byte) (string, error) {
+	path := "/tmp/fake/" + name
+	f.fileCalls = append(f.fileCalls, "writetemp "+path)
+	if f.files == nil {
+		f.files = map[string]string{}
+	}
+	f.files[path] = string(data)
+	return path, nil
+}
+
 func (f *fakeSystem) Rename(oldPath, newPath string) error {
 	f.fileCalls = append(f.fileCalls, "rename "+oldPath+" "+newPath)
 	if s, ok := f.files[oldPath]; ok {
