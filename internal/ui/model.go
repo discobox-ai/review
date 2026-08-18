@@ -700,7 +700,6 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, m.keys.Toggle),
 			key.Matches(msg, m.keys.StageKey),
-			key.Matches(msg, m.keys.StageChangedKey),
 			key.Matches(msg, m.keys.UnstageKey),
 			key.Matches(msg, m.keys.RevertKey),
 			key.Matches(msg, m.keys.Delete),
@@ -721,8 +720,6 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, m.keys.StageKey):
 		return m.doStage()
-	case key.Matches(msg, m.keys.StageChangedKey):
-		return m, op("Staged all changed files", true, m.repo.StageChanged)
 	case key.Matches(msg, m.keys.UnstageKey):
 		return m.doUnstage()
 	case key.Matches(msg, m.keys.RevertKey):
@@ -2090,12 +2087,12 @@ func (m Model) hints() string {
 		if m.workdir.visual() {
 			return visualHint(m.workdir.selected(), "stage")
 		}
-		return "Space stage · s stage · a stage all · v revert · V select · e amend · Ctrl-Enter commit · ? keys"
+		return "Space stage · s stage · v revert · V select · e edit · A amend · Ctrl-Enter commit · ? keys"
 	case focusIndex:
 		if m.index.visual() {
 			return visualHint(m.index.selected(), "unstage")
 		}
-		return "Space unstage · u unstage · a stage all · V select · e amend · Ctrl-Enter commit · ? keys"
+		return "Space unstage · u unstage · V select · e edit · A amend · Ctrl-Enter commit · ? keys"
 	case focusDiff:
 		if m.diff.visual() {
 			n := 1 + max(m.diff.cursor, m.diff.anchor) - min(m.diff.cursor, m.diff.anchor)
@@ -2124,8 +2121,8 @@ func helpText() string {
 		"Every command is one letter, pressed in a file list or the diff.",
 		"",
 		"    s  stage              u  unstage",
-		"    a  stage all changed  v  revert changes",
-		"    o  sign off           A  amend last commit",
+		"    v  revert changes     A  amend last commit",
+		"    o  sign off",
 		"    e  edit the file in $EDITOR",
 		"    m  read a markdown file, rendered, full screen",
 		"    R  rescan (also F5)   U  pop commits off this branch",
@@ -2219,7 +2216,7 @@ func helpText() string {
 		"  in the reflog.",
 		"",
 		"  Otherwise history is read only. Nothing that would change the",
-		"  tree or the index — s, u, a, v, D, L, r, Space — does",
+		"  tree or the index — s, u, v, D, L, r, Space — does",
 		"  anything while an earlier commit is on screen; each says so",
 		"  rather than acting. Reading is still allowed: e opens the",
 		"  commit's version of the file as a read-only copy, and m reads",
@@ -2238,7 +2235,9 @@ func helpText() string {
 		"          the working tree's copy, or the selected commit's.",
 		"          Arrows and PgUp/PgDn scroll; Esc, q or m again closes.",
 		"          When the file has changes, the touched blocks carry a",
-		"          ▍ marker in the margin and n/p hop between them.",
+		"          ▍ marker in the margin and n/p hop between them, landing",
+		"          a few lines above so the lead-in shows; the one you are",
+		"          on is picked out in a brighter ▌.",
 		"",
 		"  Space   stage, or unstage from the staged list. The cursor",
 		"          holds its row rather than following the file, so the",

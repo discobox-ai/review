@@ -42,55 +42,73 @@ func TestMdBlocks(t *testing.T) {
 // A change marks its whole block, the blocks are jumpable in both directions,
 // and an untouched file has no gutter at all.
 func TestMdViewMarksAndJumps(t *testing.T) {
-	raw := "# Title\n\nfirst paragraph\n\nsecond paragraph\n\nthird paragraph\n"
-	// "second paragraph" is source line 5. The window is kept short so the
-	// jump target is not already pinned to the top by the clamp.
-	v := newMdView("x.md", raw, map[int]bool{5: true}, 80, 5)
-	if len(v.jumps) != 1 {
-		t.Fatalf("jumps = %v, want the one changed block", v.jumps)
+	// Three changed paragraphs out of five, at source lines 5, 9 and 13, with
+	// enough text that the jumps have somewhere to scroll to.
+	raw := "# Title\n\nfirst paragraph\n\nsecond paragraph\n\nthird paragraph\n\n" +
+		"fourth paragraph\n\nfifth paragraph\n\nsixth paragraph\n\nseventh paragraph\n"
+	v := newMdView("x.md", raw, map[int]bool{5: true, 9: true, 13: true}, 80, 6)
+	if len(v.jumps) != 3 {
+		t.Fatalf("jumps = %v, want three changed blocks", v.jumps)
 	}
 	var flagged []string
 	for i, l := range v.lines {
-		if v.changed[i] && strings.TrimSpace(ansi.Strip(l)) != "" {
+		if v.block[i] >= 0 && strings.TrimSpace(ansi.Strip(l)) != "" {
 			flagged = append(flagged, ansi.Strip(l))
 		}
 	}
-	if len(flagged) == 0 || !strings.Contains(flagged[0], "second paragraph") {
-		t.Errorf("marked lines = %q, want the second paragraph", flagged)
-	}
-	for _, l := range flagged {
-		if strings.Contains(l, "first paragraph") || strings.Contains(l, "third paragraph") {
-			t.Errorf("an untouched paragraph is marked: %q", l)
-		}
+	if len(flagged) != 3 || !strings.Contains(flagged[0], "second paragraph") ||
+		!strings.Contains(flagged[1], "fourth paragraph") || !strings.Contains(flagged[2], "sixth paragraph") {
+		t.Errorf("marked lines = %q, want the second, fourth and sixth paragraphs", flagged)
 	}
 
-	if v.offset != 0 {
-		t.Fatalf("reader starts at offset %d", v.offset)
+	// Nothing is current until n or p says so; the marks are all alike.
+	if v.cur != -1 || v.offset != 0 {
+		t.Fatalf("reader starts at cur %d offset %d", v.cur, v.offset)
+	}
+	if strings.Contains(v.view(newStyles()), "▌") {
+		t.Error("a block is picked out before n or p was pressed")
+	}
+
+	// n lands on the first block, three lines above it so some of what came
+	// before is on screen — clamped to the top when there is not that much.
+	v.jump(1)
+	if v.cur != 0 || v.offset != max(v.jumps[0]-mdLead, 0) {
+		t.Errorf("n: cur %d offset %d, want block 0 at %d", v.cur, v.offset, max(v.jumps[0]-mdLead, 0))
+	}
+	view := v.view(newStyles())
+	if !strings.Contains(view, "▌") || !strings.Contains(view, "change 1 of 3") {
+		t.Errorf("the current block is not picked out:\n%s", ansi.Strip(view))
 	}
 	v.jump(1)
-	if v.offset != v.jumps[0] {
-		t.Errorf("n went to %d, want %d", v.offset, v.jumps[0])
+	if v.cur != 1 || v.offset != v.jumps[1]-mdLead {
+		t.Errorf("second n: cur %d offset %d, want block 1 at %d", v.cur, v.offset, v.jumps[1]-mdLead)
 	}
+	// The current block's marker differs from the others' on the same screen.
+	for _, line := range strings.Split(v.view(newStyles()), "\n") {
+		plain := ansi.Strip(line)
+		switch {
+		case strings.Contains(plain, "fourth paragraph") && !strings.HasPrefix(plain, "▌"):
+			t.Errorf("the current block does not carry the current mark: %q", plain)
+		case strings.Contains(plain, "sixth paragraph") && !strings.HasPrefix(plain, "▍"):
+			t.Errorf("another block carries the wrong mark: %q", plain)
+		}
+	}
+	v.jump(1)
 	v.jump(1) // off the end: stays put
-	if v.offset != v.jumps[0] {
-		t.Errorf("n off the end moved to %d", v.offset)
+	if v.cur != 2 {
+		t.Errorf("n off the end moved to block %d", v.cur)
 	}
-	v.moveTo(len(v.lines))
 	v.jump(-1)
-	if v.offset != v.jumps[0] {
-		t.Errorf("p went to %d, want %d", v.offset, v.jumps[0])
+	if v.cur != 1 || v.offset != v.jumps[1]-mdLead {
+		t.Errorf("p: cur %d offset %d, want block 1 at %d", v.cur, v.offset, v.jumps[1]-mdLead)
 	}
 
-	view := v.view(newStyles())
-	if !strings.Contains(view, "▍") {
-		t.Error("the gutter has no marker")
-	}
-	if !strings.Contains(view, "n/p changed block") {
+	if !strings.Contains(v.view(newStyles()), "n/p changed block") {
 		t.Error("the hint does not offer n/p")
 	}
 
-	clean := newMdView("x.md", raw, nil, 80, 5)
-	if len(clean.jumps) != 0 || strings.Contains(clean.view(newStyles()), "▍") {
+	clean := newMdView("x.md", raw, nil, 80, 6)
+	if len(clean.jumps) != 0 || strings.ContainsAny(clean.view(newStyles()), "▍▌") {
 		t.Error("an untouched file grew a gutter")
 	}
 }

@@ -903,13 +903,6 @@ func (r *Repo) Stage(paths []string) error {
 	return err
 }
 
-// StageChanged stages every tracked file that was modified or deleted, which
-// is git-gui's "Stage Changed Files To Commit".
-func (r *Repo) StageChanged() error {
-	_, err := r.run("add", "--update", "--", ".")
-	return err
-}
-
 // Unstage removes paths from the index ("Unstage From Commit"), restoring
 // their entries from parent.
 //

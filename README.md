@@ -120,7 +120,7 @@ in the reflog.
 Anything you had staged before stays staged, and anything unstaged stays
 unstaged; the popped work simply joins it in the index.
 
-**Otherwise history is read only.** `s`, `u`, `a`, `v`, `e`, `D`, `L`, `r` and
+**Otherwise history is read only.** `s`, `u`, `v`, `D`, `L`, `r` and
 `Space` all have nothing to act on while an earlier commit is on screen, so
 they say so rather than acting on the working tree behind your back.
 
@@ -236,8 +236,8 @@ Lowercase acts on the working tree and the index, uppercase on the repository.
 | | | | |
 | --- | --- | --- | --- |
 | `s` | stage | `u` | unstage |
-| `a` | stage all changed | `v` | revert changes |
-| `o` | sign off | `A` | amend last commit |
+| `v` | revert changes | `A` | amend last commit |
+| `o` | sign off | | |
 | `e` | edit the file in `$EDITOR` | `m` | read a markdown file, rendered |
 | `R` | rescan (also `F5`) | `U` | pop commits off this branch |
 | `-` / `=` | less / more diff context | | |
@@ -401,6 +401,10 @@ than rendered as gibberish.
 When the file has changes — the same ones the diff pane would show — the
 touched text carries a **`▍` marker** in the left margin, and `n`/`p` hop to
 the next and previous marked spot, the same keys that walk hunks in the diff.
+Each hop lands three lines above the change, so a little of what came before
+is on screen for context, and the block you hopped to is picked out in a
+brighter **`▌`** — with several changes on one screen it is clear which is
+"this one". The title bar counts along: *change 2 of 5*.
 It is not a diff: just a "look here" in the margin of the rendered page.
 Rendered lines do not map one-to-one onto source lines, so the marker lands on
 whole blocks — a changed line marks its paragraph, which is the honest

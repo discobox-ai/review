@@ -345,7 +345,7 @@ func TestHistoryIsReadOnly(t *testing.T) {
 	// e is not here either: it opens the commit's version of the file as a
 	// read-only copy, which changes nothing. TestEditAgainstHistory covers it.
 	for _, k := range []tea.KeyMsg{
-		rkey("s"), rkey("u"), rkey("a"), rkey("v"), rkey("D"),
+		rkey("s"), rkey("u"), rkey("v"), rkey("D"),
 		rkey("L"), rkey("r"), {Type: tea.KeySpace},
 	} {
 		m := drive(t, base, k)

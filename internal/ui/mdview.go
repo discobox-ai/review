@@ -23,10 +23,13 @@ type mdView struct {
 	raw        string
 	changedSrc map[int]bool // 1-based source lines the diff touched
 
-	lines   []string
-	changed []bool // parallel to lines: rendered from a touched block
-	jumps   []int  // first rendered line of each touched block, ascending
-	offset  int
+	lines []string
+	// block is parallel to lines: which touched block each rendered line came
+	// from, as an index into jumps, or -1 for an untouched one.
+	block  []int
+	jumps  []int // first rendered line of each touched block, ascending
+	cur    int   // the block n/p last landed on, an index into jumps, or -1
+	offset int
 
 	width, height int
 }
@@ -38,8 +41,13 @@ const mdWrapWidth = 100
 // mdGutter is the marker column, present only when there is anything to mark.
 const mdGutter = 2
 
+// mdLead is how many lines above a changed block n/p leave on screen, so the
+// change arrives with a little of what came before it rather than flush
+// against the title bar.
+const mdLead = 3
+
 func newMdView(title, raw string, changedSrc map[int]bool, width, height int) *mdView {
-	v := &mdView{title: title, raw: raw, changedSrc: changedSrc}
+	v := &mdView{title: title, raw: raw, changedSrc: changedSrc, cur: -1}
 	v.resize(width, height)
 	return v
 }
@@ -106,7 +114,7 @@ func (v *mdView) resize(width, height int) {
 	)
 
 	blocks := mdBlocks(v.raw)
-	v.lines, v.changed, v.jumps = nil, nil, nil
+	v.lines, v.block, v.jumps = nil, nil, nil
 	for i, b := range blocks {
 		// A blank line between blocks belongs to neither; for marking, each
 		// block reaches to the start of the next, so a change landing in the
@@ -128,18 +136,25 @@ func (v *mdView) resize(width, height int) {
 		}
 		if i > 0 {
 			v.lines = append(v.lines, "")
-			v.changed = append(v.changed, false)
+			v.block = append(v.block, -1)
 		}
+		id := -1
 		if hit {
+			id = len(v.jumps)
 			v.jumps = append(v.jumps, len(v.lines))
 		}
 		for _, l := range strings.Split(out, "\n") {
 			v.lines = append(v.lines, l)
-			v.changed = append(v.changed, hit)
+			v.block = append(v.block, id)
 		}
 	}
 	if len(v.lines) == 0 {
-		v.lines, v.changed = []string{""}, []bool{false}
+		v.lines, v.block = []string{""}, []int{-1}
+	}
+	// A resize re-renders from scratch; the block being looked at survives it
+	// as long as there still is one.
+	if v.cur >= len(v.jumps) {
+		v.cur = len(v.jumps) - 1
 	}
 	v.clamp()
 }
@@ -157,24 +172,42 @@ func (v *mdView) moveTo(offset int) {
 	v.clamp()
 }
 
-// jump scrolls to the next or previous changed block, bringing it to the top
-// of the screen. It runs off either end quietly, like the hunk keys do.
+// jump moves to the next or previous changed block and scrolls so it sits a
+// few lines down from the top, with what came before it still in view. The
+// block becomes the current one, which the gutter picks out from the rest.
+// It runs off either end quietly, like the hunk keys do.
+//
+// Before the first press there is no current block, so n goes to the first
+// block below the top of the screen and p to the last one above it, the way
+// the hunk keys read the cursor. After that the two step through the list.
 func (v *mdView) jump(delta int) {
-	if delta > 0 {
-		for _, j := range v.jumps {
-			if j > v.offset {
-				v.moveTo(j)
-				return
-			}
-		}
+	if len(v.jumps) == 0 {
 		return
 	}
-	for i := len(v.jumps) - 1; i >= 0; i-- {
-		if v.jumps[i] < v.offset {
-			v.moveTo(v.jumps[i])
-			return
+	next := v.cur + delta
+	if v.cur < 0 {
+		next = -1
+		if delta > 0 {
+			for i, j := range v.jumps {
+				if j > v.offset {
+					next = i
+					break
+				}
+			}
+		} else {
+			for i := len(v.jumps) - 1; i >= 0; i-- {
+				if v.jumps[i] < v.offset {
+					next = i
+					break
+				}
+			}
 		}
 	}
+	if next < 0 || next >= len(v.jumps) {
+		return
+	}
+	v.cur = next
+	v.moveTo(v.jumps[next] - mdLead)
 }
 
 func (v *mdView) clamp() {
@@ -187,7 +220,11 @@ func (v *mdView) view(st *styles) string {
 	end := min(v.offset+body, len(v.lines))
 	right := fmt.Sprintf("%d–%d of %d", v.offset+1, end, len(v.lines))
 	if n := len(v.jumps); n > 0 {
-		right = plural(n, "changed block", "changed blocks") + " · " + right
+		if v.cur >= 0 {
+			right = fmt.Sprintf("change %d of %d · %s", v.cur+1, n, right)
+		} else {
+			right = plural(n, "changed block", "changed blocks") + " · " + right
+		}
 	}
 	marks := len(v.jumps) > 0
 	textW := v.width
@@ -199,10 +236,15 @@ func (v *mdView) view(st *styles) string {
 	b.WriteString("\n")
 	for i := v.offset; i < end; i++ {
 		if marks {
-			if v.changed[i] {
-				b.WriteString(st.statusWA.Render("▍") + " ")
-			} else {
+			// The block n/p landed on is picked out from the rest, so with
+			// several changes on screen it is clear which one is "this one".
+			switch {
+			case v.block[i] < 0:
 				b.WriteString("  ")
+			case v.block[i] == v.cur:
+				b.WriteString(st.mdMarkCur.Render("▌") + " ")
+			default:
+				b.WriteString(st.mdMark.Render("▍") + " ")
 			}
 		}
 		b.WriteString(truncateANSI(v.lines[i], textW))

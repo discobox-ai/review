@@ -19,7 +19,6 @@ func commandBindings(m keyMap) []struct {
 		key.Binding
 	}{
 		{"stage", m.StageKey},
-		{"stage all changed", m.StageChangedKey},
 		{"unstage", m.UnstageKey},
 		{"revert changes", m.RevertKey},
 		{"sign off", m.SignOffKey},

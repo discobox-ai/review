@@ -319,22 +319,6 @@ func TestCommitAndAmend(t *testing.T) {
 	}
 }
 
-func TestStageChangedSkipsUntracked(t *testing.T) {
-	r := testRepo(t)
-	write(t, r.Dir, "foo.txt", "one\nTWO\nthree\nfour\nfive\n")
-	write(t, r.Dir, "new.txt", "untracked\n")
-
-	if err := r.StageChanged(); err != nil {
-		t.Fatal(err)
-	}
-	if got := stateOf(t, r, "foo.txt"); got != "M_" {
-		t.Errorf("tracked change should be staged, got %s", got)
-	}
-	if got := stateOf(t, r, "new.txt"); got != "_O" {
-		t.Errorf("untracked file should be left alone, got %s", got)
-	}
-}
-
 func TestUnstageWithNoHEAD(t *testing.T) {
 	dir := t.TempDir()
 	for _, args := range [][]string{

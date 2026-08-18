@@ -71,6 +71,11 @@ type styles struct {
 	selectBar lipgloss.Style
 	numberOn  lipgloss.Style
 
+	// The markdown reader's margin: a changed block, and the one n/p last
+	// landed on, which is brighter so it stands apart from its neighbours.
+	mdMark    lipgloss.Style
+	mdMarkCur lipgloss.Style
+
 	button      lipgloss.Style
 	buttonFocus lipgloss.Style
 
@@ -116,6 +121,9 @@ func newStyles() *styles {
 	s.numberOn = lipgloss.NewStyle().Foreground(colGold).Bold(true)
 	s.diffHunk = lipgloss.NewStyle().Foreground(colHunk).Bold(true)
 	s.diffMeta = lipgloss.NewStyle().Foreground(colDim)
+
+	s.mdMark = lipgloss.NewStyle().Foreground(colHunk)
+	s.mdMarkCur = lipgloss.NewStyle().Foreground(colGold).Bold(true)
 
 	s.button = lipgloss.NewStyle().Foreground(colGrey).
 		Border(lipgloss.RoundedBorder()).BorderForeground(colDim).Padding(0, 1)

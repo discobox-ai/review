@@ -36,31 +36,30 @@ type keyMap struct {
 	PrevPane     key.Binding
 
 	// Commands. A letter each, live in the file lists and the diff.
-	StageKey        key.Binding
-	StageChangedKey key.Binding
-	UnstageKey      key.Binding
-	RevertKey       key.Binding
-	SignOffKey      key.Binding
-	AmendKey        key.Binding
-	EditKey         key.Binding
-	MarkdownKey     key.Binding
-	PushKey         key.Binding
-	MergeKey        key.Binding
-	BranchKey       key.Binding
-	CheckoutKey     key.Binding
-	RescanKey       key.Binding
-	HelpKey         key.Binding
-	QuitKey         key.Binding
-	Toggle          key.Binding
-	Visual          key.Binding
-	StageLine       key.Binding
-	Delete          key.Binding
-	RevertHunk      key.Binding
-	PopKey          key.Binding
-	NextHunk        key.Binding
-	PrevHunk        key.Binding
-	LessContextKey  key.Binding
-	MoreContextKey  key.Binding
+	StageKey       key.Binding
+	UnstageKey     key.Binding
+	RevertKey      key.Binding
+	SignOffKey     key.Binding
+	AmendKey       key.Binding
+	EditKey        key.Binding
+	MarkdownKey    key.Binding
+	PushKey        key.Binding
+	MergeKey       key.Binding
+	BranchKey      key.Binding
+	CheckoutKey    key.Binding
+	RescanKey      key.Binding
+	HelpKey        key.Binding
+	QuitKey        key.Binding
+	Toggle         key.Binding
+	Visual         key.Binding
+	StageLine      key.Binding
+	Delete         key.Binding
+	RevertHunk     key.Binding
+	PopKey         key.Binding
+	NextHunk       key.Binding
+	PrevHunk       key.Binding
+	LessContextKey key.Binding
+	MoreContextKey key.Binding
 
 	Up       key.Binding
 	Down     key.Binding
@@ -93,19 +92,18 @@ func newKeyMap() keyMap {
 		NextPane:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "next pane")),
 		PrevPane:     key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("Shift-Tab", "prev pane")),
 
-		StageKey:        key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stage")),
-		StageChangedKey: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "stage all changed")),
-		UnstageKey:      key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "unstage")),
-		RevertKey:       key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "revert changes")),
-		SignOffKey:      key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "sign off")),
-		AmendKey:        key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "amend last commit")),
-		EditKey:         key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit the file")),
-		MarkdownKey:     key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "read markdown")),
-		PushKey:         key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "push")),
-		MergeKey:        key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "local merge")),
-		BranchKey:       key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "new branch")),
-		CheckoutKey:     key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "checkout branch")),
-		RescanKey:       key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rescan")),
+		StageKey:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stage")),
+		UnstageKey:  key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "unstage")),
+		RevertKey:   key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "revert changes")),
+		SignOffKey:  key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "sign off")),
+		AmendKey:    key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "amend last commit")),
+		EditKey:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit the file")),
+		MarkdownKey: key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "read markdown")),
+		PushKey:     key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "push")),
+		MergeKey:    key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "local merge")),
+		BranchKey:   key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "new branch")),
+		CheckoutKey: key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "checkout branch")),
+		RescanKey:   key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rescan")),
 
 		HelpKey:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		QuitKey:        key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
