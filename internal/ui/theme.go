@@ -76,6 +76,12 @@ type styles struct {
 	mdMark    lipgloss.Style
 	mdMarkCur lipgloss.Style
 
+	// The scrollbars are furniture: a barely there track and a plain grey
+	// thumb, taking no colour of their own so they never compete with the
+	// pane for attention.
+	scrollTrack lipgloss.Style
+	scrollThumb lipgloss.Style
+
 	button      lipgloss.Style
 	buttonFocus lipgloss.Style
 
@@ -119,6 +125,8 @@ func newStyles() *styles {
 	s.cursorBar = lipgloss.NewStyle().Background(colGold)
 	s.selectBar = lipgloss.NewStyle().Background(colSelBG)
 	s.numberOn = lipgloss.NewStyle().Foreground(colGold).Bold(true)
+	s.scrollTrack = lipgloss.NewStyle().Foreground(colInactive)
+	s.scrollThumb = lipgloss.NewStyle().Foreground(colGrey)
 	s.diffHunk = lipgloss.NewStyle().Foreground(colHunk).Bold(true)
 	s.diffMeta = lipgloss.NewStyle().Foreground(colDim)
 

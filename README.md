@@ -328,11 +328,46 @@ goes back to the bottom of the unstaged one.
 is showing — git gui tracks the same thing as `current_diff_side` — so `←` comes
 back to *that* list with the same file still selected.
 
+In the diff, a line running past the right margin scrolls sideways first. `→`
+slides the code over by two tab stops, `←` slides it back, and only with the
+code against the left margin does `←` leave for the list — the same rule `↓`
+follows at the last line of a pane. The line numbers and the `+`/`-` markers
+stay where they are while the code moves under them, and the pane title says
+which column it starts at:
+
+```
+Modified, not staged   File: server.go                hunk 1/1
+  12   func handler(w http.ResponseWriter, r *http.Request) e…
+  13  -    return nil
+  13 +     return writeJSON(w, http.StatusOK, resp)
+
+after four presses of →
+
+Modified, not staged   File: server.go       col 33   hunk 1/1
+  12   er, r *http.Request) error {
+  13  -
+  13 + tusOK, resp)
+```
+
+A scrollbar appears down the right edge of a pane, and along the foot of the
+diff, only while there is something to scroll — a bar that could never move
+says nothing and costs a column. Every pane that scrolls has one: the two file
+lists, the branch history and the diff. The thumb is as long a share of the
+track as what is on screen is of the whole, and sits at the same point along
+it, so it is a rough map of the pane as well as a place marker.
+
+The bars take their space out of the body rather than out of the pane, so the
+pane keeps its width and the text gives up the room. In the left column they
+are drawn as the thumb alone: the separator is already a rule down the edge the
+bar wants, and two rules side by side read as a border, so the thumb slides
+along the separator instead. The diff has nothing but the window edge there, so
+it draws its own track.
+
 **Under 100 columns the left column folds away** when the focus moves to the
 diff or the message: a pane taking a third of a narrow window leaves the diff
 too tight to read code in, which is the one thing the window is for. `→` gives
-the diff the whole width, `←` brings the lists back, and the status bar says so
-while they are away. At 100 columns or wider nothing moves.
+the diff the whole width, `←` brings the lists back from column one, and the
+status bar says so while they are away. At 100 columns or wider nothing moves.
 
 ```
 80 columns, on a list                    80 columns, after →
@@ -430,6 +465,7 @@ so the seam it left behind is marked instead.
 | `L` | Stage just the line under the cursor |
 | `r` | Revert the hunk |
 | `n` / `p` | Next / previous hunk |
+| `←` / `→` | Scroll a long line sideways, before they mean the next pane |
 
 On the staged side each of these unstages instead.
 
@@ -444,8 +480,9 @@ diff.
 
 While a selection is open the cursor stays in its pane: running off the end
 would abandon the gesture halfway. Leaving the pane another way — `Tab`, `Alt-1`
-to `Alt-3`, `←`/`→` — cancels it, as does a rescan, since the rows it covered
-now hold different files.
+to `Alt-3`, and `←`/`→` from a list — cancels it, as does a rescan, since the
+rows it covered now hold different files. In the diff `←`/`→` only scroll the
+code, so a long line can be read across without dropping the selection.
 
 The two panes draw it differently, for one reason. In the lists nothing else is
 using the row background, so the selection is a band across the row, in a dimmer

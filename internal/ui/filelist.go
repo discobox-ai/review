@@ -159,7 +159,18 @@ func (l *fileList) clamp() {
 	if l.offset < 0 {
 		l.offset = 0
 	}
+	if l.offset > l.maxOffset() {
+		l.offset = l.maxOffset()
+	}
 }
+
+// scrolls reports whether the list holds more files than it can show, which is
+// the only time it wears a scrollbar.
+func (l *fileList) scrolls() bool { return scrolls(len(l.files), l.height, l.width) }
+
+// maxOffset is the first file that can sit at the top with the last one still
+// on screen.
+func (l *fileList) maxOffset() int { return listMaxOffset(len(l.files), l.height) }
 
 // icon maps a state character to a glyph, following git-gui's all_icons table.
 func (l *fileList) icon(s git.State) string {
@@ -233,9 +244,17 @@ func (l *fileList) view(st *styles, focused bool) string {
 	}
 	title := renderTitle(titleStyle, l.title(), count, l.width)
 
+	// The bar takes its column out of the rows, never out of the title, so the
+	// pane keeps its width and the file names give up the room.
+	bar := l.scrolls()
+	rowW := l.width
+	if bar {
+		rowW = max(l.width-1, 0)
+	}
+
 	rows := make([]string, 0, l.height)
 	if len(l.files) == 0 {
-		rows = append(rows, st.dimText.Render(pad("  (nothing)", l.width)))
+		rows = append(rows, st.dimText.Render(pad("  (nothing)", rowW)))
 	}
 	for i := l.offset; i < len(l.files) && len(rows) < l.height; i++ {
 		f := l.files[i]
@@ -243,7 +262,7 @@ func (l *fileList) view(st *styles, focused bool) string {
 		if f.From != "" {
 			name = f.From + " → " + f.Path
 		}
-		line := pad("  "+l.icon(f.State)+" "+name, l.width)
+		line := pad("  "+l.icon(f.State)+" "+name, rowW)
 		// The cursor is the brighter band and the selection a dimmer shade of
 		// it, so the row you are on still reads inside a selection.
 		switch {
@@ -258,7 +277,10 @@ func (l *fileList) view(st *styles, focused bool) string {
 		}
 	}
 	for len(rows) < l.height {
-		rows = append(rows, strings.Repeat(" ", max(l.width, 0)))
+		rows = append(rows, strings.Repeat(" ", max(rowW, 0)))
+	}
+	if bar {
+		attachVScroll(st, rows, blankTrack, len(l.files), l.offset, l.maxOffset())
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, append([]string{title}, rows...)...)
 }

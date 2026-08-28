@@ -457,6 +457,77 @@ func TestContextLinesHaveNoBand(t *testing.T) {
 	}
 }
 
+// Scrolling right slides the code under a fixed gutter: the +/- marker and
+// the line number stay where they are, and the band, the emphasis and the
+// syntax colours travel with the characters they belong to.
+func TestScrolledRowKeepsItsGutterAndBands(t *testing.T) {
+	raw := `diff --git a/x.go b/x.go
+--- a/x.go
++++ b/x.go
+@@ -1,2 +1,2 @@
+-const prefix = "hello, "
++const prefix = "greetings, "
+`
+	lines, spans := parseAndHighlight(t, "x.go", raw)
+	emph := pairEmphasis(lines, textsOf(lines))
+	st := newStyles()
+	render := func(hscroll int) string {
+		for i, l := range lines {
+			if l.Kind != '+' {
+				continue
+			}
+			return renderDiffRow(diffRow{
+				bar: st.body, number: lineNumber(l), numW: 3, numSty: st.dimText,
+				gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
+				spans: spans[i], emph: emph[i], base: st.diffAdd, emphSty: st.diffAddEmph,
+				palette: st.syntax, hscroll: hscroll, width: 60,
+			})
+		}
+		t.Fatal("no added line rendered")
+		return ""
+	}
+
+	// The line number and the marker are the same columns however far the
+	// code has moved. The marker keeps the plain band, never the emphasis.
+	const gutterAt = 5
+	for _, hscroll := range []int{0, 8, 28} {
+		text, bg := bgAt(render(hscroll))
+		if got := string(text[:7]); got != "   1 + " {
+			t.Errorf("scrolled %d: row starts %q, want the number and marker to stay put", hscroll, got)
+		}
+		if bg[gutterAt] != "22" {
+			t.Errorf("scrolled %d: the marker has bg %q, want the plain band", hscroll, bg[gutterAt])
+		}
+	}
+
+	// The changed word carries the stronger shade wherever it lands.
+	for _, hscroll := range []int{0, 8, 16} {
+		text, bg := bgAt(render(hscroll))
+		at := strings.Index(string(text), "greetings")
+		if at < 0 {
+			t.Fatalf("scrolled %d: the row lost the changed word: %q", hscroll, string(text))
+		}
+		for i := at; i < at+len("greetings"); i++ {
+			if bg[i] != "28" {
+				t.Errorf("scrolled %d: %q at %d has bg %q, want the emphasis",
+					hscroll, string(text[i]), i, bg[i])
+			}
+		}
+	}
+
+	// Scrolled clean past the end of the line there is nothing left to shade,
+	// and nothing bleeds back onto the gutter.
+	text, bg := bgAt(render(28))
+	for i := range text {
+		if bg[i] == "28" {
+			t.Errorf("scrolled past the line, %q at %d still carries the emphasis", string(text[i]), i)
+		}
+	}
+	if strings.Contains(string(text[gutterAt+1:]), "greetings") {
+		t.Error("the code did not scroll off")
+	}
+}
+
 // textsOf expands every line the way the diff pane does.
 func textsOf(lines []git.DiffLine) []string {
 	out := make([]string, len(lines))

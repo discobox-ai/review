@@ -1118,6 +1118,12 @@ func (m Model) diffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Down):
 			m.diff.move(1)
 			return m, nil
+		case key.Matches(msg, m.keys.Left):
+			m.diff.scrollH(-hScrollStep)
+			return m, nil
+		case key.Matches(msg, m.keys.Right):
+			m.diff.scrollH(hScrollStep)
+			return m, nil
 		case key.Matches(msg, m.keys.Cancel):
 			m.diff.clearVisual()
 			return m, nil
@@ -1145,19 +1151,28 @@ func (m Model) diffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.diff.move(1)
 	case key.Matches(msg, m.keys.Left):
+		// Left runs the code back to the margin before it means the pane on
+		// the left, the way down runs to the last line before it means the
+		// pane below.
+		if m.diff.scrollH(-hScrollStep) {
+			return m, nil
+		}
 		if t, ok := m.paneLeft(m.focus); ok {
 			return m.enterPane(t, entryKeep)
 		}
 		return m, nil
 	case key.Matches(msg, m.keys.Right):
+		if m.diff.scrollH(hScrollStep) {
+			return m, nil
+		}
 		if t, ok := m.paneRight(m.focus); ok {
 			return m.enterPane(t, entryKeep)
 		}
 		return m, nil
 	case key.Matches(msg, m.keys.PageUp):
-		m.diff.move(-max(m.diff.height-1, 1))
+		m.diff.move(-max(m.diff.bodyRows()-1, 1))
 	case key.Matches(msg, m.keys.PageDown):
-		m.diff.move(max(m.diff.height-1, 1))
+		m.diff.move(max(m.diff.bodyRows()-1, 1))
 	case key.Matches(msg, m.keys.Home):
 		m.diff.moveTo(0)
 	case key.Matches(msg, m.keys.End):
@@ -2104,10 +2119,17 @@ func (m Model) hints() string {
 			// None of the staging keys do anything against history.
 			hint = "Looking at " + c.Short + " · n/p hunk · -/= context · Alt-5 back to the working tree"
 		}
-		if m.leftCollapsed() {
+		// Left and right belong to the code while a line runs past the right
+		// margin, so where they are offered says so.
+		switch scrolls := m.diff.maxHOffset() > 0; {
+		case m.leftCollapsed() && scrolls:
 			// The lists are off screen entirely, so what brings them back goes
 			// first, where a narrow window will not truncate it away.
+			hint = "←/→ scroll · ← again for the lists · " + hint
+		case m.leftCollapsed():
 			hint = "← lists · " + hint
+		case scrolls:
+			hint = "←/→ scroll · " + hint
 		}
 		return hint
 	default:
@@ -2185,6 +2207,18 @@ func helpText() string {
 		"",
 		"  Right from either list opens the diff; left comes back to",
 		"  whichever list the diff is showing, still on the same file.",
+		"",
+		"  In the diff, a line running past the right margin scrolls:",
+		"  right slides the code over, left slides it back, and only",
+		"  with the code against the left margin does left leave for",
+		"  the list. The title says which column the pane starts at",
+		"  while it is scrolled.",
+		"",
+		"  A scrollbar appears down the right edge of a pane, and",
+		"  along the foot of the diff, only while there is something",
+		"  to scroll: a bar that could never move says nothing and",
+		"  costs a column. In the left column it is the thumb alone,",
+		"  sliding along the pane separator.",
 		"",
 		"  Under 100 columns there is not room for both, so moving right",
 		"  gives the diff the whole window and the left column folds",

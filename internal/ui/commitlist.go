@@ -89,7 +89,18 @@ func (l *commitList) clamp() {
 	if l.offset < 0 {
 		l.offset = 0
 	}
+	if l.offset > l.maxOffset() {
+		l.offset = l.maxOffset()
+	}
 }
+
+// scrolls reports whether the history is longer than the pane can show, which
+// is the only time it wears a scrollbar.
+func (l *commitList) scrolls() bool { return scrolls(l.rows(), l.height, l.width) }
+
+// maxOffset is the first row that can sit at the top with the last one still
+// on screen.
+func (l *commitList) maxOffset() int { return listMaxOffset(l.rows(), l.height) }
 
 // rowText is what one entry reads as. The working tree is named rather than
 // hashed, since it has no hash to give.
@@ -112,9 +123,17 @@ func (l *commitList) view(st *styles, focused bool) string {
 	}
 	title := renderTitle(titleStyle, "This Branch", count, l.width)
 
+	// The bar takes its column out of the rows, never out of the title, so the
+	// pane keeps its width and the subjects give up the room.
+	bar := l.scrolls()
+	rowW := l.width
+	if bar {
+		rowW = max(l.width-1, 0)
+	}
+
 	rows := make([]string, 0, l.height)
 	for i := l.offset; i < l.rows() && len(rows) < l.height; i++ {
-		line := pad(l.rowText(i), l.width)
+		line := pad(l.rowText(i), rowW)
 		switch {
 		case i == l.cursor && focused:
 			rows = append(rows, st.sel.Render(line))
@@ -129,7 +148,10 @@ func (l *commitList) view(st *styles, focused bool) string {
 		}
 	}
 	for len(rows) < l.height {
-		rows = append(rows, strings.Repeat(" ", max(l.width, 0)))
+		rows = append(rows, strings.Repeat(" ", max(rowW, 0)))
+	}
+	if bar {
+		attachVScroll(st, rows, blankTrack, l.rows(), l.offset, l.maxOffset())
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, append([]string{title}, rows...)...)
 }

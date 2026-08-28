@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -2201,6 +2202,489 @@ func TestVisualClearedByLeavingThePane(t *testing.T) {
 	m = drive(t, m, altKey("1"))
 	if m.diff.visual() {
 		t.Error("leaving the diff pane should drop the selection")
+	}
+}
+
+// wideDiffModel opens a diff whose lines run well past the right edge of the
+// pane, so that left and right have somewhere to scroll to.
+func wideDiffModel(t *testing.T) Model {
+	t.Helper()
+	repo := testRepo(t)
+	long := "two " + strings.Repeat("and something else again ", 12)
+	writeFile(t, repo.Dir, "foo.txt", "one\n"+long+"\nthree\nfour\nfive\n")
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("1"))
+	for m.workdir.current() != nil && m.workdir.current().Path != "foo.txt" {
+		m = drive(t, m, rkey("j"))
+	}
+	m = drive(t, m, rkey("l"))
+	if m.focus != focusDiff {
+		t.Fatalf("focus = %v, want focusDiff", m.focus)
+	}
+	if m.diff.maxHOffset() <= hScrollStep {
+		t.Fatalf("the fixture fits the pane: longest line %d, code width %d",
+			m.diff.long, m.diff.codeWidth())
+	}
+	return m
+}
+
+// A line wider than the pane belongs to left and right until it is back
+// against the left margin; only then do they mean the pane beside it.
+func TestLongLinesScrollSideways(t *testing.T) {
+	m := wideDiffModel(t)
+	before := m.View()
+
+	m = drive(t, m, rkey("l"))
+	if m.focus != focusDiff {
+		t.Fatalf("right left the diff instead of scrolling: focus = %v", m.focus)
+	}
+	if m.diff.hoffset != hScrollStep {
+		t.Errorf("hoffset = %d, want %d", m.diff.hoffset, hScrollStep)
+	}
+	if m.View() == before {
+		t.Error("scrolling right changed nothing on screen")
+	}
+	// Nothing else on screen says the left margin has moved.
+	if want := "col " + itoa(hScrollStep+1); !strings.Contains(m.View(), want) {
+		t.Errorf("the title should say %q:\n%s", want, m.View())
+	}
+
+	// Left slides it back, staying in the diff.
+	m = drive(t, m, rkey("h"))
+	if m.focus != focusDiff {
+		t.Fatalf("left abandoned the diff with the code still scrolled")
+	}
+	if m.diff.hoffset != 0 {
+		t.Errorf("hoffset = %d, want the code back at the margin", m.diff.hoffset)
+	}
+	if m.View() != before {
+		t.Error("scrolling out and back did not restore the diff")
+	}
+
+	// And from the margin it means the list again, on the same file.
+	m = drive(t, m, rkey("h"))
+	if m.focus != focusWorkdir {
+		t.Errorf("focus = %v, want left from column one to leave for the list", m.focus)
+	}
+}
+
+// The arrows scroll the same way h and l do.
+func TestArrowsScrollTheDiffSideways(t *testing.T) {
+	m := drive(t, wideDiffModel(t), tea.KeyMsg{Type: tea.KeyRight})
+	if m.diff.hoffset != hScrollStep || m.focus != focusDiff {
+		t.Errorf("right arrow: hoffset = %d, focus = %v", m.diff.hoffset, m.focus)
+	}
+	m = drive(t, m, tea.KeyMsg{Type: tea.KeyLeft})
+	if m.diff.hoffset != 0 || m.focus != focusDiff {
+		t.Errorf("left arrow: hoffset = %d, focus = %v", m.diff.hoffset, m.focus)
+	}
+}
+
+// The scroll stops with the longest line at the right margin, so there is
+// never empty space to scroll into.
+func TestScrollStopsAtTheLongestLine(t *testing.T) {
+	m := wideDiffModel(t)
+	for i := 0; i < 200 && m.diff.hoffset < m.diff.maxHOffset(); i++ {
+		m = drive(t, m, rkey("l"))
+	}
+	m = drive(t, m, rkey("l"), rkey("l"))
+	if m.diff.hoffset != m.diff.maxHOffset() {
+		t.Errorf("hoffset = %d, want it held at %d", m.diff.hoffset, m.diff.maxHOffset())
+	}
+	if m.focus != focusDiff {
+		t.Errorf("focus = %v: right at the end of the line should stay put", m.focus)
+	}
+	// The rows keep the pane's width however far over they are.
+	widths := map[int]bool{}
+	for _, row := range strings.Split(m.View(), "\n") {
+		widths[lipgloss.Width(row)] = true
+	}
+	if len(widths) != 1 {
+		t.Errorf("scrolled rows have differing widths: %v", widths)
+	}
+}
+
+// A diff that fits its pane keeps the old behaviour: left leaves at once.
+func TestShortDiffLeavesOnLeft(t *testing.T) {
+	m := diffModel(t)
+	if m.diff.maxHOffset() != 0 {
+		t.Fatalf("the fixture does not fit the pane: %d", m.diff.maxHOffset())
+	}
+	m = drive(t, m, rkey("h"))
+	if m.focus != focusWorkdir {
+		t.Errorf("focus = %v, want focusWorkdir", m.focus)
+	}
+}
+
+// Scrolling is the one sideways move visual line mode allows: it does not
+// abandon the selection, and it does not leave the pane.
+func TestScrollingDoesNotEndVisualMode(t *testing.T) {
+	m := drive(t, wideDiffModel(t), rkey("V"), rkey("l"))
+	if !m.diff.visual() || m.focus != focusDiff {
+		t.Fatalf("visual = %v, focus = %v", m.diff.visual(), m.focus)
+	}
+	if m.diff.hoffset != hScrollStep {
+		t.Errorf("hoffset = %d, want %d", m.diff.hoffset, hScrollStep)
+	}
+	m = drive(t, m, rkey("h"), rkey("h"))
+	if !m.diff.visual() || m.focus != focusDiff {
+		t.Errorf("left out of a selection: visual = %v, focus = %v", m.diff.visual(), m.focus)
+	}
+}
+
+// Moving to another file starts it at the left margin again.
+func TestANewDiffStartsAtTheMargin(t *testing.T) {
+	m := drive(t, wideDiffModel(t), rkey("l"), rkey("l"))
+	if m.diff.hoffset == 0 {
+		t.Fatal("the diff did not scroll")
+	}
+	m = drive(t, m, altKey("1"), rkey("j"), altKey("3"))
+	if m.diff.hoffset != 0 {
+		t.Errorf("hoffset = %d, want a new diff to start at column one", m.diff.hoffset)
+	}
+}
+
+// tallDiffModel opens a diff of more lines than the pane can show, on short
+// enough lines that only the vertical scroll is in play.
+func tallDiffModel(t *testing.T) Model {
+	t.Helper()
+	repo := testRepo(t)
+	var body []string
+	for i := 0; i < 60; i++ {
+		body = append(body, "line "+itoa(i))
+	}
+	return openDiff(t, repo, strings.Join(body, "\n")+"\n", 120, 24)
+}
+
+// bothWaysDiffModel needs scrolling in both directions at once.
+func bothWaysDiffModel(t *testing.T) Model {
+	t.Helper()
+	repo := testRepo(t)
+	var body []string
+	for i := 0; i < 60; i++ {
+		body = append(body, "line "+itoa(i)+" "+strings.Repeat("and something else again ", 4))
+	}
+	return openDiff(t, repo, strings.Join(body, "\n")+"\n", 120, 24)
+}
+
+// openDiff writes foo.txt, opens the window at the given size and moves to the
+// diff of that file.
+func openDiff(t *testing.T, repo *git.Repo, content string, w, h int) Model {
+	t.Helper()
+	writeFile(t, repo.Dir, "foo.txt", content)
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: w, Height: h},
+		New(repo).rescanCmd()(),
+	)
+	m = drive(t, m, altKey("1"))
+	for m.workdir.current() != nil && m.workdir.current().Path != "foo.txt" {
+		m = drive(t, m, rkey("j"))
+	}
+	m = drive(t, m, rkey("l"))
+	if m.focus != focusDiff {
+		t.Fatalf("focus = %v, want focusDiff", m.focus)
+	}
+	return m
+}
+
+// paneRows renders the diff pane on its own, so the assertions are about its
+// own edges rather than about the whole window.
+func paneRows(m Model) []string {
+	return strings.Split(m.diff.view(m.st, true), "\n")
+}
+
+// rightEdge is the last column of a block of rows, which is where a vertical
+// scrollbar lives.
+func rightEdge(rows []string) string {
+	var b strings.Builder
+	for _, r := range rows {
+		text := []rune(plainText(r))
+		if len(text) == 0 {
+			continue
+		}
+		b.WriteRune(text[len(text)-1])
+	}
+	return b.String()
+}
+
+// A bar that could never move says nothing and costs a column of code, so a
+// diff that fits its pane has neither.
+func TestNoScrollbarsWhenNothingScrolls(t *testing.T) {
+	m := diffModel(t)
+	if vert, horz := m.diff.bars(); vert || horz {
+		t.Fatalf("bars on a diff that fits: vertical %v, horizontal %v", vert, horz)
+	}
+	rows := paneRows(m)
+	if len(rows) != m.diff.height+1 {
+		t.Errorf("pane is %d rows, want the header and %d of body", len(rows), m.diff.height)
+	}
+	for i, r := range rows {
+		if strings.ContainsAny(plainText(r), thumbGlyph+vertTrack+horzTrack) {
+			t.Errorf("row %d has scrollbar furniture: %q", i, plainText(r))
+		}
+	}
+}
+
+// The vertical bar says how much of the diff is on screen and where.
+func TestVerticalScrollbarShowsWhereTheViewIs(t *testing.T) {
+	m := tallDiffModel(t)
+	vert, horz := m.diff.bars()
+	if !vert || horz {
+		t.Fatalf("want only the vertical bar: vertical %v, horizontal %v", vert, horz)
+	}
+
+	edge := rightEdge(paneRows(m)[1:])
+	if !strings.HasPrefix(edge, thumbGlyph) {
+		t.Errorf("at the top of the diff the thumb should start at the top: %q", edge)
+	}
+	if strings.HasSuffix(edge, thumbGlyph) {
+		t.Errorf("the thumb fills the track though most of the diff is off screen: %q", edge)
+	}
+	if n := strings.Count(edge, thumbGlyph); n < 1 {
+		t.Errorf("no thumb in the track: %q", edge)
+	}
+
+	m = drive(t, m, rkey("G"))
+	edge = rightEdge(paneRows(m)[1:])
+	if !strings.HasSuffix(edge, thumbGlyph) {
+		t.Errorf("at the end of the diff the thumb should reach the bottom: %q", edge)
+	}
+	if strings.HasPrefix(edge, thumbGlyph) {
+		t.Errorf("the thumb is still at the top at the end of the diff: %q", edge)
+	}
+
+	// Somewhere in the middle it touches neither end.
+	m = drive(t, m, rkey("g"),
+		tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown})
+	edge = rightEdge(paneRows(m)[1:])
+	if m.diff.offset == 0 || m.diff.offset == m.diff.maxOffset() {
+		t.Fatalf("offset = %d, want the middle of a %d line diff", m.diff.offset, len(m.diff.lines))
+	}
+	if strings.HasPrefix(edge, thumbGlyph) || strings.HasSuffix(edge, thumbGlyph) {
+		t.Errorf("part way down the diff the thumb touches an end: %q", edge)
+	}
+}
+
+// The horizontal bar is the same idea along the foot of the pane.
+func TestHorizontalScrollbarShowsHowFarAcross(t *testing.T) {
+	m := wideDiffModel(t)
+	vert, horz := m.diff.bars()
+	if vert || !horz {
+		t.Fatalf("want only the horizontal bar: vertical %v, horizontal %v", vert, horz)
+	}
+
+	rows := paneRows(m)
+	foot := plainText(rows[len(rows)-1])
+	if !strings.HasPrefix(foot, thumbGlyph) {
+		t.Errorf("at column one the thumb should start at the left: %q", foot)
+	}
+	if strings.HasSuffix(foot, thumbGlyph) {
+		t.Errorf("the thumb fills the track though the line runs off the pane: %q", foot)
+	}
+
+	for m.diff.hoffset < m.diff.maxHOffset() {
+		m = drive(t, m, rkey("l"))
+	}
+	rows = paneRows(m)
+	foot = plainText(rows[len(rows)-1])
+	if !strings.HasSuffix(foot, thumbGlyph) {
+		t.Errorf("at the end of the line the thumb should reach the right: %q", foot)
+	}
+	if strings.HasPrefix(foot, thumbGlyph) {
+		t.Errorf("the thumb is still at the left at the end of the line: %q", foot)
+	}
+}
+
+// The bars come out of the body, so the pane keeps its shape and the code
+// gives up the room.
+func TestScrollbarsTakeTheirSpaceFromTheBody(t *testing.T) {
+	m := bothWaysDiffModel(t)
+	vert, horz := m.diff.bars()
+	if !vert || !horz {
+		t.Fatalf("want both bars: vertical %v, horizontal %v", vert, horz)
+	}
+
+	rows := paneRows(m)
+	if len(rows) != m.diff.height+1 {
+		t.Errorf("pane is %d rows, want the header and %d of body", len(rows), m.diff.height)
+	}
+	for i, r := range rows {
+		if w := lipgloss.Width(r); w != m.diff.width {
+			t.Errorf("row %d is %d cells, want %d", i, w, m.diff.width)
+		}
+	}
+	// One row of the body went to the horizontal bar, one column of each
+	// remaining row to the vertical one.
+	if got := m.diff.bodyRows(); got != m.diff.height-1 {
+		t.Errorf("bodyRows = %d, want %d", got, m.diff.height-1)
+	}
+	if m.diff.codeWidthWith(true) != m.diff.codeWidthWith(false)-1 {
+		t.Errorf("the vertical bar took %d columns from the code",
+			m.diff.codeWidthWith(false)-m.diff.codeWidthWith(true))
+	}
+	// The last body row is the horizontal bar, not a line of diff.
+	foot := plainText(rows[len(rows)-1])
+	if !strings.ContainsAny(foot, thumbGlyph+horzTrack) {
+		t.Errorf("the foot of the pane is not the horizontal bar: %q", foot)
+	}
+	// And the corner under the vertical bar is left blank.
+	if !strings.HasSuffix(foot, " ") {
+		t.Errorf("the corner should be blank: %q", foot)
+	}
+}
+
+// crowdedModel opens on a working directory with more files than the unstaged
+// list can show.
+func crowdedModel(t *testing.T, n int) Model {
+	t.Helper()
+	repo := testRepo(t)
+	for i := 0; i < n; i++ {
+		writeFile(t, repo.Dir, fmt.Sprintf("file%03d.txt", i), "x\n")
+	}
+	m := drive(t, New(repo),
+		tea.WindowSizeMsg{Width: 120, Height: 30},
+		New(repo).rescanCmd()(),
+	)
+	return drive(t, m, altKey("1"))
+}
+
+// The lists wear the same bar as the diff, on the same terms — but with no
+// track of their own, since the pane separator is already a rule down that
+// edge.
+func TestListScrollbarAppearsOnlyWhenNeeded(t *testing.T) {
+	m := newTestModel(t)
+	if m.workdir.scrolls() {
+		t.Fatalf("a list of %d files in %d rows wants a bar", len(m.workdir.files), m.workdir.height)
+	}
+	for i, r := range strings.Split(m.workdir.view(m.st, true), "\n") {
+		if strings.Contains(plainText(r), thumbGlyph) {
+			t.Errorf("row %d has a thumb though the list fits: %q", i, plainText(r))
+		}
+	}
+
+	m = crowdedModel(t, 60)
+	if !m.workdir.scrolls() {
+		t.Fatalf("a list of %d files in %d rows wants no bar", len(m.workdir.files), m.workdir.height)
+	}
+	rows := strings.Split(m.workdir.view(m.st, true), "\n")
+	for i, r := range rows {
+		if w := lipgloss.Width(r); w != m.workdir.width {
+			t.Errorf("row %d is %d cells, want the pane's %d", i, w, m.workdir.width)
+		}
+	}
+	edge := rightEdge(rows[1:])
+	if strings.Contains(edge, vertTrack) {
+		t.Errorf("the list drew a track beside the pane separator: %q", edge)
+	}
+	if !strings.HasPrefix(edge, thumbGlyph) {
+		t.Errorf("at the top of the list the thumb should start at the top: %q", edge)
+	}
+	if strings.HasSuffix(edge, thumbGlyph) {
+		t.Errorf("the thumb fills the track though most of the list is off screen: %q", edge)
+	}
+
+	m = drive(t, m, rkey("G"))
+	edge = rightEdge(strings.Split(m.workdir.view(m.st, true), "\n")[1:])
+	if !strings.HasSuffix(edge, thumbGlyph) {
+		t.Errorf("at the end of the list the thumb should reach the bottom: %q", edge)
+	}
+	if strings.HasPrefix(edge, thumbGlyph) {
+		t.Errorf("the thumb is still at the top at the end of the list: %q", edge)
+	}
+}
+
+// The branch history is the same again, counting the working tree row.
+func TestCommitListScrollbar(t *testing.T) {
+	m := aheadModel(t, 2)
+	if m.commits.scrolls() {
+		t.Fatalf("two commits in %d rows want a bar", m.commits.height)
+	}
+
+	m = aheadModel(t, 40)
+	if !m.commits.scrolls() {
+		t.Fatalf("%d rows of history in %d want no bar", m.commits.rows(), m.commits.height)
+	}
+	rows := strings.Split(m.commits.view(m.st, true), "\n")
+	for i, r := range rows {
+		if w := lipgloss.Width(r); w != m.commits.width {
+			t.Errorf("row %d is %d cells, want the pane's %d", i, w, m.commits.width)
+		}
+	}
+	edge := rightEdge(rows[1:])
+	if !strings.HasPrefix(edge, thumbGlyph) {
+		t.Errorf("the history starts on the working tree, so the thumb starts at the top: %q", edge)
+	}
+
+	m = drive(t, m, altKey("5"), rkey("G"))
+	edge = rightEdge(strings.Split(m.commits.view(m.st, true), "\n")[1:])
+	if !strings.HasSuffix(edge, thumbGlyph) {
+		t.Errorf("at the oldest commit the thumb should reach the bottom: %q", edge)
+	}
+}
+
+// Growing the window pulls the view back down onto the rows, rather than
+// leaving blank space under the last one.
+func TestGrowingThePaneClosesTheGapUnderTheLastRow(t *testing.T) {
+	m := drive(t, crowdedModel(t, 60), rkey("G"))
+	if m.workdir.offset != m.workdir.maxOffset() {
+		t.Fatalf("offset = %d, want the end of the list at %d", m.workdir.offset, m.workdir.maxOffset())
+	}
+	m = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 60})
+	if m.workdir.offset > m.workdir.maxOffset() {
+		t.Errorf("offset = %d, want no more than %d after the pane grew",
+			m.workdir.offset, m.workdir.maxOffset())
+	}
+	rows := strings.Split(m.workdir.view(m.st, true), "\n")[1:]
+	if last := plainText(rows[len(rows)-1]); strings.TrimSpace(last) == "" {
+		t.Errorf("the last row is blank though files are scrolled off above it")
+	}
+}
+
+func TestThumbSpan(t *testing.T) {
+	for _, c := range []struct {
+		name                 string
+		track, total, window int
+		offset, maxOffset    int
+		wantLo, wantSize     int
+	}{
+		{"nothing to scroll", 10, 5, 10, 0, 0, 0, 10},
+		{"at the top", 10, 100, 10, 0, 90, 0, 1},
+		{"at the bottom", 10, 100, 10, 90, 90, 9, 1},
+		{"one line down is not the top", 10, 100, 10, 1, 90, 1, 1},
+		{"one line up is not the bottom", 10, 100, 10, 89, 90, 8, 1},
+		{"half way", 10, 20, 10, 5, 10, 2, 5},
+		{"no track", 0, 100, 10, 0, 90, 0, 0},
+	} {
+		lo, size := thumbSpan(c.track, c.total, c.window, c.offset, c.maxOffset)
+		if lo != c.wantLo || size != c.wantSize {
+			t.Errorf("%s: thumbSpan(%d, %d, %d, %d, %d) = %d, %d, want %d, %d",
+				c.name, c.track, c.total, c.window, c.offset, c.maxOffset, lo, size, c.wantLo, c.wantSize)
+		}
+		if size > 0 && lo+size > c.track {
+			t.Errorf("%s: thumb runs off the end of the track", c.name)
+		}
+	}
+}
+
+// The hint line offers the scroll while there is one, and says that the lists
+// are behind it on a narrow window.
+func TestScrollHint(t *testing.T) {
+	m := wideDiffModel(t)
+	if hint := m.hints(); !strings.Contains(hint, "scroll") {
+		t.Errorf("hint = %q, want it to offer the scroll", hint)
+	}
+	if hint := diffModel(t).hints(); strings.Contains(hint, "scroll") {
+		t.Errorf("hint = %q, want no scroll offered for a diff that fits", hint)
+	}
+	m = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 40})
+	if !m.leftCollapsed() {
+		t.Fatal("the left column should have folded away")
+	}
+	if hint := m.hints(); !strings.Contains(hint, "lists") {
+		t.Errorf("hint = %q, want it to say the lists are still reachable", hint)
 	}
 }
 

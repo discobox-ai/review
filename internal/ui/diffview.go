@@ -21,11 +21,13 @@ type diffView struct {
 	spans [][]span   // syntax highlighting, parallel to lines
 	emph  []emphasis // the changed part of a modified line, parallel to lines
 	numW  int        // width of the line number column
+	long  int        // runes in the longest line, for the horizontal scroll
 	text  string     // shown instead of a patch for messages such as "no differences"
 
-	cursor int
-	offset int
-	anchor int // start of a line selection, or -1
+	cursor  int
+	offset  int
+	hoffset int // runes of code scrolled off to the left
+	anchor  int // start of a line selection, or -1
 
 	width  int
 	height int // rows for the body, header excluded
@@ -35,16 +37,16 @@ func newDiffView() *diffView { return &diffView{anchor: -1} }
 
 func (d *diffView) clear() {
 	d.file, d.patch, d.lines, d.text = nil, nil, nil, ""
-	d.texts, d.spans, d.emph, d.numW = nil, nil, nil, 0
-	d.cursor, d.offset, d.anchor = 0, 0, -1
+	d.texts, d.spans, d.emph, d.numW, d.long = nil, nil, nil, 0, 0
+	d.cursor, d.offset, d.hoffset, d.anchor = 0, 0, 0, -1
 	d.shown = diffID{}
 }
 
 func (d *diffView) setMessage(msg string) {
 	d.patch, d.lines, d.spans, d.emph, d.texts = nil, nil, nil, nil, nil
-	d.numW = 0
+	d.numW, d.long = 0, 0
 	d.text = msg
-	d.cursor, d.offset, d.anchor = 0, 0, -1
+	d.cursor, d.offset, d.hoffset, d.anchor = 0, 0, 0, -1
 	// A message is what is left when a diff could not be taken, so nothing is
 	// recorded as shown: the next move asks for it again.
 	d.shown = diffID{}
@@ -70,7 +72,8 @@ func (d *diffView) setPatch(f git.File, key diffID, raw string) {
 	d.spans = highlightLines(f.Path, d.lines, d.texts)
 	d.emph = pairEmphasis(d.lines, d.texts)
 	d.numW = numberWidth(d.lines)
-	d.cursor, d.offset, d.anchor = 0, 0, -1
+	d.long = longestLine(d.texts)
+	d.cursor, d.offset, d.hoffset, d.anchor = 0, 0, 0, -1
 	// Start on the first hunk header so the first stage-hunk does the
 	// obvious thing.
 	for i, l := range d.lines {
@@ -95,24 +98,130 @@ func (d *diffView) moveTo(i int) {
 }
 
 func (d *diffView) clamp() {
+	d.hoffset = min(max(d.hoffset, 0), d.maxHOffset())
 	if d.cursor >= len(d.lines) {
 		d.cursor = len(d.lines) - 1
 	}
 	if d.cursor < 0 {
 		d.cursor = 0
 	}
-	if d.height <= 0 {
+	rows := d.bodyRows()
+	if rows <= 0 {
 		return
 	}
 	if d.cursor < d.offset {
 		d.offset = d.cursor
 	}
-	if d.cursor >= d.offset+d.height {
-		d.offset = d.cursor - d.height + 1
+	if d.cursor >= d.offset+rows {
+		d.offset = d.cursor - rows + 1
 	}
 	if d.offset < 0 {
 		d.offset = 0
 	}
+	if d.offset > d.maxOffset() {
+		d.offset = d.maxOffset()
+	}
+}
+
+// hScrollStep is how far one press of left or right slides the code, two tab
+// stops: far enough that walking across a long line does not take a dozen
+// presses, near enough that the eye keeps its place.
+const hScrollStep = 2 * tabWidth
+
+// bars says which scrollbars the pane needs: one only when there is something
+// to scroll, since a bar that can never move says nothing and costs a column
+// of code. Each one takes its space out of the body, which can be what makes
+// the other one necessary, so the two are settled together rather than one at
+// a time.
+func (d *diffView) bars() (vert, horz bool) {
+	for i := 0; i < 3; i++ {
+		v := scrolls(len(d.lines), d.rowsWith(horz), d.width)
+		h := d.long > d.codeWidthWith(vert) && d.height > 1 && d.width > 1
+		if v == vert && h == horz {
+			break
+		}
+		vert, horz = v, h
+	}
+	return vert, horz
+}
+
+// rowsWith is how many lines of diff fit once the horizontal bar, if there is
+// one, has taken a row.
+func (d *diffView) rowsWith(horz bool) int {
+	if horz {
+		return max(d.height-1, 0)
+	}
+	return max(d.height, 0)
+}
+
+// rowWidth is how wide a line of diff is drawn, once the vertical bar, if
+// there is one, has taken a column.
+func (d *diffView) rowWidth(vert bool) int {
+	if vert {
+		return max(d.width-1, 0)
+	}
+	return max(d.width, 0)
+}
+
+// codeWidthWith is the columns left for the code itself, once the cursor bar,
+// the line number column and the +/- gutter have taken theirs. Meta lines have
+// no gutter and so a little more room, but sizing the scroll to a code line is
+// what matters: it is the code that runs off the edge.
+func (d *diffView) codeWidthWith(vert bool) int {
+	w := d.rowWidth(vert) - 1 - len(diffGutter(' '))
+	if d.numW > 0 {
+		w -= d.numW + 1
+	}
+	return max(w, 0)
+}
+
+// bodyRows is how many lines of diff are on screen, and codeWidth how many
+// columns of each: what the cursor and the two offsets are clamped against.
+func (d *diffView) bodyRows() int {
+	_, horz := d.bars()
+	return d.rowsWith(horz)
+}
+
+func (d *diffView) codeWidth() int {
+	vert, _ := d.bars()
+	return d.codeWidthWith(vert)
+}
+
+// maxOffset is the first line that can sit at the top with the last line still
+// on screen.
+func (d *diffView) maxOffset() int {
+	return listMaxOffset(len(d.lines), d.bodyRows())
+}
+
+// maxHOffset is how far the code can slide before its longest line ends at the
+// right margin, so there is never empty space to scroll into.
+func (d *diffView) maxHOffset() int {
+	if d.codeWidth() <= 0 {
+		return 0
+	}
+	return max(d.long-d.codeWidth(), 0)
+}
+
+// scrollH slides the code sideways, reporting whether it moved. Left and right
+// belong to the diff for as long as there is more line to see; only once the
+// code is back against the left margin do they mean the pane beside it.
+func (d *diffView) scrollH(delta int) bool {
+	want := min(max(d.hoffset+delta, 0), d.maxHOffset())
+	if want == d.hoffset {
+		return false
+	}
+	d.hoffset = want
+	return true
+}
+
+// longestLine measures the widest rendered line, which is what the horizontal
+// scroll has to cover. Tabs are already expanded, so runes count columns.
+func longestLine(texts []string) int {
+	longest := 0
+	for _, t := range texts {
+		longest = max(longest, len([]rune(t)))
+	}
+	return longest
 }
 
 // currentHunk returns the index of the hunk the cursor sits in, or -1.
@@ -236,18 +345,28 @@ func (d *diffView) view(st *styles, focused bool) string {
 			right = plural(n, "hunk", "hunks")
 		}
 	}
+	// Scrolled sideways the left margin is no longer column one, and nothing
+	// else on screen says so.
+	if d.hoffset > 0 {
+		right = "col " + itoa(d.hoffset+1) + "   " + right
+	}
 	header := renderTitle(titleStyle, label, right, d.width)
 
-	rows := make([]string, 0, d.height)
+	// The bars come out of the body, never out of the header, so the pane
+	// keeps its width and the code is what gives up the room.
+	vert, horz := d.bars()
+	rowW, body := d.rowWidth(vert), d.rowsWith(horz)
+
+	rows := make([]string, 0, body)
 	if len(d.lines) == 0 {
 		for _, l := range strings.Split(strings.TrimRight(d.text, "\n"), "\n") {
-			if len(rows) >= d.height {
+			if len(rows) >= body {
 				break
 			}
-			rows = append(rows, st.dimText.Render(pad(l, d.width)))
+			rows = append(rows, st.dimText.Render(pad(l, rowW)))
 		}
 	}
-	for i := d.offset; i < len(d.lines) && len(rows) < d.height; i++ {
+	for i := d.offset; i < len(d.lines) && len(rows) < body; i++ {
 		l := d.lines[i]
 
 		// The cursor and the selection live in the left edge bar, leaving the
@@ -274,7 +393,7 @@ func (d *diffView) view(st *styles, focused bool) string {
 			rows = append(rows, renderDiffRow(diffRow{
 				bar: bar, numW: d.numW, numSty: numSty,
 				gutter: "", code: l.Text, base: style, emphSty: style,
-				width: d.width,
+				hscroll: d.hoffset, width: rowW,
 			}))
 			continue
 		}
@@ -292,13 +411,36 @@ func (d *diffView) view(st *styles, focused bool) string {
 			gutter: diffGutter(l.Kind), code: d.texts[i],
 			spans: d.spanAt(i), emph: d.emphAt(i),
 			base: base, emphSty: emphSty,
-			palette: st.syntax, width: d.width,
+			palette: st.syntax, hscroll: d.hoffset, width: rowW,
 		}))
 	}
-	for len(rows) < d.height {
-		rows = append(rows, strings.Repeat(" ", max(d.width, 0)))
+	for len(rows) < body {
+		rows = append(rows, strings.Repeat(" ", rowW))
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, append([]string{header}, rows...)...)
+	if vert {
+		attachVScroll(st, rows, vertTrack, len(d.lines), d.offset, d.maxOffset())
+	}
+	out := append([]string{header}, rows...)
+	if horz {
+		out = append(out, d.hbar(st, vert))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, out...)
+}
+
+// hbar draws the horizontal scrollbar along the foot of the pane. It spans the
+// whole width, gutter included, the way an editor's does; the corner under the
+// vertical bar is left blank.
+func (d *diffView) hbar(st *styles, vert bool) string {
+	track := d.rowWidth(vert)
+	lo, size := thumbSpan(track, d.long, d.codeWidthWith(vert), d.hoffset, d.maxHOffset())
+	var b strings.Builder
+	for i := 0; i < track; i++ {
+		b.WriteString(scrollCell(st, i >= lo && i < lo+size, horzTrack, thumbGlyph))
+	}
+	if vert {
+		b.WriteString(" ")
+	}
+	return b.String()
 }
 
 // spanAt returns the highlighting for a rendered line, if any.
@@ -375,6 +517,7 @@ type diffRow struct {
 	base    lipgloss.Style // the line's band: a background, or none for context
 	emphSty lipgloss.Style // the stronger band for the characters that changed
 	palette syntaxPalette
+	hscroll int // runes of code scrolled off to the left
 	width   int
 }
 
@@ -417,22 +560,31 @@ func renderDiffRow(r diffRow) string {
 		}
 	}
 
-	runes := []rune(r.gutter + r.code)
-	offset := len([]rune(r.gutter))
+	// The gutter stays put and the code slides under it, so the +/- marker and
+	// the line number keep saying which line is which however far right the
+	// pane has been scrolled.
+	code := []rune(r.code)
+	if r.hscroll > 0 {
+		code = code[min(r.hscroll, len(code)):]
+	}
+	gutW := len([]rune(r.gutter))
+	runes := append([]rune(r.gutter), code...)
+	// Spans and the emphasis are offsets into the whole code line, so what
+	// scrolled off shifts them left; the gutter is where they stop.
+	offset := gutW - r.hscroll
 	fg := make([]lipgloss.TerminalColor, len(runes))
 	for _, s := range r.spans {
 		value, ok := r.palette.color(s.token)
 		if !ok {
 			continue
 		}
-		// Spans are offsets into the code, which starts after the gutter.
-		for at := max(s.start+offset, 0); at < s.end+offset && at < len(runes); at++ {
+		for at := max(s.start+offset, gutW); at < s.end+offset && at < len(runes); at++ {
 			fg[at] = value
 		}
 	}
 	changed := make([]bool, len(runes))
 	if !r.emph.empty() {
-		for at := max(r.emph.start+offset, 0); at < r.emph.end+offset && at < len(runes); at++ {
+		for at := max(r.emph.start+offset, gutW); at < r.emph.end+offset && at < len(runes); at++ {
 			changed[at] = true
 		}
 	}
