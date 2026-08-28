@@ -42,7 +42,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(ui.New(repo), tea.WithAltScreen())
+	// Cell motion rather than all motion: the window wants clicks, drags and
+	// the wheel, and nothing at all from a pointer moving with no button
+	// down. Asking for less means the terminal sends less.
+	p := tea.NewProgram(ui.New(repo), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "difftui:", err)
 		os.Exit(1)

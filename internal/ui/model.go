@@ -108,6 +108,23 @@ type Model struct {
 	// cleared when the scan lands, rather than sitting there looking like
 	// work still in progress.
 	rescanning bool
+
+	// zoom gives the focused pane the whole window. The layout is four panes
+	// because four things are worth watching at once; zoom is for the moments
+	// when one of them is the only thing worth watching, and a diff read at
+	// full width is a different diff from one read in a third of the screen.
+	zoom bool
+
+	// rects is where each pane was last drawn, title row included, so a click
+	// can be resolved to the pane under it. layout fills it in, which keeps
+	// the one arithmetic that decides both where a pane is drawn and where it
+	// is clicked in a single place.
+	rects [focusCount]rect
+
+	// mouse is the text selection the mouse makes. It is a pointer because
+	// the Model is copied on every update and a selection is a gesture in
+	// progress, which has to survive that.
+	mouse *mouseState
 }
 
 // New builds the initial model for a repository.
@@ -135,6 +152,7 @@ func New(repo *git.Repo) Model {
 		context:   defaultContext,
 		diffs:     map[diffID]string{},
 		histories: map[string][]git.File{},
+		mouse:     newMouseState(),
 	}
 	m.loadSavedMessage()
 	return m
@@ -313,11 +331,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
+		// Every row is re-wrapped at the new width, so the lines a selection
+		// names are no longer the lines it was made over.
+		m.mouse.clear()
 		m.layout()
 		if m.md != nil {
 			m.md.resize(m.width, m.height)
 		}
 		return m, nil
+
+	case tea.MouseMsg:
+		return m.onMouse(msg)
 
 	case rescanMsg:
 		return m.onRescan(msg)
@@ -417,6 +441,7 @@ func (m Model) doQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
+	m.mouse.clear()
 	// Clear the transient "Rescanning…" note now the scan has landed. A
 	// message from a command that triggered the rescan, such as "Staged 1
 	// file", is left alone: it is reporting the command, not the scan.
@@ -486,6 +511,7 @@ func (m *Model) showCommits() bool { return len(m.commits.commits) > 0 }
 // onHistory takes delivery of a commit's file list, and shows it only if the
 // cursor is still on that commit.
 func (m Model) onHistory(msg historyMsg) (tea.Model, tea.Cmd) {
+	m.mouse.clear()
 	if msg.gen != m.gen {
 		return m, nil
 	}
@@ -511,6 +537,7 @@ func (m Model) onHistory(msg historyMsg) (tea.Model, tea.Cmd) {
 // still the one the pane is waiting for. The rest are not wasted: the cursor
 // coming back to them finds them already here.
 func (m Model) onDiff(msg diffMsg) (tea.Model, tea.Cmd) {
+	m.mouse.clear()
 	if msg.key.gen != m.gen {
 		// Taken against a scan that has since been replaced.
 		return m, nil
@@ -632,6 +659,15 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// A mouse selection is dropped by Esc before Esc means anything else, so
+	// nobody is ever stuck behind a highlight: the second press does whatever
+	// the key normally does. This is above the reader because the reader has
+	// selections too, and its Esc closes it.
+	if m.mouse.hasSelection() && key.Matches(msg, m.keys.Cancel) {
+		m.mouse.clear()
+		return m, nil
+	}
+
 	// The markdown reader owns the screen, so it owns the keys.
 	if m.md != nil {
 		return m.markdownKey(msg)
@@ -679,6 +715,8 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.setFocus(m.stepPane(1))
 	case key.Matches(msg, m.keys.PrevPane):
 		return m.setFocus(m.stepPane(-1))
+	case key.Matches(msg, m.keys.Zoom):
+		return m.toggleZoom(m.focus)
 	}
 
 	// In the message buffer every letter is text, so the command letters
@@ -798,6 +836,8 @@ func (m Model) commitsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.commits.moveTo(0)
 	case key.Matches(msg, m.keys.End):
 		m.commits.moveTo(m.commits.rows() - 1)
+	case key.Matches(msg, m.keys.ZoomKey):
+		return m.toggleZoom(m.focus)
 	default:
 		moved = false
 	}
@@ -811,6 +851,7 @@ func (m Model) commitsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // onCommitSelected reloads the left column and the diff for whatever the
 // history cursor now points at: a commit's own files, or the working tree.
 func (m *Model) onCommitSelected() tea.Cmd {
+	m.mouse.clear()
 	m.layout()
 	if c, ok := m.commits.selected(); ok {
 		files, known := m.histories[c.Hash]
@@ -1097,6 +1138,8 @@ func (m Model) listKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Visual):
 		list.toggleVisual()
 		moved = false
+	case key.Matches(msg, m.keys.ZoomKey):
+		return m.toggleZoom(m.focus)
 	default:
 		moved = false
 	}
@@ -1179,6 +1222,8 @@ func (m Model) diffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.diff.moveTo(len(m.diff.lines) - 1)
 	case key.Matches(msg, m.keys.Visual):
 		m.diff.toggleVisual()
+	case key.Matches(msg, m.keys.ZoomKey):
+		return m.toggleZoom(m.focus)
 	case key.Matches(msg, m.keys.StageLine):
 		return m.doStageLines()
 	case key.Matches(msg, m.keys.Toggle):
@@ -1528,6 +1573,7 @@ func (m Model) doMarkdown() (tea.Model, tea.Cmd) {
 // onMarkdown puts the reader up once the text arrives, unless the window has
 // been rescanned out from under the request.
 func (m Model) onMarkdown(msg markdownMsg) (tea.Model, tea.Cmd) {
+	m.mouse.clear()
 	if msg.gen != m.gen {
 		return m, nil
 	}
@@ -1547,6 +1593,7 @@ func (m Model) markdownKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Cancel),
 		key.Matches(msg, m.keys.QuitKey),
 		key.Matches(msg, m.keys.MarkdownKey):
+		m.mouse.clear()
 		m.md = nil
 		return m, nil
 	case key.Matches(msg, m.keys.Up):
@@ -1858,7 +1905,13 @@ func (m *Model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
+	m.rects = [focusCount]rect{}
 	body := max(m.height-2, 4) // branch bar and status bar
+
+	if m.zoom {
+		m.layoutZoom(body)
+		return
+	}
 
 	leftW := max(min(m.width*34/100, 46), 24)
 	if leftW > m.width-30 {
@@ -1902,11 +1955,85 @@ func (m *Model) layout() {
 		m.commit.SetHeight(max(commitH-1, 2))
 	}
 
+	// Where each pane lands, walked in the order View joins them. Doing it
+	// here rather than measuring the rendered frame is what keeps a click and
+	// the thing it landed on agreeing: both come out of this one arithmetic.
+	y := 1 // below the branch bar
+	if !m.leftCollapsed() {
+		if m.browsing() {
+			m.rects[focusHistory] = rect{0, y, leftW, 1 + m.history.height}
+			y += 1 + m.history.height
+		} else {
+			m.rects[focusWorkdir] = rect{0, y, leftW, 1 + m.workdir.height}
+			y += 1 + m.workdir.height
+			m.rects[focusIndex] = rect{0, y, leftW, 1 + m.index.height}
+			y += 1 + m.index.height
+		}
+		if m.showCommits() {
+			m.rects[focusCommits] = rect{0, y, leftW, 1 + m.commits.height}
+		}
+	}
+	rightX := 0
+	if !m.leftCollapsed() {
+		rightX = leftW + 1 // past the separator column
+	}
+	y = 1
+	m.rects[focusDiff] = rect{rightX, y, rightW, 1 + m.diff.height}
+	y += 1 + m.diff.height
+	if m.composeOpen {
+		m.rects[focusCommit] = rect{rightX, y, rightW, 1 + m.commit.Height()}
+	}
+
+	m.clampPanes()
+}
+
+// layoutZoom gives the focused pane the whole window. Nothing else is drawn,
+// so nothing else is laid out and nothing else can be clicked.
+func (m *Model) layoutZoom(body int) {
+	w, h := m.width, max(body-1, 1) // one row goes to the pane's own title
+	switch m.focus {
+	case focusWorkdir:
+		m.workdir.width, m.workdir.height = w, h
+	case focusIndex:
+		m.index.width, m.index.height = w, h
+	case focusHistory:
+		m.history.width, m.history.height = w, h
+	case focusCommits:
+		m.commits.width, m.commits.height = w, h
+	case focusDiff:
+		m.diff.width, m.diff.height = w, h
+	case focusCommit:
+		m.commit.SetWidth(max(w-1, 10))
+		m.commit.SetHeight(max(h, 2))
+	}
+	m.rects[m.focus] = rect{0, 1, w, body}
+	m.clampPanes()
+}
+
+func (m *Model) clampPanes() {
 	m.workdir.clamp()
 	m.index.clamp()
 	m.history.clamp()
 	m.commits.clamp()
 	m.diff.clamp()
+}
+
+// toggleZoom gives a pane the whole window, or hands the window back.
+//
+// Zooming a pane is also going to it. With one pane on screen there is nowhere
+// else for the keyboard to be, and a focus sitting on something invisible is
+// how a window ends up ignoring keys for no reason anyone can see.
+func (m Model) toggleZoom(f focusArea) (tea.Model, tea.Cmd) {
+	if !m.paneVisible(f) {
+		return m, nil
+	}
+	if m.zoom && m.focus == f {
+		m.zoom = false
+		m.layout()
+		return m, nil
+	}
+	m.zoom = true
+	return m.setFocus(f)
 }
 
 // narrowWidth is where the window stops being wide enough for both columns.
@@ -1946,29 +2073,29 @@ func (m Model) View() string {
 		return "Loading…"
 	}
 
-	var stack []string
-	if m.browsing() {
-		stack = append(stack, m.history.view(m.st, m.focus == focusHistory))
-	} else {
-		stack = append(stack,
-			m.workdir.view(m.st, m.focus == focusWorkdir),
-			m.index.view(m.st, m.focus == focusIndex),
-		)
-	}
-	if m.showCommits() {
-		stack = append(stack, m.commits.view(m.st, m.focus == focusCommits))
-	}
-	left := lipgloss.JoinVertical(lipgloss.Left, stack...)
-	right := m.diff.view(m.st, m.focus == focusDiff)
-	if m.composeOpen {
-		right = lipgloss.JoinVertical(lipgloss.Left, right, m.viewCommitArea())
-	}
+	middle := m.viewZoomed()
+	if !m.zoom {
+		var stack []string
+		if m.browsing() {
+			stack = append(stack, m.viewPane(focusHistory))
+		} else {
+			stack = append(stack, m.viewPane(focusWorkdir), m.viewPane(focusIndex))
+		}
+		if m.showCommits() {
+			stack = append(stack, m.viewPane(focusCommits))
+		}
+		left := lipgloss.JoinVertical(lipgloss.Left, stack...)
+		right := m.viewPane(focusDiff)
+		if m.composeOpen {
+			right = lipgloss.JoinVertical(lipgloss.Left, right, m.viewCommitArea(m.diff.width))
+		}
 
-	middle := right
-	if !m.leftCollapsed() {
-		bodyH := max(m.height-2, 4)
-		sep := strings.TrimRight(strings.Repeat("│\n", bodyH), "\n")
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, left, m.st.sep.Render(sep), right)
+		middle = right
+		if !m.leftCollapsed() {
+			bodyH := max(m.height-2, 4)
+			sep := strings.TrimRight(strings.Repeat("│\n", bodyH), "\n")
+			middle = lipgloss.JoinHorizontal(lipgloss.Top, left, m.st.sep.Render(sep), right)
+		}
 	}
 
 	view := lipgloss.JoinVertical(lipgloss.Left,
@@ -1978,9 +2105,46 @@ func (m Model) View() string {
 		return m.dialog.view(m.st, m.width, m.height)
 	}
 	if m.md != nil {
-		return m.md.view(m.st)
+		return paintSelection(m.md.view(m.st), m.mouse.selectionIn(focusReader), mdSel{m.md})
 	}
 	return view
+}
+
+// viewPane draws one pane, with whatever the mouse has selected in it painted
+// over the top.
+func (m Model) viewPane(f focusArea) string {
+	focused := m.focus == f
+	var view string
+	switch f {
+	case focusWorkdir:
+		view = m.workdir.view(m.st, focused)
+	case focusIndex:
+		view = m.index.view(m.st, focused)
+	case focusHistory:
+		view = m.history.view(m.st, focused)
+	case focusCommits:
+		view = m.commits.view(m.st, focused)
+	case focusDiff:
+		view = m.diff.view(m.st, focused)
+	default:
+		return ""
+	}
+	p := m.selectableFor(f)
+	if p == nil {
+		return view
+	}
+	return paintSelection(view, m.mouse.selectionIn(f), p)
+}
+
+// viewZoomed draws the focused pane across the whole window.
+func (m Model) viewZoomed() string {
+	if !m.zoom {
+		return ""
+	}
+	if m.focus == focusCommit {
+		return m.viewCommitArea(m.width)
+	}
+	return m.viewPane(m.focus)
 }
 
 // viewCommitArea draws the message buffer under the diff: a title saying which
@@ -1988,7 +2152,7 @@ func (m Model) View() string {
 // buttons beside it — Rescan, Stage Changed, Sign Off, Commit, Push — but each
 // was only a label for a key that already exists, so the field takes the whole
 // width instead.
-func (m Model) viewCommitArea() string {
+func (m Model) viewCommitArea(width int) string {
 	label := "Commit Message"
 	switch {
 	case m.amend && !m.hasHEAD:
@@ -2010,7 +2174,7 @@ func (m Model) viewCommitArea() string {
 	if m.amend && len(m.index.files) == 0 {
 		right = "amending"
 	}
-	header := renderTitle(style, label, right, m.diff.width)
+	header := renderTitle(style, label, right, width)
 	// The field is inset one column so the text starts under its own title
 	// rather than against the separator.
 	field := lipgloss.NewStyle().PaddingLeft(1).Render(m.commit.View())
@@ -2152,6 +2316,8 @@ func helpText() string {
 		"    P  push               M  local merge / abort merge",
 		"    N  new branch         K  checkout branch",
 		"",
+		"    z  zoom the pane to the whole window (Alt-Z anywhere)",
+		"",
 		"    Ctrl-Enter            write a commit message",
 		"    Ctrl-C or q           quit",
 		"    F1 or ?               these keys",
@@ -2225,6 +2391,45 @@ func helpText() string {
 		"  away. Left brings it back. Wider than that, nothing moves.",
 		"  Down from the diff reaches the message, and up leaves it again",
 		"  — but only from the first line, so the arrows stay typable.",
+		"",
+		"  z gives the focused pane the whole window and z again hands it",
+		"  back; Alt-Z does the same from inside the message, where z is",
+		"  text. Double clicking a pane title bar zooms it too.",
+		"",
+		"───────────────────────────────────────────────────────────────",
+		"The mouse",
+		"",
+		"  Click a row to go to it: the pane takes the focus and the",
+		"  cursor lands on what you clicked. The wheel scrolls whatever",
+		"  is under the pointer without moving the focus, so you can read",
+		"  ahead in the diff from the file list.",
+		"",
+		"  Drag to select text, and let go to copy it:",
+		"",
+		"    wheel          scroll what is under the pointer, sideways",
+		"                   wheels slide the diff across",
+		"    drag           select, character by character",
+		"    double click   select a word — a path, a URL, a --flag",
+		"    triple click   select the whole line",
+		"    Alt-drag       select a rectangle",
+		"    right click    copy what is selected, and drop it",
+		"    Esc            drop it without copying",
+		"",
+		"  A drag past the top or bottom edge scrolls and keeps going, so",
+		"  a selection can run well past what is on screen.",
+		"",
+		"  What you get is the content, not the furniture: the diff comes",
+		"  with its +/- column but without the line numbers, and a file",
+		"  list gives you paths without the status icons. Alt-drag when",
+		"  you want exact columns instead.",
+		"",
+		"  Copying uses OSC 52, so the text lands on the clipboard of the",
+		"  machine you are sitting at even over ssh or inside tmux.",
+		"",
+		"  While difftui has the mouse your terminal does not, so its own",
+		"  selection is gone — except that most terminals hand it back",
+		"  while Shift is held. Shift-drag to select across panes, or to",
+		"  copy out of the message buffer.",
 		"",
 		"───────────────────────────────────────────────────────────────",
 		"This Branch",

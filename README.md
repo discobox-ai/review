@@ -3,7 +3,8 @@
 A console reimplementation of **git gui**, the Tcl/Tk commit tool that ships
 with git. Same window, same panes, same accelerators — driven from a terminal
 with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and
-[Lip Gloss](https://github.com/charmbracelet/lipgloss).
+[Lip Gloss](https://github.com/charmbracelet/lipgloss). Mouse selection comes
+from [discobox-ai/x/selection](https://github.com/discobox-ai/x/tree/main/selection).
 
 Ctrl-Enter has been pressed once here, which is the only thing that brings the
 commit message up:
@@ -243,6 +244,7 @@ Lowercase acts on the working tree and the index, uppercase on the repository.
 | `-` / `=` | less / more diff context | | |
 | `P` | push | `M` | local merge / abort merge |
 | `N` | new branch | `K` | checkout branch |
+| `z` | zoom the pane | | |
 
 `Ctrl-Enter` writes a commit. `Ctrl-C` or `q` quits, `F1` or `?` shows the keys.
 
@@ -307,6 +309,8 @@ then something to commit it as — so staging nothing and writing nothing report
 | `Tab`, `Shift-Tab` | Cycle focus |
 | `Alt-1` … `Alt-5` | Jump straight to unstaged / staged / diff / message / this branch |
 | `←` `↓` `↑` `→`, `h` `j` `k` `l` | Move, crossing into the neighbouring pane at the edges |
+| `z` | Zoom the focused pane to the whole window, and back |
+| `Alt-Z` | The same, from anywhere — including the message, where `z` is text |
 
 On startup the first file in **Unstaged Changes** is focused with its diff
 already loaded, so the command letters are live immediately.
@@ -383,6 +387,99 @@ of it, only `↑` from the first line and `←` from the first column walk away 
 everywhere else in the text the arrows move the cursor, as they must. `Esc`
 leaves from anywhere. `Tab` steps over the buffer entirely when it is not on
 screen.
+
+#### Zoom
+
+The layout is four panes because four things are worth watching at once. `z`
+is for the moments when one of them is the only thing worth watching: it gives
+the focused pane the whole window, and `z` again hands the window back.
+
+```
+┌─ Unstaged ──┬─ Diff ────────┐         ┌─ Diff ─────────────────────────────┐
+│ ✎ server.go │ @@ -1,5 +1,9  │         │ @@ -1,5 +1,9 @@                    │
+│ + notes.md  │ - old         │   z     │ - old                              │
+├─ Staged ────┤ + new         │  ──►    │ + new                              │
+│ ✔ go.mod    │               │         │                                    │
+├─ This Branch┤               │         │                                    │
+│ ● working   │               │         │                                    │
+└─────────────┴───────────────┘         └────────────────────────────────────┘
+```
+
+A diff read at full width is a different diff from one read in a third of the
+screen, and the branch history zoomed is a log. Zooming a pane also moves the
+focus to it: with one pane on screen there is nowhere else for the keyboard to
+be, and a focus sitting on something invisible is how a window ends up ignoring
+keys for no reason anyone can see.
+
+`Alt-Z` does the same thing from inside the message buffer, where `z` is text.
+Double clicking a pane's title bar zooms it too.
+
+### The mouse
+
+difftui takes the mouse, which means your terminal does not have it while
+difftui is running — so it gives the gesture back rather than leaving you with
+nothing.
+
+| Gesture | What it does |
+| --- | --- |
+| Click a row | Focus that pane, and put the cursor on the row |
+| Wheel | Scroll whatever is under the pointer, without moving the focus |
+| Wheel sideways | Slide the diff across, a tab stop a tick |
+| Drag | Select text, character by character |
+| Double click | Select a word |
+| Triple click | Select the whole line |
+| `Alt`-drag | Select a rectangle |
+| Release | Copy what was selected |
+| Right click | Copy what is selected, and drop it |
+| `Esc` | Drop it without copying |
+| Double click a title | Zoom that pane |
+
+A drag past the top or bottom edge scrolls the pane and keeps selecting, so a
+selection can run well past what is on screen.
+
+#### What you get is the content, not the furniture
+
+Panes draw chrome down their left edge, and none of it is text anyone means to
+copy. So a selection starts after it:
+
+```
+ 12 + 	return writeJSON(w, http.StatusOK, body)
+└┬─┘└──────────────────┬────────────────────────┘
+ │                     └── selected: the +/- column and the code
+ └── not selected: the cursor bar and the line number
+```
+
+The scrollbars are chrome too: neither the one down a pane's right edge nor the
+one along the diff's foot is selectable, and a selection running to the right
+margin stops short of the bar rather than painting over it.
+
+Dragging down the diff gives you a patch you can paste; dragging down a file
+list gives you paths, without the `✎` and `✔` icons in front of them. The `+`/`-`
+column stays in, because a range of changed lines copied without it is no
+longer a diff. When you want exact columns instead — the code with no marker at
+all — `Alt`-drag takes a rectangle.
+
+A diff scrolled sideways copies what is on screen, not the lines behind it:
+what you see is what you get, so a selection taken at column 40 gives you the
+text at column 40.
+
+Double click uses the same word characters a terminal does, so `-./?%&#:_=+@~`
+count as part of a word: one double click takes a whole path, a URL, a
+`host:port` or a `--flag`.
+
+#### Copying
+
+Copies go out as **OSC 52**, the terminal's own clipboard sequence. It travels
+the same pipe the text on screen came down, so a copy lands on the clipboard of
+the machine you are sitting at — over ssh, inside a container, through tmux —
+rather than on whatever clipboard the host running git happens to have.
+
+#### Getting your terminal's selection back
+
+While difftui has the mouse, your terminal's own click-drag-to-select is gone.
+Most terminals bypass mouse reporting while **Shift** is held, so Shift-drag
+still gives you the terminal's selection — which is the way to select across
+two panes at once, or to copy out of the message buffer.
 
 ### On a file
 
@@ -663,6 +760,9 @@ selection. With nothing selected they apply to the file under the cursor.
 | `internal/ui/emphasis.go` | Tabs, and finding the characters that changed |
 | `internal/ui/dialog.go` | The modal layer standing in for git gui's popups |
 | `internal/ui/theme.go` | The palette, echoing Tk git gui's colours |
+| `internal/ui/mouse.go` | Mouse routing, hit testing, zoom gestures and the clipboard |
+| `internal/ui/grid.go` | Rendered rows read back as cells, for selecting and highlighting |
+| `internal/ui/select.go` | What each pane calls content, and where on screen it starts |
 | `internal/ui/util.go` | Width-aware padding and truncation |
 
 Hunk and line staging work by rebuilding a minimal patch and feeding it to

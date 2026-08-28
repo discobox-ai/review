@@ -187,6 +187,15 @@ func (d *diffView) codeWidth() int {
 	return d.codeWidthWith(vert)
 }
 
+// rowW is how wide a body row is drawn, once the vertical scrollbar has taken
+// its column. It is what the row renderer fills and what the mouse selection
+// measures its columns against, so the two cannot disagree about where the
+// text ends and the bar begins.
+func (d *diffView) rowW() int {
+	vert, _ := d.bars()
+	return d.rowWidth(vert)
+}
+
 // maxOffset is the first line that can sit at the top with the last line still
 // on screen.
 func (d *diffView) maxOffset() int {
@@ -358,61 +367,14 @@ func (d *diffView) view(st *styles, focused bool) string {
 	rowW, body := d.rowWidth(vert), d.rowsWith(horz)
 
 	rows := make([]string, 0, body)
-	if len(d.lines) == 0 {
-		for _, l := range strings.Split(strings.TrimRight(d.text, "\n"), "\n") {
-			if len(rows) >= body {
-				break
-			}
-			rows = append(rows, st.dimText.Render(pad(l, rowW)))
-		}
+	msg := d.messageLines()
+	for i := d.offset; i < len(msg) && len(rows) < body; i++ {
+		rows = append(rows, d.messageRow(st, msg[i]))
 	}
 	for i := d.offset; i < len(d.lines) && len(rows) < body; i++ {
-		l := d.lines[i]
-
 		// The cursor and the selection live in the left edge bar, leaving the
 		// background free to carry the diff itself.
-		cursor := i == d.cursor && focused
-		selected := d.inSelection(i)
-		bar := st.body
-		switch {
-		case cursor:
-			bar = st.cursorBar
-		case selected:
-			bar = st.selectBar
-		}
-		numSty := st.dimText
-		if cursor {
-			numSty = st.numberOn
-		}
-
-		if !isCodeLine(l.Kind) {
-			style := st.diffMeta
-			if l.Kind == '@' {
-				style = st.diffHunk
-			}
-			rows = append(rows, renderDiffRow(diffRow{
-				bar: bar, numW: d.numW, numSty: numSty,
-				gutter: "", code: l.Text, base: style, emphSty: style,
-				hscroll: d.hoffset, width: rowW,
-			}))
-			continue
-		}
-
-		base, emphSty := st.body, st.body
-		switch l.Kind {
-		case '+':
-			base, emphSty = st.diffAdd, st.diffAddEmph
-		case '-':
-			base, emphSty = st.diffDel, st.diffDelEmph
-		}
-		rows = append(rows, renderDiffRow(diffRow{
-			bar:    bar,
-			number: lineNumber(l), numW: d.numW, numSty: numSty,
-			gutter: diffGutter(l.Kind), code: d.texts[i],
-			spans: d.spanAt(i), emph: d.emphAt(i),
-			base: base, emphSty: emphSty,
-			palette: st.syntax, hscroll: d.hoffset, width: rowW,
-		}))
+		rows = append(rows, renderDiffRow(d.rowFor(i, st, i == d.cursor && focused, d.inSelection(i))))
 	}
 	for len(rows) < body {
 		rows = append(rows, strings.Repeat(" ", rowW))
@@ -441,6 +403,82 @@ func (d *diffView) hbar(st *styles, vert bool) string {
 		b.WriteString(" ")
 	}
 	return b.String()
+}
+
+// messageLines is the text shown in place of a patch — "no differences", or
+// why a diff could not be taken — split into the rows that carry it.
+func (d *diffView) messageLines() []string {
+	if len(d.lines) > 0 || d.text == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(d.text, "\n"), "\n")
+}
+
+func (d *diffView) messageRow(st *styles, line string) string {
+	return st.dimText.Render(pad(line, d.rowW()))
+}
+
+// rowFor describes one rendered line. Only the left edge bar depends on where
+// the cursor is; everything else is a function of the line itself, which is
+// what lets a row be rendered for a line that is not currently on screen —
+// the mouse selection reads lines either side of the viewport.
+func (d *diffView) rowFor(i int, st *styles, cursor, selected bool) diffRow {
+	l := d.lines[i]
+	bar := st.body
+	switch {
+	case cursor:
+		bar = st.cursorBar
+	case selected:
+		bar = st.selectBar
+	}
+	numSty := st.dimText
+	if cursor {
+		numSty = st.numberOn
+	}
+
+	if !isCodeLine(l.Kind) {
+		style := st.diffMeta
+		if l.Kind == '@' {
+			style = st.diffHunk
+		}
+		return diffRow{
+			bar: bar, numW: d.numW, numSty: numSty,
+			gutter: "", code: l.Text, base: style, emphSty: style,
+			hscroll: d.hoffset, width: d.rowW(),
+		}
+	}
+
+	base, emphSty := st.body, st.body
+	switch l.Kind {
+	case '+':
+		base, emphSty = st.diffAdd, st.diffAddEmph
+	case '-':
+		base, emphSty = st.diffDel, st.diffDelEmph
+	}
+	return diffRow{
+		bar:    bar,
+		number: lineNumber(l), numW: d.numW, numSty: numSty,
+		gutter: diffGutter(l.Kind), code: d.texts[i],
+		spans: d.spanAt(i), emph: d.emphAt(i),
+		base: base, emphSty: emphSty,
+		palette: st.syntax, hscroll: d.hoffset, width: d.rowW(),
+	}
+}
+
+// scroll moves the viewport without moving the cursor, the way a wheel does.
+// The cursor is left where it was, so it may scroll out of sight; the next
+// key that moves it brings the view back to it, which is what every editor
+// does and what makes reading ahead with the wheel worth doing.
+func (d *diffView) scroll(delta int) {
+	d.offset = min(max(d.offset+delta, 0), listMaxOffset(d.rowCount(), d.bodyRows()))
+}
+
+// rowCount is how many body rows the pane has to show, patch or message.
+func (d *diffView) rowCount() int {
+	if len(d.lines) > 0 {
+		return len(d.lines)
+	}
+	return len(d.messageLines())
 }
 
 // spanAt returns the highlighting for a rendered line, if any.
@@ -535,16 +573,27 @@ func renderDiffRow(r diffRow) string {
 	if r.width <= 0 {
 		return ""
 	}
+	chrome, used := renderDiffChrome(r)
+	if used >= r.width {
+		return truncateANSI(chrome, r.width)
+	}
+	return chrome + renderDiffContent(r, r.width-used)
+}
 
+// renderDiffChrome draws the columns in front of the code — the cursor bar and
+// the line number — and reports how many columns they took.
+//
+// It is split out because those columns are the pane's own furniture rather
+// than the diff: the mouse selection starts after them, so that dragging over
+// a diff yields the diff rather than a column of line numbers nobody wants
+// pasted anywhere.
+func renderDiffChrome(r diffRow) (string, int) {
 	var b strings.Builder
 	// The bar column is always drawn, blank when the row is neither the
 	// cursor nor selected, so rows never shift sideways.
 	b.WriteString(r.bar.Render(" "))
 	used := 1
-	if used >= r.width {
-		return truncateANSI(b.String(), r.width)
-	}
-	if r.numW > 0 {
+	if used < r.width && r.numW > 0 {
 		numText := strings.Repeat(" ", r.numW)
 		if r.number > 0 {
 			n := itoa(r.number)
@@ -555,10 +604,30 @@ func renderDiffRow(r diffRow) string {
 		}
 		b.WriteString(r.numSty.Render(numText + " "))
 		used += runewidth.StringWidth(numText) + 1
-		if used >= r.width {
-			return truncateANSI(b.String(), r.width)
-		}
 	}
+	return b.String(), used
+}
+
+// diffChromeWidth is how many columns renderDiffChrome takes, without going to
+// the trouble of rendering it.
+func diffChromeWidth(numW, width int) int {
+	if width > 1 && numW > 0 {
+		return 1 + numW + 1
+	}
+	return 1
+}
+
+// renderDiffContent draws the +/- marker and the line of code into exactly
+// avail columns, padding or truncating to fill them.
+//
+// The marker is on this side of the split rather than with the chrome because
+// it is the diff: a run of changed lines copied without it is no longer one.
+func renderDiffContent(r diffRow, avail int) string {
+	if avail <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	used := 0
 
 	// The gutter stays put and the code slides under it, so the +/- marker and
 	// the line number keep saying which line is which however far right the
@@ -613,7 +682,7 @@ func renderDiffRow(r diffRow) string {
 	truncated := false
 	for at, ch := range runes {
 		w := runewidth.RuneWidth(ch)
-		if used+w > r.width {
+		if used+w > avail {
 			truncated = true
 			break
 		}
@@ -626,14 +695,14 @@ func renderDiffRow(r diffRow) string {
 		used += w
 	}
 	flush()
-	if truncated && used < r.width {
+	if truncated && used < avail {
 		b.WriteString(r.base.Render("…"))
 		used++
 	}
 	// The band runs to the right margin, so a changed line reads as a solid
 	// block rather than as ragged text.
-	if used < r.width {
-		b.WriteString(r.base.Render(strings.Repeat(" ", r.width-used)))
+	if used < avail {
+		b.WriteString(r.base.Render(strings.Repeat(" ", avail-used)))
 	}
 	return b.String()
 }

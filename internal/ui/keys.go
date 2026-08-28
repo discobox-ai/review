@@ -34,6 +34,7 @@ type keyMap struct {
 	FocusCommits key.Binding
 	NextPane     key.Binding
 	PrevPane     key.Binding
+	Zoom         key.Binding
 
 	// Commands. A letter each, live in the file lists and the diff.
 	StageKey       key.Binding
@@ -52,6 +53,7 @@ type keyMap struct {
 	QuitKey        key.Binding
 	Toggle         key.Binding
 	Visual         key.Binding
+	ZoomKey        key.Binding
 	StageLine      key.Binding
 	Delete         key.Binding
 	RevertHunk     key.Binding
@@ -91,6 +93,9 @@ func newKeyMap() keyMap {
 		FocusCommits: key.NewBinding(key.WithKeys("alt+5"), key.WithHelp("Alt-5", "this branch")),
 		NextPane:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "next pane")),
 		PrevPane:     key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("Shift-Tab", "prev pane")),
+		// Alt-Z reaches zoom from inside the message buffer, where z is text.
+		// Everywhere else the letter does it, as z does in tmux.
+		Zoom: key.NewBinding(key.WithKeys("alt+z"), key.WithHelp("Alt-Z", "zoom the pane")),
 
 		StageKey:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stage")),
 		UnstageKey:  key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "unstage")),
@@ -109,6 +114,7 @@ func newKeyMap() keyMap {
 		QuitKey:        key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		Toggle:         key.NewBinding(key.WithKeys(" ", "enter"), key.WithHelp("Space", "stage / unstage")),
 		Visual:         key.NewBinding(key.WithKeys("V"), key.WithHelp("V", "visual select")),
+		ZoomKey:        key.NewBinding(key.WithKeys("z"), key.WithHelp("z", "zoom the pane")),
 		StageLine:      key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "stage this line")),
 		Delete:         key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete untracked")),
 		RevertHunk:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "revert hunk")),

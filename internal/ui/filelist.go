@@ -130,9 +130,27 @@ func (l *fileList) inSelection(i int) bool {
 	return ok && i >= lo && i <= hi
 }
 
+// name is what a row reads as once the indent and the icon are taken off: the
+// path, or both paths when the file was renamed.
+func (l *fileList) name(i int) string {
+	if i < 0 || i >= len(l.files) {
+		return ""
+	}
+	f := l.files[i]
+	if f.From != "" {
+		return f.From + " → " + f.Path
+	}
+	return f.Path
+}
+
 func (l *fileList) move(delta int) {
 	l.cursor += delta
 	l.clamp()
+}
+
+// scroll moves the viewport without moving the cursor, the way a wheel does.
+func (l *fileList) scroll(delta int) {
+	l.offset = min(max(l.offset+delta, 0), l.maxOffset())
 }
 
 func (l *fileList) moveTo(i int) {
@@ -258,11 +276,7 @@ func (l *fileList) view(st *styles, focused bool) string {
 	}
 	for i := l.offset; i < len(l.files) && len(rows) < l.height; i++ {
 		f := l.files[i]
-		name := f.Path
-		if f.From != "" {
-			name = f.From + " → " + f.Path
-		}
-		line := pad("  "+l.icon(f.State)+" "+name, rowW)
+		line := pad("  "+l.icon(f.State)+" "+l.name(i), rowW)
 		// The cursor is the brighter band and the selection a dimmer shade of
 		// it, so the row you are on still reads inside a selection.
 		switch {

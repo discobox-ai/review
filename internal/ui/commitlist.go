@@ -65,6 +65,11 @@ func (l *commitList) move(delta int) {
 	l.clamp()
 }
 
+// scroll moves the viewport without moving the cursor, the way a wheel does.
+func (l *commitList) scroll(delta int) {
+	l.offset = min(max(l.offset+delta, 0), l.maxOffset())
+}
+
 func (l *commitList) moveTo(i int) {
 	l.cursor = i
 	l.clamp()
@@ -104,12 +109,19 @@ func (l *commitList) maxOffset() int { return listMaxOffset(l.rows(), l.height) 
 
 // rowText is what one entry reads as. The working tree is named rather than
 // hashed, since it has no hash to give.
-func (l *commitList) rowText(i int) string {
+func (l *commitList) rowText(i int) string { return "  " + l.rowBody(i) }
+
+// rowBody is the entry without its indent: the hash and the subject, or the
+// name the working tree goes by.
+func (l *commitList) rowBody(i int) string {
 	if i == workingRow {
-		return "  ● working tree"
+		return "● working tree"
+	}
+	if i < 1 || i > len(l.commits) {
+		return ""
 	}
 	c := l.commits[i-1]
-	return "  " + c.Short + " " + c.Subject
+	return c.Short + " " + c.Subject
 }
 
 func (l *commitList) view(st *styles, focused bool) string {
