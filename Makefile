@@ -3,10 +3,10 @@ BINARY := discobox-review
 .PHONY: build install test vet fmt clean screenshots
 
 build:
-	go build -o $(BINARY) .
+	go build -o $(BINARY) ./cmd/$(BINARY)
 
 install:
-	go install .
+	go install ./cmd/$(BINARY)
 
 test:
 	go test ./...

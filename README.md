@@ -17,8 +17,12 @@ review.
 ## Install
 
 ```sh
-go install github.com/discobox-ai/review@latest
+go install github.com/discobox-ai/review/cmd/discobox-review@latest
 ```
+
+The module is `review` and the command is `discobox-review`, so the path names
+both. `go install` takes the binary's name from the last element of the path it
+is given, which is why the command lives in `cmd/` rather than at the root.
 
 Or from a checkout:
 
@@ -1044,7 +1048,7 @@ carries a comment in and out of it.
 
 | Path | Contents |
 | --- | --- |
-| `main.go` | Flag parsing, program startup, and whether there is a terminal to draw in |
+| `cmd/discobox-review/main.go` | Flag parsing, program startup, and whether there is a terminal to draw in |
 | `internal/git/system.go` | The whole system boundary: running git, and file access |
 | `internal/git/git.go` | Every git invocation, the scan, the base and the history |
 | `internal/git/patch.go` | Unified diff parsing, splitting one diff into many files, and carrying a line number across a diff |
@@ -1087,8 +1091,9 @@ drives a repository entirely through a fake `System` to show the interface is
 sufficient on its own. `internal/review` holds no I/O at all: loading and
 saving belong to the caller, which owns the boundary.
 
-Process I/O — `os.Stderr`, `os.Exit` in `main.go` — is deliberately not behind
-it: it is how discobox-review talks to its own terminal, not to a repository.
+Process I/O — `os.Stderr`, `os.Exit` in `cmd/discobox-review/main.go` — is
+deliberately not behind it: it is how discobox-review talks to its own
+terminal, not to a repository.
 
 ## Tests
 
