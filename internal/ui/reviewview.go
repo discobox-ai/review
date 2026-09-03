@@ -1270,9 +1270,9 @@ func (f *reviewFile) headerTail(avail int) string {
 	}
 	switch {
 	case f.approved:
-		add("✔ approved", "✔")
+		add("✓ approved", "✓")
 	case f.nullified:
-		add("✻ approval nullified", "✻")
+		add("◈ approval nullified", "◈")
 	}
 	switch {
 	case f.open > 0:

@@ -7,37 +7,7 @@ wrong with it line by line, and see how much of that is left — built with
 [Lip Gloss v2](https://charm.land/lipgloss). Mouse selection comes from
 [discobox-ai/x/selection](https://github.com/discobox-ai/x/tree/main/selection).
 
-```
-Reviewing: feature  ·  from origin/main 5e23e87 ↑2 ↓0            discobox-review · F1 help · Ctrl-Q quit
- Changed Files                     1/4 │ Review · from origin/main       1/4 approved · 1 open comment
- ▍○ bar.txt                       +1 −1│      ▾ bar.txt                                 +1 · −1 · staged
-  ✔ beta.go                          +3│      @@ -1 +1 @@
- ▍◆ foo.txt                   +2 −2 (1)│ ▍  1  -alpha
- ▍○ new.txt                          +1│ ▍  1 + beta
-                                       │
-                                       │      ▸ beta.go                              +3 · ✔ approved
-                                       │
-                                       │      ▾ foo.txt      +2 · −2 · uncommitted · 1 open comment
-                                       │      @@ -1,5 +1,5 @@
-                                       │    1   one
-                                       │    2  -two
-                                       │    2 + TWO
-                                       │    3   three
-                                       │ ▍  4  -four
-                                       │ ▍  4 + FOUR
-                                       │          ┌ t1 · 1 comment
-                                       │          │ Darren  2026-08-28 19:59
-                                       │          │   Why the shouting? The rest of the
-                                       │          │   file is lower case.
-                                       │          └ r reply · x resolve
-                                       │    5   five
-                                       │
- History from origin/main    2 commits │      ▾ new.txt                             +1 · untracked
-  ● everything from the base           │      @@ -0,0 +1 @@
-  000d5f8 add beta                     │ ▍  1 + brand new
-  03a361d capitalise two               │
-a approve · Space fold · ] next file · c comment on a line     3 to read · 3 to commit · 1 open · ctx:5
-```
+![The review window: a file list and branch history on the left, a stacked diff on the right with an approved file folded away, a conversation hanging off line 12, and an amber margin down the uncommitted changes](docs/screenshots/review.png)
 
 **discobox-review reads a repository and never writes one.** Nothing here stages,
 commits, amends or rewrites anything. The one exception is checking out a
@@ -111,7 +81,7 @@ waiting for an answer:
 
 ```
 ▾ internal/ui/model.go              +42 · −7 · uncommitted · 2 open comments
-▸ internal/git/git.go                                        +30 · ✔ approved
+▸ internal/git/git.go                                        +30 · ✓ approved
 ```
 
 Those give way in a fixed order as the pane narrows — the arithmetic first,
@@ -128,8 +98,17 @@ keep saying so:
 
 `◆2` is two comments outstanding, `✓2` two that have been answered — the same
 `◆` the list on the left wears, and the same `✓` a resolved thread collapses
-to. A file whose heading is only arithmetic keeps its whole name instead: there
-is nothing there worth shortening it for.
+to. The verdict shortens to a bare `✓`, which is the same mark again and reads
+the same way: a number after it counts remarks, and no number is the file
+itself. A file whose heading is only arithmetic keeps its whole name instead:
+there is nothing there worth shortening it for.
+
+Every mark the window draws is one an ordinary monospace font has. Two that
+looked better — `✔` for a verdict and `✻` for one that has fallen — turned out
+to be missing from JetBrains Mono, Hack and Cascadia Mono, where they showed as
+an empty box on the most important column of the screen. `✓` and `◈` are drawn
+instead. (Hack has no check mark of any kind; there is nothing to be done about
+that one.)
 
 ### The base
 
@@ -144,7 +123,7 @@ Reviewing: feature  ·  from origin/main 5e23e87 ↑2 ↓0
 | `origin/main` | The ref the branch is measured against |
 | `5e23e87` | The merge base — the commit the two last had in common |
 | `↑2` | Commits on HEAD since the base |
-| `↓2` | Commits on the ref since the base, in amber when there are any |
+| `↓0` | Commits on the ref since the base, in amber when there are any |
 
 Clicking it does the same, as does clicking the branch name beside it — the
 two things on that bar that name a choice are the two that offer to change it.
@@ -202,12 +181,12 @@ once, after asking.
 What is approved is **the change, not the name**. A digest of that file's whole
 change from the base goes into the review with the approval, so a file edited
 afterwards no longer matches and the approval falls — the file comes back
-marked `✻ approval nullified` rather than `✔ approved`, which is worth telling
+marked `◈ approval nullified` rather than `✓ approved`, which is worth telling
 apart from never having been approved at all.
 
 ```
- ✔ beta.go        approved, and unchanged since
- ✻ model.go       approved once; it has moved since, so that no longer counts
+ ✓ beta.go        approved, and unchanged since
+ ◈ model.go       approved once; it has moved since, so that no longer counts
  ◆ handler.go     not approved, and something is being said about it
  ○ util.go        not looked at yet
 ```
@@ -228,11 +207,13 @@ marker, so it discloses. Only the marker: the rest of the heading is the file's
 name, which is text somebody may well want to drag over and copy.
 
 **`F` folds every file**, turning a long review into a list of its headings,
-and folds them all open again once they are shut. It is one key rather than two
-because those are the same want at two moments: the map of the review is worth
+and folds them all open again once they are shut. It is one key rather than
+two because those are the same want at two moments: the map of the review is worth
 reaching whether you are coming from having everything open or from having read
 your way down to nothing. Anything still open decides which way it goes, so the
 first press always tidies.
+
+![Every file folded to its heading: five rows saying what changed, what is left to commit, and the verdict](docs/screenshots/folded.png)
 
 Opening them again **steps over the files that are done with** — approved, with
 nothing outstanding said about them. "Show me everything" plainly means
@@ -244,7 +225,7 @@ come back:
 ```
  Folded                        F                    Opened
  ▸ bar.txt                 ──────►    ▾ bar.txt        …
- ▸ beta.go   ✔ approved               ▸ beta.go   ✔ approved   ← left alone
+ ▸ beta.go   ✓ approved               ▸ beta.go   ✓ approved   ← left alone
  ▸ foo.txt                            ▾ foo.txt        …
  ▸ new.txt                            ▾ new.txt        …
 ```
@@ -263,7 +244,7 @@ about.
 ```
  Changed Files              1/4      Unfinished Files           1/4
  ▍○ bar.txt                          ▍○ bar.txt
-  ✔ beta.go         f                ▍○ foo.txt
+  ✓ beta.go         f                ▍○ foo.txt
  ▍○ foo.txt     ──────►              ▍○ new.txt
  ▍○ new.txt
 ```
@@ -283,7 +264,7 @@ from the index is never a mystery.
 
 ```
  ▍○ bar.txt                          ▸ bar.txt                       +1 · −1 · staged
-  ✔ beta.go             F            ▸ beta.go                             +3 · ✔ approved
+  ✓ beta.go             F            ▸ beta.go                             +3 · ✓ approved
  ▍◆ foo.txt          ──────►         ▸ foo.txt   +2 · −2 · uncommitted · 1 open comment
  ▍○ new.txt                          ▸ new.txt                          +1 · untracked
 ```
@@ -304,14 +285,7 @@ the line it is about. `Ctrl-S` posts it, `Esc` throws it away. Inside the box
 every letter is text, so none of the command letters are reachable until you
 leave.
 
-```
- ▍  4 + FOUR
-          ╭─ Comment on foo.txt:4 ──────────────────────────────╮
-          │ Why the shouting? The rest of the file is lower     │
-          │ case, so this reads as a typo.                      │
-          ╰─ Ctrl-S posts · Esc discards ───────────────────────╯
-    5   five
-```
+![A comment box open inline beneath the line it is about, the diff continuing below it](docs/screenshots/comment.png)
 
 It is written there rather than in a field at the foot of the window because a
 remark is about a particular line. Writing it somewhere else means reading the
@@ -349,8 +323,8 @@ replies keep their line.
 
 Resolving is usually what you want instead — it keeps the record of what was
 asked and answered. Resolving collapses it to one line, because the point of
-closing a thread is to stop having to read it. `Space` opens a closed one back up without reopening
-it.
+closing a thread is to stop having to read it. `Space` opens a closed one
+back up without reopening it.
 
 ```
           ✓ t1 · resolved · 2 comments · Why the shouting?
@@ -400,6 +374,8 @@ its parent, so it reads as *what did this commit do* rather than what the
 branch looks like so far. Pick the top row again and the whole review comes
 back.
 
+![One commit's own diff, with a remark written against the whole review shown beside the line that introduced it](docs/screenshots/commit.png)
+
 **Comments are not lost on the way.** They are stored against the working tree,
 which is not the space a single commit's diff is drawn in, so:
 
@@ -413,13 +389,7 @@ which is not the space a single commit's diff is drawn in, so:
 - A comment on a line the commit did not touch is **not put on the wrong line**.
   It is kept under the file's heading instead, saying why it is there.
 
-```
-      ▾ foo.txt                                          +2 · −2
-      ┌ t3 · 1 comment · line 4 is not in this diff
-      │ Darren  2026-08-28 20:11
-      │   This one is about the uncommitted change.
-      └ r reply · x resolve
-```
+![One commit on screen, with a comment about a line that commit did not touch kept under the file's heading and marked as not being in this diff](docs/screenshots/loose.png)
 
 That is also what happens to a comment whose line stops existing altogether —
 the change was reverted, the base moved past it. The file keeps its place in
@@ -469,44 +439,39 @@ to, fix it, answer the thread and mark it closed, without discobox-review being
 involved at all. So the format is the interface, and it is arranged around
 being pleasant to read and hard to corrupt.
 
+This is the review the pictures above were taken of, as it stands on disk:
+
 ```json
 {
   "version": 1,
-  "branch": "feature",
-  "base": "origin/main",
+  "branch": "rate-limit",
+  "base": "main",
   "files": [
     {
-      "path": "beta.go",
+      "path": "internal/server/handler.go",
       "approved": true,
-      "digest": "9f2b1c4d5e6f7a8b",
-      "by": "Darren Shepherd",
-      "at": "2026-08-28T19:58:04Z"
-    },
-    {
-      "path": "model.go",
-      "approved": false,
-      "digest": "11aa22bb33cc44dd",
-      "nullified": true,
-      "by": "Darren Shepherd",
-      "at": "2026-08-28T19:12:00Z"
+      "digest": "7cab2ca2e8394ece",
+      "by": "darren",
+      "at": "2026-08-28T19:41:02+01:00"
     }
   ],
   "threads": [
     {
       "id": "t1",
-      "path": "foo.txt",
+      "path": "internal/server/limit.go",
       "side": "new",
-      "line": 4,
-      "text": "FOUR",
+      "line": 12,
+      "text": "\tbuckets map[string]bucket",
       "resolved": false,
       "comments": [
-        { "by": "Darren Shepherd", "at": "2026-08-28T19:59:11Z", "body": "Why the shouting?" },
-        { "by": "claude", "at": "2026-08-28T20:04:52Z", "body": "Fair. Lower-cased it." }
+        { "by": "darren", "at": "2026-08-28T19:59:14+01:00", "body": "This map only grows: one entry per address, kept for the life of the process. A busy afternoon is a memory leak." },
+        { "by": "claude", "at": "2026-08-28T20:04:37+01:00", "body": "Fair. Sweeping anything untouched for a minute on write, so the map tracks callers rather than history." }
       ]
     }
   ]
 }
 ```
+
 
 | Field | Meaning |
 | --- | --- |
@@ -554,11 +519,12 @@ $ discobox-review diff
     7 +! func write() error { return nil }    <t2>
 
 $ discobox-review list --open
-t1   server.go:42             open     Darren Shepherd  why not check the error here?
+t1   server.go:4              open     Darren Shepherd  why not check the error here?
+t2   server.go:7              open     claude           this block is new
 
 $ discobox-review show t1
-t1  server.go:42  open
-    	return nil
+t1  server.go:4  open
+    return write()
 
   [0] Darren Shepherd  2026-09-03T01:15:53Z
       why not check the error here?
@@ -632,6 +598,12 @@ an agent should pass its own. `--side old` anchors to the line the change
 removed rather than the one it added. A place is written `path:line` or
 `path:line-line`, the way a place in a review is written everywhere else.
 
+`comment` records the line it is about along with the remark, exactly as the
+window does, so a review still reads on its own away from the repository. It
+reads it from the side the remark is anchored in — the working tree for `new`,
+the base for `old` — which also gets it right for a line the diff never
+mentions. A line that is not there gets no text rather than the wrong one.
+
 They work on the repository containing the current directory, and on the branch
 checked out there — the same branch swap the window does, so the two never
 disagree about which review they are looking at.
@@ -677,7 +649,7 @@ fires.
 ### One review per branch
 
 A review is *of a branch*, so checking out another one puts this one away:
-`.git/discobox-review.json` is moved to `.git/discobox-review-review.<branch>.json`, and
+`.git/discobox-review.json` is moved to `.git/discobox-review.<branch>.json`, and
 whatever was saved for the branch you are moving to is moved into place. It is
 done by moving files rather than by keying them all inside one because the live
 file is then always at one path, holding one review, in the flattest shape an
@@ -707,8 +679,9 @@ different objects, not a letter meaning two unrelated things.
 `Space` opens whatever the cursor is on. `Ctrl-C` or `q` quits, `F1` or `?`
 shows the keys.
 
-**Ctrl is never a command**, with one exception: `Ctrl-S` posts the comment
-being written. The box keeps every readline key otherwise — `Ctrl-A`, `Ctrl-E`,
+**No letter command wears Ctrl.** The only chords bound at all are `Ctrl-C`
+and `Ctrl-Q` to quit, and `Ctrl-S` to post the comment being written. The box
+keeps every readline key otherwise — `Ctrl-A`, `Ctrl-E`,
 `Ctrl-K`, `Ctrl-U`, `Ctrl-W`, `Ctrl-D`, `Ctrl-B`, `Ctrl-F`, `Ctrl-N`, `Ctrl-P`,
 `Ctrl-T` — and plain `Enter` is a newline, because a comment is prose.
 
@@ -904,13 +877,7 @@ with line numbers, the same syntax colours the review uses, and the lines the
 review touches marked down the margin, so the change you came from is still
 findable in the file you came to:
 
-```
- internal/git/patch.go                          3 changed runs · 41–48 of 312
-    41   // Seam is where the line sits in the new side's numbering whether
-    42   // or not it exists there.
- ▍  43   Seam int
-    44 }
-```
+![A whole file open full screen, with the lines the review touches marked down the left margin](docs/screenshots/file.png)
 
 **`o`** opens the other side: the file as the base has it. Inside the reader,
 `v` and `o` swap between the two **keeping the line**, so *"what did this used
@@ -954,16 +921,9 @@ no lines of its own to mark, so the seam it left behind is marked instead.
 **`s`** stands the two sides of a change beside each other: what a line was on
 the left, what it became on the right.
 
-```
-unified                          split
-  1   one                          1   one          │   1   one
-  2  -two                          2  -two          │   2 + TWO
-  2 + TWO                          3   three        │   3   three
-  3   three                     ▍  4  -four         │▍  4 + FOUR
-▍ 4  -four                         5   five         │   5   five
-▍ 4 + FOUR
-  5   five
-```
+![The same change with its two sides side by side: what each line was on the left, what it became on the right](docs/screenshots/split.png)
+
+Everywhere else in this README is the unified view.
 
 Neither is the right way round for everything, which is why it is a key rather
 than a setting. A unified diff reads as one text, and is what a patch actually
@@ -1094,9 +1054,11 @@ carries a comment in and out of it.
 | `internal/ui/model.go` | The Bubble Tea model: state, keys, actions |
 | `internal/ui/view.go` | Where each pane goes, the bars above and below them, and what the view asks of the screen |
 | `internal/ui/reviewview.go` | The stack: rows, folds, comment blocks, navigation |
+| `internal/ui/keys.go` | Every binding, in one table |
 | `internal/ui/diffrow.go` | One line of code, drawn |
 | `internal/ui/fileview.go` | The full screen reader for a whole file, either side of the change |
-| `internal/ui/scrollbar.go` | Taking hold of a bar and pulling it |
+| `internal/ui/scroll.go` | Drawing the bars |
+| `internal/ui/scrollbar.go` | Taking hold of one and pulling it |
 | `internal/ui/filelist.go` | The contents page |
 | `internal/ui/commitlist.go` | The history |
 | `internal/ui/syntax.go` | Lexing a hunk and the syntax palette |
@@ -1108,6 +1070,7 @@ carries a comment in and out of it.
 | `internal/ui/grid.go` | Rendered rows read back as cells, for selecting and highlighting |
 | `internal/ui/select.go` | What each pane calls content, and where on screen it starts |
 | `internal/ui/util.go` | Width-aware padding and truncation |
+| `internal/ui/shot_test.go` | The generator behind the pictures in this README |
 
 ### The system boundary
 
@@ -1145,6 +1108,30 @@ an agent has to write, the digest, and what nullifies an approval. The
 assert on the rendered frame — including that a comment written against one
 commit turns up beside the same code in the whole review, and that one whose
 line has gone is kept rather than lost.
+
+### The pictures
+
+```sh
+make screenshots
+```
+
+The screenshots in this README are taken from the running window rather than
+drawn by hand. `internal/ui/shot_test.go` builds a small repository with a rate
+limiter being added to it, drives the real model over it with the real keys,
+and writes each frame out; [freeze](https://github.com/charmbracelet/freeze)
+turns the frames into images. It is a test so that it compiles with everything
+else and cannot quietly rot, and it does nothing unless `SHOTS` names somewhere
+to write.
+
+It writes the fixture's review out beside the images as
+`docs/screenshots/review.json`, which is the file quoted under
+[The review file](#the-review-file): the example there is a real review of a
+real branch rather than one written to look like one.
+
+A picture of a program is a claim about it, and the only way to keep the claim
+true as the program moves is to take it from the program. It needs freeze,
+ImageMagick, and a font holding every mark the window draws — JetBrains Mono by
+default, overridable with `make screenshots SHOTFONT='Some Other Mono'`.
 
 ## License
 

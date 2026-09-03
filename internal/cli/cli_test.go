@@ -143,6 +143,57 @@ func TestCommentsThroughTheFile(t *testing.T) {
 	}
 }
 
+// A comment records the line it is about, the way one written in the window
+// does. Nothing depends on the field, which is exactly why it has to be there:
+// it is what lets a review be read on its own, and a review whose comments
+// carry it only when they came through the window is one document written two
+// ways.
+func TestCommentRecordsTheLineItIsAbout(t *testing.T) {
+	repo := testRepo(t)
+
+	// The new side is the working tree, tab and all: this is the line as it
+	// stands, not a tidied-up rendering of it.
+	run(t, repo, "comment", "server.go:4", "why not check the error?")
+	if got := stored(t, repo).Thread("t1").Text; got != "\treturn write()" {
+		t.Errorf("text = %q, want the working tree's line 4", got)
+	}
+
+	// The old side is the base, so it is the line the change took away —
+	// which is the only place that line still exists.
+	run(t, repo, "comment", "server.go:4", "--side", "old", "it was bare")
+	if got := stored(t, repo).Thread("t2").Text; got != "\treturn nil" {
+		t.Errorf("old-side text = %q, want the base's line 4", got)
+	}
+
+	// A line the diff never mentions still has a text, because the side names
+	// a whole file rather than the part of it that changed.
+	run(t, repo, "comment", "server.go:1", "the package clause")
+	if got := stored(t, repo).Thread("t3").Text; got != "package main" {
+		t.Errorf("text = %q, want line 1 of the file", got)
+	}
+}
+
+// A line that is not there gets no text rather than the wrong one. Losing the
+// field is nothing; putting somebody else's line in it would be a lie about
+// what was being talked about.
+func TestCommentOnALineThatIsNotThere(t *testing.T) {
+	repo := testRepo(t)
+
+	run(t, repo, "comment", "server.go:999", "off the end")
+	if got := stored(t, repo).Thread("t1").Text; got != "" {
+		t.Errorf("text = %q, want nothing at all", got)
+	}
+	run(t, repo, "comment", "nosuch.go:1", "no such file")
+	if got := stored(t, repo).Thread("t2").Text; got != "" {
+		t.Errorf("text = %q for a file that is not there", got)
+	}
+	// And the comment itself is still made: the review is the record, and a
+	// missing line is not a reason to drop what somebody said about it.
+	if len(stored(t, repo).Threads) != 2 {
+		t.Error("a comment was dropped for want of a line to quote")
+	}
+}
+
 // A block comment is written the way a place in a review is written everywhere
 // else.
 func TestCommentOnARangeOfLines(t *testing.T) {

@@ -173,6 +173,13 @@ func New(repo *git.Repo, base string) Model {
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.Prompt = ""
+	// The box is as tall as what has been written in it, counted in rows on
+	// screen rather than in paragraphs: a remark is usually one long sentence
+	// with no newline in it anywhere, and a box that only grew when Enter was
+	// pressed would hide almost every comment as it was being typed.
+	ta.DynamicHeight = true
+	ta.MinHeight = 1
+	ta.MaxHeight = maxDraftHeight
 
 	return Model{
 		repo:       repo,
@@ -1792,8 +1799,9 @@ func (m *Model) refreshDraft() {
 	if d == nil {
 		return
 	}
+	// Setting the width re-measures the height, since how many rows the text
+	// takes depends on how wide they are allowed to be.
 	m.editor.SetWidth(m.draftTextWidth())
-	m.editor.SetHeight(min(max(m.editor.LineCount(), 1), maxDraftHeight))
 
 	before := len(d.lines)
 	d.lines = m.drawDraft()

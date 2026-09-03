@@ -168,6 +168,24 @@ func ctrlKey(s string) tea.KeyPressMsg {
 	return tea.KeyPressMsg{Code: []rune(s)[0], Mod: tea.ModCtrl}
 }
 
+// typeText presses every key of a string, in one go.
+//
+// It is one call rather than a loop of them because every keystroke in the
+// composer hands back a command that waits for the caret to blink, and each of
+// those cancels the one before it: sent together they all come back at once,
+// where sent one at a time they are half a second each.
+//
+// It types rather than setting the value because the box sizes itself to what
+// has been typed, and a value pushed straight in is not typing.
+func typeText(t *testing.T, m Model, s string) Model {
+	t.Helper()
+	msgs := make([]tea.Msg, 0, len(s))
+	for _, r := range s {
+		msgs = append(msgs, letterKey(string(r)))
+	}
+	return drive(t, m, msgs...)
+}
+
 // namedKey is a key with no character of its own: Enter, Esc, an arrow.
 func namedKey(code rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: code} }
 
@@ -1678,6 +1696,57 @@ func TestTheBoxGrowsWithWhatIsTyped(t *testing.T) {
 	}
 }
 
+// A remark is usually one long sentence with no newline anywhere in it, so the
+// box has to grow for that too. What decides its height is how many rows the
+// text takes on screen, not how many times Enter was pressed: counting
+// paragraphs leaves the box one row tall and scrolls the remark out of sight
+// while it is still being written.
+func TestTheBoxGrowsForAWrappedLine(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey("c"))
+	first, last, _ := draftRows(m)
+	empty := last - first + 1
+
+	long := strings.Repeat("the rest of the file is lower case, so this reads as a typo. ", 2)
+	m = typeText(t, m, long)
+
+	first, last, ok := draftRows(m)
+	if !ok {
+		t.Fatal("the box went away while it was being typed into")
+	}
+	if got := last - first + 1; got <= empty {
+		t.Errorf("the box is still %d rows after %d characters with no newline in them",
+			got, len(long))
+	}
+	// And the end of it is on screen, rather than scrolled out of a box that
+	// never grew to hold it.
+	if !strings.Contains(plain(m), "reads as a typo.") {
+		t.Errorf("the end of the remark is not in the box:\n%s", plain(m))
+	}
+}
+
+// It stops at maxDraftHeight and scrolls inside itself after that, whether the
+// rows came from newlines or from wrapping.
+func TestTheBoxStopsGrowing(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey("c"))
+
+	long := strings.Repeat("this remark goes on rather longer than anybody wanted it to. ", 12)
+	m = typeText(t, m, long)
+
+	first, last, ok := draftRows(m)
+	if !ok {
+		t.Fatal("the box went away")
+	}
+	// The rule above and the rule below are the box's own, on top of its text.
+	if got := last - first + 1; got > maxDraftHeight+2 {
+		t.Errorf("the box grew to %d rows, past the %d it should stop at",
+			got, maxDraftHeight+2)
+	}
+}
+
 // Esc takes the box away and puts the cursor back on the line it was about.
 func TestEscapeTakesTheBoxAway(t *testing.T) {
 	m := newTestModel(t)
@@ -2123,6 +2192,44 @@ func TestViewOpensTheFileAtTheLine(t *testing.T) {
 	m = drive(t, m, letterKey("v"))
 	if m.file != nil {
 		t.Error("v did not close the reader")
+	}
+}
+
+// The reader colours the file the way the review colours a hunk.
+//
+// It gets that by handing the highlighter one hunk's worth of lines. The
+// highlighter skips any line that belongs to no hunk, so lines built without
+// one are silently dropped and the whole file comes out grey — which looks
+// like a file nothing recognises rather than like a bug.
+func TestTheReaderHighlightsTheFile(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "beta.go", '+', "package beta")
+	m = drive(t, m, letterKey("v"))
+	if m.file == nil {
+		t.Fatalf("v opened nothing (status %q)", m.status)
+	}
+
+	var tokens int
+	for _, line := range m.file.spans {
+		tokens += len(line)
+	}
+	if tokens == 0 {
+		t.Fatalf("%s was tokenised into nothing at all", m.file.path)
+	}
+	// Not just somewhere: the line the cursor is on has its own colours.
+	if len(m.file.spans[m.file.cursor]) == 0 {
+		t.Errorf("line %d, %q, has no tokens",
+			m.file.cursor+1, m.file.texts[m.file.cursor])
+	}
+	// And a file nothing has a lexer for is still shown, plainly.
+	m = drive(t, m, letterKey("v"))
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey("v"))
+	if m.file == nil {
+		t.Fatal("v would not open a file with no lexer for it")
+	}
+	if !strings.Contains(plain(m), "five") {
+		t.Errorf("an unhighlightable file was not shown:\n%s", plain(m))
 	}
 }
 

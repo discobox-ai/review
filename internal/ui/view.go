@@ -512,7 +512,7 @@ func helpText() string {
 		"  An approval is of a change, not of a name. What goes into the",
 		"  review file with it is a digest of that file's whole change from",
 		"  the base, so editing the file afterwards nullifies the approval",
-		"  and the file comes back marked ✻ rather than ✔.",
+		"  and the file comes back marked ◈ rather than ✓.",
 		"",
 		"  Turning the diff context up or down does not nullify anything:",
 		"  the digest counts only the lines that changed.",

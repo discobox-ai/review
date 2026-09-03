@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "branch": "rate-limit",
+  "base": "main",
+  "files": [
+    {
+      "path": "internal/server/handler.go",
+      "approved": true,
+      "digest": "7cab2ca2e8394ece",
+      "by": "darren",
+      "at": "2026-08-28T19:41:02+01:00"
+    }
+  ],
+  "threads": [
+    {
+      "id": "t1",
+      "path": "internal/server/limit.go",
+      "side": "new",
+      "line": 12,
+      "text": "\tbuckets map[string]bucket",
+      "resolved": false,
+      "comments": [
+        {
+          "by": "darren",
+          "at": "2026-08-28T19:59:14+01:00",
+          "body": "This map only grows: one entry per address, kept for the life of the process. A busy afternoon is a memory leak."
+        },
+        {
+          "by": "claude",
+          "at": "2026-08-28T20:04:37+01:00",
+          "body": "Fair. Sweeping anything untouched for a minute on write, so the map tracks callers rather than history."
+        }
+      ]
+    }
+  ]
+}

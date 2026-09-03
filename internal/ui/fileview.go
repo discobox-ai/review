@@ -74,7 +74,13 @@ func newFileView(path, base string, side fileSide, text string, changed map[int]
 		// Every line is context: this is the file, not a change to it. The
 		// row renderer then draws it the way it draws an unchanged line of
 		// diff, which is exactly right.
-		v.lines[i] = git.DiffLine{Text: " " + l, Kind: ' ', Hunk: -1, Line: -1,
+		//
+		// They are all one hunk, numbered from the top, because that is what
+		// the highlighter reads: it lexes a hunk's worth of lines as a single
+		// text, and a whole file is the largest and most correct such text
+		// there is. Left unnumbered they are skipped, and the file comes out
+		// grey.
+		v.lines[i] = git.DiffLine{Text: " " + l, Kind: ' ', Hunk: 0, Line: i,
 			Old: i + 1, New: i + 1, Seam: i + 1}
 		v.texts[i] = expandTabs(l)
 	}

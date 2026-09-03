@@ -97,8 +97,9 @@ func newKeyMap() keyMap {
 		// stay a newline inside a text field. So the box names Ctrl-S, and
 		// Ctrl-Enter is there for the terminals that can tell the two apart.
 		//
-		// ("ctrl+enter" is not a key bubbletea v1 reports at all; it is bound
-		// against the day it is, and costs nothing until then.)
+		// Bubble Tea v2 does report it, on a terminal that answers the key
+		// disambiguation the view asks for; Ctrl-J is the line feed a few
+		// terminals send for the same chord.
 		Post: key.NewBinding(
 			key.WithKeys("ctrl+s", "ctrl+j", "ctrl+enter", "alt+enter"),
 			key.WithHelp("Ctrl-S", "post the comment")),

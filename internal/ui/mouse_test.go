@@ -276,7 +276,7 @@ func TestDragOverTheFileListCopiesPaths(t *testing.T) {
 	if got != want {
 		t.Errorf("copied %q, want %q", got, want)
 	}
-	if strings.ContainsAny(got, "✔○◆✻") {
+	if strings.ContainsAny(got, "✓○◆◈") {
 		t.Errorf("the copy picked up the verdict column: %q", got)
 	}
 }

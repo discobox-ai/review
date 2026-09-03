@@ -725,8 +725,50 @@ func comment(st *review.State, repo *git.Repo, args []string, o options) (string
 	}
 	t := st.Start(&review.Thread{
 		Path: path, Side: side, Line: first, Lines: span,
+		Text: lineText(repo, st, side, path, first),
 	}, who(repo, o), strings.Join(args[1:], " "))
 	return t.ID + "  " + where(t), nil
+}
+
+// lineText is the line a remark is being made about, as it read when the
+// remark was made.
+//
+// Nothing depends on it, which is the point: it is there so that a review can
+// be read on its own, without the repository beside it. The window records it
+// for every comment, so a comment made from here has to record it too — one
+// document written two ways is one document written badly.
+//
+// It is read from the file rather than from the diff, since the side a remark
+// is anchored to *is* a file: "new" numbers the working tree and "old" numbers
+// the base. That also gets the line right when it is nowhere in the diff,
+// which the window can never ask for and this can.
+//
+// A line it cannot find is no line at all rather than a wrong one, and a file
+// that is not text is left alone: the field is for a person reading the review
+// in a text editor, and a blob of a binary file helps nobody.
+func lineText(repo *git.Repo, st *review.State, side, path string, line int) string {
+	if line < 1 {
+		return ""
+	}
+	commit := ""
+	if side == review.SideOld {
+		// The old side is numbered in the base, so that is where to look —
+		// the merge base itself, which is the commit the diff was taken from.
+		base := repo.ResolveBase(st.Base, repo.HasHEAD())
+		if base.Commit == "" {
+			return ""
+		}
+		commit = base.Commit
+	}
+	body, err := repo.FileContent(commit, path)
+	if err != nil || strings.IndexByte(body, 0) >= 0 {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
+	if line > len(lines) {
+		return ""
+	}
+	return strings.TrimRight(lines[line-1], "\r")
 }
 
 func reply(st *review.State, repo *git.Repo, args []string, o options) (string, error) {

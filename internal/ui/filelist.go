@@ -132,9 +132,9 @@ func (l *fileList) maxOffset() int { return listMaxOffset(len(l.entries), l.heig
 func (e fileEntry) verdict() string {
 	switch {
 	case e.approved:
-		return "✔"
+		return "✓"
 	case e.nullified:
-		return "✻"
+		return "◈"
 	case e.open > 0:
 		return "◆"
 	}
