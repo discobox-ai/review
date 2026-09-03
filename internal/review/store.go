@@ -18,6 +18,35 @@ type Files interface {
 	StateFileExists(name string) bool
 }
 
+// The names the review went by when the program did: difftui, before it became
+// discobox-review. A review written then is still a review, so it is carried
+// over the first time its branch is looked at rather than left behind under a
+// name nothing reads any more.
+//
+// This can go once nobody has one.
+const legacyFileName = "difftui-review.json"
+
+func legacyArchiveName(branch string) string {
+	return "difftui-review." + safeBranch(branch) + ".json"
+}
+
+// migrate brings a review written under the old name over to the new one.
+//
+// It is done a branch at a time, at the moment that branch is looked at, which
+// is the only moment the name of its archive is known — and the only moment
+// anybody would notice it missing.
+func migrate(fs Files, branch string) {
+	if !fs.StateFileExists(FileName) && fs.StateFileExists(legacyFileName) {
+		_ = fs.RenameStateFile(legacyFileName, FileName)
+	}
+	if branch == "" {
+		return
+	}
+	if !fs.StateFileExists(ArchiveName(branch)) && fs.StateFileExists(legacyArchiveName(branch)) {
+		_ = fs.RenameStateFile(legacyArchiveName(branch), ArchiveName(branch))
+	}
+}
+
 // Adopt makes the file at [FileName] the review of branch.
 //
 // A review is of a branch, so switching branches has to switch reviews. Doing
@@ -26,6 +55,7 @@ type Files interface {
 // anything reading it could ask for — which is the whole reason the state is a
 // file.
 func Adopt(fs Files, branch string) {
+	migrate(fs, branch)
 	if branch == "" {
 		return
 	}

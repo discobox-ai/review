@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/discobox-ai/difftui/internal/git"
+	"github.com/discobox-ai/review/internal/git"
 )
 
 func TestExpandTabs(t *testing.T) {

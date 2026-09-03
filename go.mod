@@ -1,4 +1,4 @@
-module github.com/discobox-ai/difftui
+module github.com/discobox-ai/review
 
 go 1.26.5
 

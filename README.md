@@ -1,4 +1,4 @@
-# difftui
+# discobox-review
 
 A terminal **code review**. Not a diff viewer and not a commit tool: a place to
 read everything a branch is proposing, approve it file by file, say what is
@@ -8,7 +8,7 @@ wrong with it line by line, and see how much of that is left — built with
 [discobox-ai/x/selection](https://github.com/discobox-ai/x/tree/main/selection).
 
 ```
-Reviewing: feature  ·  from origin/main 5e23e87 ↑2 ↓0            difftui · F1 help · Ctrl-Q quit
+Reviewing: feature  ·  from origin/main 5e23e87 ↑2 ↓0            discobox-review · F1 help · Ctrl-Q quit
  Changed Files                     1/4 │ Review · from origin/main       1/4 approved · 1 open comment
  ▍○ bar.txt                       +1 −1│      ▾ bar.txt                                 +1 · −1 · staged
   ✔ beta.go                          +3│      @@ -1 +1 @@
@@ -39,7 +39,7 @@ Reviewing: feature  ·  from origin/main 5e23e87 ↑2 ↓0            difftui ·
 a approve · Space fold · ] next file · c comment on a line     3 to read · 3 to commit · 1 open · ctx:5
 ```
 
-**difftui reads a repository and never writes one.** Nothing here stages,
+**discobox-review reads a repository and never writes one.** Nothing here stages,
 commits, amends or rewrites anything. The one exception is checking out a
 branch, which is choosing what to review rather than changing what is under
 review.
@@ -47,22 +47,22 @@ review.
 ## Install
 
 ```sh
-go install github.com/discobox-ai/difftui@latest
+go install github.com/discobox-ai/review@latest
 ```
 
 Or from a checkout:
 
 ```sh
-make build     # ./difftui
-make install   # $GOBIN/difftui
+make build     # ./discobox-review
+make install   # $GOBIN/discobox-review
 ```
 
 ## Run
 
 ```sh
-difftui                      # the repository containing the current directory
-difftui ~/src/foo            # a specific working tree
-difftui -base origin/main    # measured from a ref of your choosing
+discobox-review                      # the repository containing the current directory
+discobox-review ~/src/foo            # a specific working tree
+discobox-review -base origin/main    # measured from a ref of your choosing
 ```
 
 **With nowhere to draw — output down a pipe, no terminal — it prints what it
@@ -78,8 +78,8 @@ opening a window — see [Driving it from a command
 line](#driving-it-from-a-command-line).
 
 ```sh
-difftui list --open
-difftui reply t3 --by claude "fixed in the next commit"
+discobox-review list --open
+discobox-review reply t3 --by claude "fixed in the next commit"
 ```
 
 ## What a review is
@@ -92,7 +92,7 @@ them out would mean a review that silently omitted every new file.
 
 That is the right unit because it is what the branch is *proposing*. Reading a
 branch commit by commit tells you how the author got there; reading the whole
-thing tells you what you would be agreeing to. difftui shows the whole thing by
+thing tells you what you would be agreeing to. discobox-review shows the whole thing by
 default and lets you drop into a single commit when you want to know how a
 particular step was made.
 
@@ -157,7 +157,7 @@ those:
 | --- | --- |
 | `Pick a commit…` | The branch's own history, newest first — hash, when, subject |
 | `Other ref…` | Anything else: a tag, `HEAD~3`, a raw hash |
-| `(let difftui choose)` | Back to automatic |
+| `(let discobox-review choose)` | Back to automatic |
 
 A ref is the right answer when there is one, but the point you want to measure
 from is often somewhere in your own commits — *"review what I did after this"*
@@ -176,13 +176,13 @@ next session measures from the same place, and an agent reading the file knows
 what the comments are about. A base given with `-base` on the command line wins
 for that session.
 
-Left to itself, difftui takes:
+Left to itself, discobox-review takes:
 
 1. **`@{upstream}`** — what `git branch -u` set.
 2. **`<remote>/HEAD`** — the remote's own default branch, `origin` first.
 3. **`<remote>/main`, then `<remote>/master`**.
 4. **`HEAD`** — a repository with no remote at all still has a review: what has
-   not been committed. Falling back rather than giving up is what stops difftui
+   not been committed. Falling back rather than giving up is what stops discobox-review
    opening on an empty window.
 
 Tracking comes first because it is what the branch was *told* to build on
@@ -456,16 +456,16 @@ clean · reviewed · ctx:5
 ```
 
 **That is the state the whole window is aimed at**: every file approved, every
-comment resolved, and nothing left in the margin. difftui will not get you
+comment resolved, and nothing left in the margin. discobox-review will not get you
 there — it does not commit — but it is unambiguous about how far off you are.
 
 ## The review file
 
-Everything above is kept in **`.git/difftui-review.json`**.
+Everything above is kept in **`.git/discobox-review.json`**.
 
 It is a file rather than a private data structure because the other reader of a
 review is increasingly an agent: something that wants to see what you objected
-to, fix it, answer the thread and mark it closed, without difftui being
+to, fix it, answer the thread and mark it closed, without discobox-review being
 involved at all. So the format is the interface, and it is arranged around
 being pleasant to read and hard to corrupt.
 
@@ -530,18 +530,18 @@ so they are safe to interleave with a window open on the same review, which
 picks the change up within the second.
 
 ```sh
-difftui base origin/main     # what the review is measured from, saved
-difftui diff                 # the review itself, with the line numbers below
-difftui comment server.go:42 "why not check the error here?"   # → t3
-difftui comment server.go:60-74 --by claude "this block is new"
-difftui reply t3 --by claude "good catch, fixing"
-difftui resolve t3
-difftui delete t3 1          # one remark of it; without the number, all of it
-difftui approve server.go
+discobox-review base origin/main     # what the review is measured from, saved
+discobox-review diff                 # the review itself, with the line numbers below
+discobox-review comment server.go:42 "why not check the error here?"   # → t3
+discobox-review comment server.go:60-74 --by claude "this block is new"
+discobox-review reply t3 --by claude "good catch, fixing"
+discobox-review resolve t3
+discobox-review delete t3 1          # one remark of it; without the number, all of it
+discobox-review approve server.go
 ```
 
 ```
-$ difftui diff
+$ discobox-review diff
 === server.go  +3  −1  uncommitted  2 open
         @@ -1,5 +1,7 @@
     1    package main
@@ -553,10 +553,10 @@ $ difftui diff
     6 +!
     7 +! func write() error { return nil }    <t2>
 
-$ difftui list --open
+$ discobox-review list --open
 t1   server.go:42             open     Darren Shepherd  why not check the error here?
 
-$ difftui show t1
+$ discobox-review show t1
 t1  server.go:42  open
     	return nil
 
@@ -566,7 +566,7 @@ t1  server.go:42  open
   [1] claude  2026-09-03T01:15:56Z
       good catch, fixing
 
-$ difftui status
+$ discobox-review status
 branch      feature
 base        origin/main
 merge-base  5e23e87
@@ -585,7 +585,7 @@ worth knowing are not in the file. **`merge-base`** is the commit the base and
 this branch last had in common — the ref can only name where to look for it —
 and **`unapproved`** counts the files there are to approve, where the file
 records only approvals. One fact to a line, so a script can read any of it
-without reading all of it: `difftui status | grep ^unapproved`.
+without reading all of it: `discobox-review status | grep ^unapproved`.
 
 `base-chosen no` appears when nothing pinned the base, so it may move when the
 branch does. `problem` appears instead of an error when the base could not be
@@ -621,8 +621,8 @@ none of that, which `git apply` will take.
 later command have to agree about what is under review. `--base REF` is the
 other thing — one diff seen from somewhere else, changing nothing.
 
-**`difftui <command> --help`** prints that one command in full: what it takes,
-what it is for, the flags it accepts and a line showing it used. `difftui help
+**`discobox-review <command> --help`** prints that one command in full: what it takes,
+what it is for, the flags it accepts and a line showing it used. `discobox-review help
 <command>` is the same question asked the other way. A flag belongs to the
 commands that take it and is refused by the rest — a command that quietly
 ignored a flag would be a command that did not do what it was told.
@@ -636,8 +636,8 @@ They work on the repository containing the current directory, and on the branch
 checked out there — the same branch swap the window does, so the two never
 disagree about which review they are looking at.
 
-`difftui approve` deliberately writes no digest, exactly as a hand-written
-approval does: difftui stamps in the change as it stands the next time it reads
+`discobox-review approve` deliberately writes no digest, exactly as a hand-written
+approval does: discobox-review stamps in the change as it stands the next time it reads
 the review, which is what keeps such an approval nullifiable like any other.
 `diff` and `status` do that reading, and nullify an approval whose file has
 moved since — a command that reported an approval as standing when the file had
@@ -654,12 +654,12 @@ The smallest useful edits are all one line:
   `side` defaults to `new`. Any unique id string is accepted, so an agent that
   wants to name its own may.
 - **Approve a file** — add `{"path": "x.go", "approved": true}` to `files`.
-  The digest may be left out; difftui stamps in the current one, after which
+  The digest may be left out; discobox-review stamps in the current one, after which
   the approval nullifies like any other. That is the point of stamping rather
   than treating a digest-less approval as stale: "approved" plainly means
   "approved as it is now".
 
-difftui **notices the file changing within a second** and puts it straight on
+discobox-review **notices the file changing within a second** and puts it straight on
 screen. It also **re-reads the file before every write of its own**, so a
 comment added a moment ago is not quietly dropped by the next approval — and it
 writes the whole file through a temporary file and a rename, so a reader
@@ -677,7 +677,7 @@ fires.
 ### One review per branch
 
 A review is *of a branch*, so checking out another one puts this one away:
-`.git/difftui-review.json` is moved to `.git/difftui-review.<branch>.json`, and
+`.git/discobox-review.json` is moved to `.git/discobox-review-review.<branch>.json`, and
 whatever was saved for the branch you are moving to is moved into place. It is
 done by moving files rather than by keying them all inside one because the live
 file is then always at one path, holding one review, in the flattest shape an
@@ -717,7 +717,7 @@ being written. The box keeps every readline key otherwise — `Ctrl-A`, `Ctrl-E`
 `Ctrl-Enter` is bound too, and on a modern terminal it works. A terminal has
 one byte for `Enter` — a carriage return — and on its own that is all
 `Ctrl-Enter` produces, which inside a text field has to stay a newline. Telling
-the two apart needs the terminal to be asked, so difftui asks: the view turns
+the two apart needs the terminal to be asked, so discobox-review asks: the view turns
 on **key disambiguation**, the base level of the Kitty keyboard protocol, along
 with `modifyOtherKeys`. Kitty, Ghostty, foot, WezTerm, recent iTerm2 and
 Windows Terminal all answer.
@@ -822,8 +822,8 @@ Double clicking a pane's title zooms it too.
 
 ### The mouse
 
-difftui takes the mouse, which means your terminal does not have it while
-difftui is running — so it gives the gesture back rather than leaving you with
+discobox-review takes the mouse, which means your terminal does not have it while
+discobox-review is running — so it gives the gesture back rather than leaving you with
 nothing.
 
 | Gesture | What it does |
@@ -888,7 +888,7 @@ the same pipe the text on screen came down, so a copy lands on the clipboard of
 the machine you are sitting at — over ssh, inside a container, through tmux —
 rather than on whatever clipboard the host running git happens to have.
 
-While difftui has the mouse, your terminal's own click-drag-to-select is gone.
+While discobox-review has the mouse, your terminal's own click-drag-to-select is gone.
 Most terminals bypass mouse reporting while **Shift** is held, so Shift-drag
 still gives you the terminal's selection — which is the way to select across
 two panes at once, or to copy out of the comment field.
@@ -926,7 +926,7 @@ it away.
 `e` opens the file the cursor is in with **`$EDITOR`**, or `vi` when that is
 unset. `$EDITOR` may carry arguments of its own — `code -w`, `emacsclient -nw`
 — and they are passed through. The whole terminal goes to the editor until it
-exits, and difftui rescans when it comes back, so the review picks up whatever
+exits, and discobox-review rescans when it comes back, so the review picks up whatever
 you did — including nullifying an approval of what the file used to say.
 
 While a commit is on screen the editor gets **that commit's** version, copied
@@ -1040,7 +1040,7 @@ always present, so rows never shift sideways.
 ### The gutter
 
 A unified diff puts `+` and `-` in the same column, so an added line's code
-starts immediately after its marker. difftui gives each side a column of its
+starts immediately after its marker. discobox-review gives each side a column of its
 own:
 
 ```
@@ -1090,7 +1090,7 @@ carries a comment in and out of it.
 | `internal/git/patch.go` | Unified diff parsing, splitting one diff into many files, and carrying a line number across a diff |
 | `internal/review/review.go` | The review document: approvals, digests, threads, and the JSON they live in |
 | `internal/review/store.go` | Reading and writing it, and the branch swap — shared by the window and the commands |
-| `internal/cli/cli.go` | difftui without the window: the subcommands |
+| `internal/cli/cli.go` | discobox-review without the window: the subcommands |
 | `internal/ui/model.go` | The Bubble Tea model: state, keys, actions |
 | `internal/ui/view.go` | Where each pane goes, the bars above and below them, and what the view asks of the screen |
 | `internal/ui/reviewview.go` | The stack: rows, folds, comment blocks, navigation |
@@ -1111,7 +1111,7 @@ carries a comment in and out of it.
 
 ### The system boundary
 
-Everything difftui does outside its own process goes through one interface,
+Everything discobox-review does outside its own process goes through one interface,
 `git.System` in `internal/git/system.go`: running git, the editor, and the few
 files it reads and writes directly because git has no command for them — its
 own review file among them. `Local` is the implementation that runs git as a
@@ -1125,7 +1125,7 @@ sufficient on its own. `internal/review` holds no I/O at all: loading and
 saving belong to the caller, which owns the boundary.
 
 Process I/O — `os.Stderr`, `os.Exit` in `main.go` — is deliberately not behind
-it: it is how difftui talks to its own terminal, not to a repository.
+it: it is how discobox-review talks to its own terminal, not to a repository.
 
 ## Tests
 

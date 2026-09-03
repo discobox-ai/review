@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/discobox-ai/difftui/internal/git"
+	"github.com/discobox-ai/review/internal/git"
 )
 
 // commitList is the pane at the bottom left: the commits this branch has made

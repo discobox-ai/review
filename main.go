@@ -1,4 +1,4 @@
-// Command difftui reviews a branch in a terminal.
+// Command discobox-review reviews a branch in a terminal.
 //
 // With no subcommand it opens the window. With one it reads or writes the same
 // review from a script — see the cli package.
@@ -21,9 +21,9 @@ import (
 	"golang.org/x/term"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/discobox-ai/difftui/internal/cli"
-	"github.com/discobox-ai/difftui/internal/git"
-	"github.com/discobox-ai/difftui/internal/ui"
+	"github.com/discobox-ai/review/internal/cli"
+	"github.com/discobox-ai/review/internal/git"
+	"github.com/discobox-ai/review/internal/ui"
 )
 
 var version = "dev"
@@ -34,21 +34,21 @@ func main() {
 	if len(os.Args) > 1 && cli.Is(os.Args[1]) {
 		repo, err := git.Open(".")
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "difftui:", err)
+			fmt.Fprintln(os.Stderr, "discobox-review:", err)
 			os.Exit(1)
 		}
 		if err := cli.Run(repo, os.Args[1:], os.Stdout); err != nil {
-			fmt.Fprintln(os.Stderr, "difftui:", err)
+			fmt.Fprintln(os.Stderr, "discobox-review:", err)
 			os.Exit(1)
 		}
 		return
 	}
 
 	showVersion := flag.Bool("version", false, "print the version and exit")
-	base := flag.String("base", "", "review from this ref instead of the one difftui works out")
+	base := flag.String("base", "", "review from this ref instead of the one discobox-review works out")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: difftui [-version] [-base <ref>] [path]\n"+
-			"       difftui <command> [args]\n\n"+
+		fmt.Fprintf(os.Stderr, "usage: discobox-review [-version] [-base <ref>] [path]\n"+
+			"       discobox-review <command> [args]\n\n"+
 			"Review a branch: every change from its merge base to the working\n"+
 			"tree, approved file by file and commented on line by line. With no\n"+
 			"path, the repository containing the current directory is used.\n\n")
@@ -59,19 +59,19 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("difftui", version)
+		fmt.Println("discobox-review", version)
 		return
 	}
 
 	// With nowhere to draw, opening the window would put a screenful of escape
 	// sequences down a pipe and then wait for keys that are never coming. What
-	// is nearly always meant by running difftui that way is "tell me how to
+	// is nearly always meant by running discobox-review that way is "tell me how to
 	// use this from a script", so that is what it does.
 	//
 	// The note goes to stderr and the usage to stdout, so that whatever asked
 	// gets the usable half on its own.
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
-		fmt.Fprintln(os.Stderr, "difftui: no terminal to draw in; these work without one.")
+		fmt.Fprintln(os.Stderr, "discobox-review: no terminal to draw in; these work without one.")
 		cli.Usage(os.Stdout)
 		return
 	}
@@ -83,7 +83,7 @@ func main() {
 
 	repo, err := git.Open(dir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "difftui:", err)
+		fmt.Fprintln(os.Stderr, "discobox-review:", err)
 		os.Exit(1)
 	}
 
@@ -92,7 +92,7 @@ func main() {
 	// settled here — see ui.Model.View.
 	p := tea.NewProgram(ui.New(repo, *base))
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "difftui:", err)
+		fmt.Fprintln(os.Stderr, "discobox-review:", err)
 		os.Exit(1)
 	}
 }

@@ -2,10 +2,11 @@ package review
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 
-	"github.com/discobox-ai/difftui/internal/git"
+	"github.com/discobox-ai/review/internal/git"
 )
 
 const patchText = `diff --git a/foo.txt b/foo.txt
@@ -33,7 +34,7 @@ func TestBytesAreReadable(t *testing.T) {
 
 	var doc map[string]any
 	if err := json.Unmarshal(s.Bytes(), &doc); err != nil {
-		t.Fatalf("what difftui wrote is not JSON: %v\n%s", err, s.Bytes())
+		t.Fatalf("what discobox-review wrote is not JSON: %v\n%s", err, s.Bytes())
 	}
 	if doc["branch"] != "feature/x" || doc["base"] != "origin/main" {
 		t.Errorf("branch/base = %v / %v", doc["branch"], doc["base"])
@@ -388,4 +389,96 @@ func TestOneLineCommentsSayNothingAboutLines(t *testing.T) {
 	if first, last := s.Threads[1].Span(); first != 8 || last != 10 {
 		t.Errorf("Span() = %d–%d, want 8–10", first, last)
 	}
+}
+
+// fakeFiles is a git directory's worth of files, for the store's own tests.
+type fakeFiles map[string]string
+
+func (f fakeFiles) ReadStateFile(name string) (string, bool) { s, ok := f[name]; return s, ok }
+func (f fakeFiles) WriteStateFile(name, content string) error {
+	f[name] = content
+	return nil
+}
+func (f fakeFiles) RenameStateFile(from, to string) error {
+	if s, ok := f[from]; ok {
+		f[to] = s
+		delete(f, from)
+	}
+	return nil
+}
+func (f fakeFiles) StateFileExists(name string) bool { _, ok := f[name]; return ok }
+
+// A review written when the program went by another name is still a review.
+func TestAReviewUnderTheOldNameIsCarriedOver(t *testing.T) {
+	old := New("main")
+	old.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "written long ago")
+
+	fs := fakeFiles{legacyFileName: string(old.Bytes())}
+	st, err := Load(fs, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Threads) != 1 || st.Threads[0].Comments[0].Body != "written long ago" {
+		t.Fatalf("the old review did not come across: %+v", st.Threads)
+	}
+	if _, still := fs[legacyFileName]; still {
+		t.Error("it was copied rather than moved, so there are now two")
+	}
+	if _, ok := fs[FileName]; !ok {
+		t.Errorf("it is not under the new name: %v", keysOf(fs))
+	}
+}
+
+// An archive comes over the first time its branch is looked at, which is the
+// only moment its name is known.
+func TestAnOldArchiveIsCarriedOverWhenItsBranchIsLookedAt(t *testing.T) {
+	old := New("feature/x")
+	old.Approve("a.go", "d", "Darren")
+	fs := fakeFiles{legacyArchiveName("feature/x"): string(old.Bytes())}
+
+	// Another branch: nothing of feature/x's is touched yet.
+	if _, err := Load(fs, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.StateFileExists(legacyArchiveName("feature/x")) {
+		t.Error("another branch's archive was moved before anybody asked for it")
+	}
+
+	st, err := Load(fs, "feature/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Approved("a.go") {
+		t.Errorf("the branch's own review did not come back: %v", keysOf(fs))
+	}
+}
+
+// A review already under the new name is left alone: an old one beside it is
+// older, and the newer must not be overwritten by it.
+func TestTheNewNameWinsOverTheOld(t *testing.T) {
+	current := New("main")
+	current.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "current")
+	stale := New("main")
+	stale.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "stale")
+
+	fs := fakeFiles{
+		FileName:       string(current.Bytes()),
+		legacyFileName: string(stale.Bytes()),
+	}
+	st, err := Load(fs, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Threads[0].Comments[0].Body != "current" {
+		t.Error("the older file overwrote the newer one")
+	}
+}
+
+func keysOf(fs fakeFiles) []string {
+	var out []string
+	for k := range fs {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

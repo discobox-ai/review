@@ -15,11 +15,11 @@ import (
 var binary string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "difftui-main")
+	dir, err := os.MkdirTemp("", "discobox-review-main")
 	if err != nil {
 		panic(err)
 	}
-	binary = filepath.Join(dir, "difftui")
+	binary = filepath.Join(dir, "discobox-review")
 	out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput()
 	if err != nil {
 		panic(string(out))
@@ -58,9 +58,9 @@ func repoDir(t *testing.T) string {
 	return dir
 }
 
-// difftui runs the program with its output captured, which is to say with no
-// terminal anywhere near it — the way anything but a person runs it.
-func difftui(t *testing.T, dir string, args ...string) (stdout, stderr string, code int) {
+// runBin runs the built program with its output captured, which is to say with
+// no terminal anywhere near it — the way anything but a person runs it.
+func runBin(t *testing.T, dir string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = dir
@@ -70,21 +70,21 @@ func difftui(t *testing.T, dir string, args ...string) (stdout, stderr string, c
 	if ee, ok := err.(*exec.ExitError); ok {
 		code = ee.ExitCode()
 	} else if err != nil {
-		t.Fatalf("running difftui %v: %v", args, err)
+		t.Fatalf("running discobox-review %v: %v", args, err)
 	}
 	return out.String(), errs.String(), code
 }
 
-// With nowhere to draw, difftui says what it can do without a terminal rather
+// With nowhere to draw, discobox-review says what it can do without a terminal rather
 // than putting a screenful of escape sequences down a pipe and then waiting
 // for keys that are never coming.
 func TestNoTerminalPrintsWhatWorksWithoutOne(t *testing.T) {
-	stdout, stderr, code := difftui(t, repoDir(t))
+	stdout, stderr, code := runBin(t, repoDir(t))
 
 	if code != 0 {
 		t.Errorf("exit %d, want 0: this is an answer, not a refusal", code)
 	}
-	for _, want := range []string{"difftui diff", "difftui comment", "difftui list"} {
+	for _, want := range []string{"discobox-review diff", "discobox-review comment", "discobox-review list"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout does not offer %q:\n%s", want, stdout)
 		}
@@ -110,32 +110,32 @@ func TestNoTerminalPrintsWhatWorksWithoutOne(t *testing.T) {
 func TestSubcommandsWorkWithNoTerminal(t *testing.T) {
 	dir := repoDir(t)
 
-	if _, _, code := difftui(t, dir, "base", "main"); code != 0 {
+	if _, _, code := runBin(t, dir, "base", "main"); code != 0 {
 		t.Fatalf("base exited %d", code)
 	}
-	if out, _, code := difftui(t, dir, "comment", "a.txt:1", "why one?"); code != 0 ||
+	if out, _, code := runBin(t, dir, "comment", "a.txt:1", "why one?"); code != 0 ||
 		!strings.HasPrefix(out, "t1") {
 		t.Fatalf("comment exited %d printing %q", code, out)
 	}
-	out, _, code := difftui(t, dir, "list")
+	out, _, code := runBin(t, dir, "list")
 	if code != 0 || !strings.Contains(out, "why one?") {
 		t.Errorf("list exited %d printing %q", code, out)
 	}
 
 	// And a bad one still fails, rather than falling back to the usage and
 	// looking like it worked.
-	if _, stderr, code := difftui(t, dir, "show", "nope"); code == 0 {
+	if _, stderr, code := runBin(t, dir, "show", "nope"); code == 0 {
 		t.Errorf("a bad command exited 0, saying %q", stderr)
 	}
 }
 
 // -version needs no terminal either, and must not be answered with the usage.
 func TestVersionWithNoTerminal(t *testing.T) {
-	stdout, _, code := difftui(t, repoDir(t), "-version")
-	if code != 0 || !strings.HasPrefix(stdout, "difftui ") {
+	stdout, _, code := runBin(t, repoDir(t), "-version")
+	if code != 0 || !strings.HasPrefix(stdout, "discobox-review ") {
 		t.Errorf("-version exited %d printing %q", code, stdout)
 	}
-	if strings.Contains(stdout, "difftui diff") {
+	if strings.Contains(stdout, "discobox-review diff") {
 		t.Errorf("-version was answered with the usage:\n%s", stdout)
 	}
 }

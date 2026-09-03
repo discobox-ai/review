@@ -12,8 +12,8 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/discobox-ai/difftui/internal/git"
-	"github.com/discobox-ai/difftui/internal/review"
+	"github.com/discobox-ai/review/internal/git"
+	"github.com/discobox-ai/review/internal/review"
 )
 
 // ---------------------------------------------------------------------------
@@ -879,7 +879,7 @@ func TestCommentsSurviveTheChangeGoingAway(t *testing.T) {
 // The review file as an interface
 // ---------------------------------------------------------------------------
 
-// Something else writes the review; difftui picks it up.
+// Something else writes the review; discobox-review picks it up.
 func TestAnAgentsEditIsPickedUp(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
@@ -933,14 +933,14 @@ func TestAHalfWrittenReviewIsNotTakenSeriously(t *testing.T) {
 	}
 }
 
-// difftui re-reads the file before every write of its own, so a comment an
+// discobox-review re-reads the file before every write of its own, so a comment an
 // agent added a moment ago is not quietly dropped by the next approval.
 func TestAConcurrentEditIsNotClobbered(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "mine")
 
-	// Somebody else appends a thread without difftui noticing.
+	// Somebody else appends a thread without discobox-review noticing.
 	st := reviewJSON(t, m.repo)
 	st.Start(&review.Thread{Path: "bar.txt", Side: review.SideNew, Line: 1}, "claude", "theirs")
 	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
@@ -2425,7 +2425,7 @@ func TestSplitWaitsForTheRoom(t *testing.T) {
 // A large review still has its colours.
 //
 // Highlighting used to be governed by a budget over the review as a whole, and
-// difftui's own source went past it: every file was drawn plain, and nothing
+// discobox-review's own source went past it: every file was drawn plain, and nothing
 // said why. The limit is per file now, because you read one file at a time —
 // a review being large is no reason for the thirty line file in it to lose its
 // colours.

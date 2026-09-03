@@ -1,7 +1,7 @@
-// Package cli is difftui without the window: the review read and written from
+// Package cli is discobox-review without the window: the review read and written from
 // a command line.
 //
-// The review has always been a file so that something other than difftui could
+// The review has always been a file so that something other than discobox-review could
 // act on it. These are that something's hands. An agent answering a remark can
 // run one command rather than parse, edit and re-emit a JSON document, and get
 // the ids, the timestamps and the branch swap right by construction — and a
@@ -20,8 +20,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/discobox-ai/difftui/internal/git"
-	"github.com/discobox-ai/difftui/internal/review"
+	"github.com/discobox-ai/review/internal/git"
+	"github.com/discobox-ai/review/internal/review"
 )
 
 // Command is one subcommand: what it is called, what it takes, and what it is
@@ -31,7 +31,7 @@ import (
 type Command struct {
 	Name, Args, What string
 
-	// Long is the paragraph `difftui <name> --help` prints, and Example the
+	// Long is the paragraph `discobox-review <name> --help` prints, and Example the
 	// line under it. Both are empty for a command with nothing to add.
 	Long, Example string
 
@@ -52,7 +52,7 @@ var Commands = []Command{
 			"about it.\n\n" +
 			"--stat prints the headings alone. --raw prints the plain unified\n" +
 			"diff with none of that, which git apply will take.",
-		Example: "difftui diff --path internal/git/git.go",
+		Example: "discobox-review diff --path internal/git/git.go",
 	},
 	{
 		Name: "base", Args: "[<ref>] [--auto]", What: "show or set what it is measured from",
@@ -60,41 +60,41 @@ var Commands = []Command{
 		Long: "With no argument it says where the review starts. With one it moves\n" +
 			"it there, and saves: the base is part of the review, so the window\n" +
 			"and every later command agree about what is under review. --auto\n" +
-			"hands it back to whatever difftui works out.\n\n" +
+			"hands it back to whatever discobox-review works out.\n\n" +
 			"The --base flag on diff and status is the other thing — one command\n" +
 			"seen from somewhere else, changing nothing.",
-		Example: "difftui base origin/main",
+		Example: "discobox-review base origin/main",
 	},
 	{
 		Name: "list", Args: "[--path P] [--open] [--resolved]", What: "list the comments",
 		Flags:   []string{"path", "open", "resolved"},
 		Long:    "One conversation to a line: its id, where it is, whether anybody is\nstill waiting on it, who started it, and what they said.",
-		Example: "difftui list --open",
+		Example: "discobox-review list --open",
 	},
 	{
 		Name: "show", Args: "<id>", What: "one conversation in full",
 		Long:    "Every remark on it, numbered, so that one of them can be deleted by\nnumber.",
-		Example: "difftui show t3",
+		Example: "discobox-review show t3",
 	},
 	{
 		Name: "comment", Args: "<path>:<line>[-<line>] <body>", What: "start a conversation",
 		Flags: []string{"by", "side"},
 		Long: "A place is written path:line, or path:line-line for a block — the way\n" +
 			"a place in a review is written in an error message or a stack trace.\n" +
-			"The numbers are the ones difftui diff prints.\n\n" +
+			"The numbers are the ones discobox-review diff prints.\n\n" +
 			"--side old anchors to a line the change removed, which has no line in\n" +
 			"the file as it now stands.",
-		Example: `difftui comment server.go:42 "why not check the error here?"`,
+		Example: `discobox-review comment server.go:42 "why not check the error here?"`,
 	},
 	{
 		Name: "reply", Args: "<id> <body>", What: "answer one",
 		Flags:   []string{"by"},
-		Example: `difftui reply t3 --by claude "good catch, fixing"`,
+		Example: `discobox-review reply t3 --by claude "good catch, fixing"`,
 	},
 	{
 		Name: "resolve", Args: "<id>…", What: "close one",
 		Long:    "Closing a conversation keeps the record of what was asked and\nanswered, which is nearly always what you want instead of deleting it.",
-		Example: "difftui resolve t1 t2",
+		Example: "discobox-review resolve t1 t2",
 	},
 	{Name: "reopen", Args: "<id>…", What: "open one again"},
 	{
@@ -103,16 +103,16 @@ var Commands = []Command{
 			"prints them. Without, it deletes the whole conversation. Taking the\n" +
 			"last remark out takes the conversation with it: an anchor on a line\n" +
 			"with nothing to say is not a thing to leave behind.",
-		Example: "difftui delete t3 1",
+		Example: "discobox-review delete t3 1",
 	},
 	{
 		Name: "approve", Args: "<path>…", What: "sign off a file",
 		Flags: []string{"by"},
 		Long: "No digest is written, exactly as a hand-written approval leaves none:\n" +
-			"difftui stamps in the change as it stands the next time anything\n" +
+			"discobox-review stamps in the change as it stands the next time anything\n" +
 			"reads the review, which is what keeps such an approval nullifiable.\n" +
 			"Edit the file afterwards and the approval falls.",
-		Example: "difftui approve internal/git/git.go",
+		Example: "discobox-review approve internal/git/git.go",
 	},
 	{Name: "unapprove", Args: "<path>…", What: "take that back"},
 	{
@@ -124,7 +124,7 @@ var Commands = []Command{
 			"there are to approve.\n\n" +
 			"One fact to a line, so a script can read any of it without reading\n" +
 			"all of it.",
-		Example: "difftui status | grep ^unapproved",
+		Example: "discobox-review status | grep ^unapproved",
 	},
 }
 
@@ -136,7 +136,7 @@ var flagHelp = map[string]string{
 	"context":  "lines of context either side",
 	"stat":     "the headings alone, without the diff under them",
 	"raw":      "the plain unified diff, for piping somewhere else",
-	"auto":     "let difftui work the base out again",
+	"auto":     "let discobox-review work the base out again",
 	"by":       "who a remark is from (default: git's user.name)",
 	"side":     "old, to anchor to a line the change removed",
 	"open":     "only what is still open",
@@ -253,17 +253,17 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 	return nil
 }
 
-// Usage lists the commands. It is what `difftui help` prints, and what a
-// difftui with nowhere to draw prints instead of opening a window.
+// Usage lists the commands. It is what `discobox-review help` prints, and what a
+// discobox-review with nowhere to draw prints instead of opening a window.
 func Usage(out io.Writer) {
-	fmt.Fprintln(out, "difftui reviews a branch. With no command it opens a window;")
+	fmt.Fprintln(out, "discobox-review reviews a branch. With no command it opens a window;")
 	fmt.Fprintln(out, "these read and write the same review from a script.")
 	fmt.Fprintln(out)
 	for _, c := range Commands {
-		fmt.Fprintf(out, "  difftui %-9s %-32s %s\n", c.Name, c.Args, c.What)
+		fmt.Fprintf(out, "  discobox-review %-9s %-32s %s\n", c.Name, c.Args, c.What)
 	}
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "  difftui <command> --help   what that one does, in full")
+	fmt.Fprintln(out, "  discobox-review <command> --help   what that one does, in full")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "The review is .git/"+review.FileName+", and a window open on it")
 	fmt.Fprintln(out, "picks these changes up within the second.")
@@ -276,7 +276,7 @@ func helpFor(out io.Writer, name string) error {
 	if !ok {
 		return fmt.Errorf("no such command: %s", name)
 	}
-	fmt.Fprintf(out, "difftui %s %s\n", c.Name, c.Args)
+	fmt.Fprintf(out, "discobox-review %s %s\n", c.Name, c.Args)
 	fmt.Fprintf(out, "  %s\n", c.What)
 	if c.Long != "" {
 		fmt.Fprintln(out)
@@ -371,7 +371,7 @@ func parseFlags(c Command, args []string) (options, []string, error) {
 			err = fmt.Errorf("no such flag: --%s", name)
 		}
 		if err == nil && !c.takes(name) {
-			err = fmt.Errorf("%s takes no --%s; see difftui %s --help", c.Name, name, c.Name)
+			err = fmt.Errorf("%s takes no --%s; see discobox-review %s --help", c.Name, name, c.Name)
 		}
 		if err != nil {
 			return o, nil, err
@@ -681,7 +681,7 @@ func status(out io.Writer, repo *git.Repo, st *review.State, branch string, o op
 // The window does this on every scan; a command that did not would report an
 // approval as standing when the file had moved under it, which is the one
 // thing an approval is supposed to be unable to do. It also stamps in the
-// digest of an approval given without one — which is how `difftui approve`
+// digest of an approval given without one — which is how `discobox-review approve`
 // leaves it — so such an approval becomes nullifiable as soon as anything
 // reads the review.
 //
@@ -812,7 +812,7 @@ func setApproved(st *review.State, repo *git.Repo, args []string, o options, wan
 	}
 	for _, path := range args {
 		if want {
-			// No digest: difftui stamps in the change as it stands the next
+			// No digest: discobox-review stamps in the change as it stands the next
 			// time it reads the review, which is what makes an approval given
 			// here nullifiable like any other.
 			st.Approve(path, "", who(repo, o))

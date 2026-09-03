@@ -6,7 +6,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Colours chosen to echo the Tk git-gui palette difftui grew out of:
+// Colours chosen to echo the Tk git-gui palette discobox-review grew out of:
 // lightsalmon for the file list, lavender for the history and gold for the
 // review's own heading.
 var (
@@ -131,7 +131,7 @@ func bands(dark bool) (addBg, addEmphBg, delBg, delEmphBg color.Color) {
 }
 
 // newStyles builds the palette. dark says what the terminal's own background
-// is, which difftui asks the terminal for and is told once it answers.
+// is, which discobox-review asks the terminal for and is told once it answers.
 func newStyles(dark bool) *styles {
 	s := &styles{}
 	colAddBg, colAddEmphBg, colDelBg, colDelEmphBg := bands(dark)

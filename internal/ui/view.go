@@ -152,7 +152,7 @@ func (m *Model) leftCollapsed() bool {
 // View renders the whole window.
 //
 // The view carries the screen's state as well as its content: the alternate
-// screen, the mouse, and the keyboard enhancements difftui would like the
+// screen, the mouse, and the keyboard enhancements discobox-review would like the
 // terminal to turn on. In v1 those were program options settled once at
 // startup; here they are part of what the model says the screen should be,
 // which is the same thing said in the place it belongs.
@@ -167,7 +167,7 @@ func (m Model) View() tea.View {
 	// disambiguation — which is the whole reason this is here. It is what
 	// lets Ctrl-Enter be told apart from Enter on the terminals that can do
 	// it. The rest of the protocol, key release events and alternate key
-	// codes, is data difftui would never read. Terminals that support none of
+	// codes, is data discobox-review would never read. Terminals that support none of
 	// it are no worse off: the keys arrive the way they always did.
 	v.KeyboardEnhancements = tea.KeyboardEnhancements{}
 	return v
@@ -457,7 +457,7 @@ func (m Model) hints() string {
 
 func helpText() string {
 	return strings.Join([]string{
-		"difftui reviews a branch. It reads a repository and never writes one:",
+		"discobox-review reviews a branch. It reads a repository and never writes one:",
 		"nothing here stages, commits, or rewrites anything.",
 		"",
 		"The review is every change between the merge base and the working",
@@ -604,15 +604,15 @@ func helpText() string {
 		"───────────────────────────────────────────────────────────────",
 		"The review file",
 		"",
-		"  There are subcommands for all of this too — difftui diff, list,",
+		"  There are subcommands for all of this too — discobox-review diff, list,",
 		"  comment, reply, resolve, delete, approve — so an agent can read",
 		"  the change and act on it without a window. The line numbers",
-		"  difftui diff prints are the ones difftui comment takes.",
-		"  difftui help lists them.",
+		"  discobox-review diff prints are the ones discobox-review comment takes.",
+		"  discobox-review help lists them.",
 		"",
-		"  Everything above is kept in .git/difftui-review.json, which is",
+		"  Everything above is kept in .git/discobox-review.json, which is",
 		"  meant to be read and written by other things — an agent that",
-		"  answers your comments, or approves what it has fixed. difftui",
+		"  answers your comments, or approves what it has fixed. discobox-review",
 		"  notices the file changing and picks it up within a second, and",
 		"  re-reads it before every write of its own, so both of you can",
 		"  work on the same review at once.",

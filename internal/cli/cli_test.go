@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/discobox-ai/difftui/internal/git"
-	"github.com/discobox-ai/difftui/internal/review"
+	"github.com/discobox-ai/review/internal/git"
+	"github.com/discobox-ai/review/internal/review"
 )
 
 // testRepo builds a throwaway repository on a branch with one change on it.
@@ -65,7 +65,7 @@ func run(t *testing.T, repo *git.Repo, args ...string) string {
 	t.Helper()
 	var out strings.Builder
 	if err := Run(repo, args, &out); err != nil {
-		t.Fatalf("difftui %s: %v", strings.Join(args, " "), err)
+		t.Fatalf("discobox-review %s: %v", strings.Join(args, " "), err)
 	}
 	return out.String()
 }
@@ -75,7 +75,7 @@ func fails(t *testing.T, repo *git.Repo, args ...string) {
 	t.Helper()
 	var out strings.Builder
 	if err := Run(repo, args, &out); err == nil {
-		t.Errorf("difftui %s succeeded, printing %q", strings.Join(args, " "), out.String())
+		t.Errorf("discobox-review %s succeeded, printing %q", strings.Join(args, " "), out.String())
 	}
 }
 
@@ -239,7 +239,7 @@ func TestShow(t *testing.T) {
 	}
 }
 
-// Approving from a command leaves the digest out, so difftui stamps in the
+// Approving from a command leaves the digest out, so discobox-review stamps in the
 // change as it stands when it next reads the review — which is what makes an
 // approval given here nullifiable like any other.
 func TestApproving(t *testing.T) {
@@ -250,7 +250,7 @@ func TestApproving(t *testing.T) {
 		t.Fatalf("files = %+v", st.Files)
 	}
 	if got := st.FileFor("server.go"); got.Digest != "" {
-		t.Errorf("digest = %q, want it left for difftui to stamp", got.Digest)
+		t.Errorf("digest = %q, want it left for discobox-review to stamp", got.Digest)
 	}
 	if got := st.FileFor("server.go").By; got != "Test" {
 		t.Errorf("by %q", got)
@@ -450,7 +450,7 @@ func TestHelpNamesEveryCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range Commands {
-		if !strings.Contains(out.String(), "difftui "+c.Name) {
+		if !strings.Contains(out.String(), "discobox-review "+c.Name) {
 			t.Errorf("help does not mention %q:\n%s", c.Name, out.String())
 		}
 		if !Is(c.Name) {
@@ -573,7 +573,7 @@ func TestDiffStatAndRaw(t *testing.T) {
 		t.Errorf("--raw says +%d −%d, want +1 −1", adds, dels)
 	}
 	if strings.Contains(raw, "===") {
-		t.Errorf("--raw carries difftui's own headings:\n%s", raw)
+		t.Errorf("--raw carries discobox-review's own headings:\n%s", raw)
 	}
 }
 
@@ -641,7 +641,7 @@ func TestEveryCommandHasItsOwnHelp(t *testing.T) {
 		if short := run(t, repo, c.Name, "-h"); short != viaFlag {
 			t.Errorf("%s -h differs from --help", c.Name)
 		}
-		if !strings.Contains(viaFlag, "difftui "+c.Name) {
+		if !strings.Contains(viaFlag, "discobox-review "+c.Name) {
 			t.Errorf("%s --help does not name itself:\n%s", c.Name, viaFlag)
 		}
 		if !strings.Contains(viaFlag, c.What) {
@@ -686,7 +686,7 @@ func TestFlagsBelongToTheirCommands(t *testing.T) {
 	// The refusal says where to look.
 	var out strings.Builder
 	err := Run(repo, []string{"list", "--stat"}, &out)
-	if err == nil || !strings.Contains(err.Error(), "difftui list --help") {
+	if err == nil || !strings.Contains(err.Error(), "discobox-review list --help") {
 		t.Errorf("refusal = %v, want it to point at the command's own help", err)
 	}
 }
@@ -733,7 +733,7 @@ func TestHelpForNothingInParticular(t *testing.T) {
 	// Bare help still lists them all, and points at the per-command pages.
 	got := run(t, repo, "help")
 	for _, c := range Commands {
-		if !strings.Contains(got, "difftui "+c.Name) {
+		if !strings.Contains(got, "discobox-review "+c.Name) {
 			t.Errorf("the listing is missing %q", c.Name)
 		}
 	}

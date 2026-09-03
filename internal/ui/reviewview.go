@@ -4,8 +4,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/discobox-ai/difftui/internal/git"
-	"github.com/discobox-ai/difftui/internal/review"
+	"github.com/discobox-ai/review/internal/git"
+	"github.com/discobox-ai/review/internal/review"
 )
 
 // The review pane: every file's diff in one column, in one scroll, with the

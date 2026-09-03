@@ -1,10 +1,10 @@
 // Package review is the state of a review: which files have been approved,
 // and what has been said about which lines.
 //
-// It is deliberately a plain document. difftui keeps it in a JSON file in the
+// It is deliberately a plain document. discobox-review keeps it in a JSON file in the
 // git directory rather than in its own memory, because the other reader of a
 // review is increasingly an agent: something that wants to see what you
-// objected to, answer it, and mark the thread closed, without difftui being
+// objected to, answer it, and mark the thread closed, without discobox-review being
 // involved at all. So the format is the interface, and everything here is
 // arranged around that being pleasant to read and hard to corrupt.
 //
@@ -22,18 +22,24 @@ import (
 	"strings"
 	"time"
 
-	"github.com/discobox-ai/difftui/internal/git"
+	"github.com/discobox-ai/review/internal/git"
 )
 
 // FileName is where the review lives, inside the git directory. A branch's
 // review is moved aside under ArchiveName when another branch is checked out,
 // so this path always holds the review of whatever is checked out now.
-const FileName = "difftui-review.json"
+const FileName = "discobox-review.json"
 
 // ArchiveName is where the review of a branch waits while a different branch
 // is checked out.
 func ArchiveName(branch string) string {
-	return "difftui-review." + strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(branch) + ".json"
+	return "discobox-review." + safeBranch(branch) + ".json"
+}
+
+// safeBranch is a branch name that can be one path component: a branch may
+// hold slashes, and a file name may not.
+func safeBranch(branch string) string {
+	return strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(branch)
 }
 
 // Version is the schema version written into every file. It exists so that a
@@ -54,7 +60,7 @@ type State struct {
 	Version int `json:"version"`
 
 	// Branch and Base say what this review is of. Base is the ref, empty when
-	// difftui is left to work one out.
+	// discobox-review is left to work one out.
 	Branch string `json:"branch"`
 	Base   string `json:"base,omitempty"`
 
@@ -131,7 +137,7 @@ func New(branch string) *State {
 
 // Parse reads a review. A file that is not valid JSON is an error rather than
 // an empty review, so that a half written one — an agent caught mid-save —
-// leaves what difftui already has on screen instead of wiping it.
+// leaves what discobox-review already has on screen instead of wiping it.
 func Parse(data []byte) (*State, error) {
 	if strings.TrimSpace(string(data)) == "" {
 		return nil, fmt.Errorf("the review is empty")
@@ -351,7 +357,7 @@ func nextID(threads []*Thread) string {
 	return "t" + strconv.Itoa(highest+1)
 }
 
-// NextID is the id difftui gives the next thread it starts.
+// NextID is the id discobox-review gives the next thread it starts.
 func (s *State) NextID() string { return nextID(s.Threads) }
 
 // Start opens a thread with its first comment in it.

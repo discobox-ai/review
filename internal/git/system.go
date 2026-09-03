@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// System is every call difftui makes outside its own process: running git, and
+// System is every call discobox-review makes outside its own process: running git, and
 // the handful of files it touches directly rather than through git.
 //
 // Everything else in this package is built on it, so a different backend — a
@@ -24,9 +24,9 @@ type System interface {
 	// error, and the output collected so far is still returned.
 	Git(dir string, stdin []byte, args ...string) (string, error)
 
-	// The files difftui reads and writes directly. These are the ones git has
+	// The files discobox-review reads and writes directly. These are the ones git has
 	// no command for: the merge and squash messages it leaves in the git
-	// directory, the commit template, and difftui's own saved commit message.
+	// directory, the commit template, and discobox-review's own saved commit message.
 	ReadFile(path string) ([]byte, error)
 	WriteFile(path string, data []byte) error
 	Remove(path string) error
@@ -42,7 +42,7 @@ type System interface {
 	WriteTempFile(name string, data []byte) (string, error)
 
 	// Editor builds the command that opens path in the user's editor, run in
-	// dir. It is the only thing difftui runs that is not git, and the only
+	// dir. It is the only thing discobox-review runs that is not git, and the only
 	// one that takes the terminal over while it lasts.
 	Editor(dir, path string) Editor
 
@@ -64,7 +64,7 @@ type Editor interface {
 	SetStderr(io.Writer)
 }
 
-// FileInfo is the part of a stat difftui uses. It is deliberately small: a
+// FileInfo is the part of a stat discobox-review uses. It is deliberately small: a
 // remote backend should not have to synthesise a full fs.FileInfo to answer
 // "does this exist", "which of these two is newer", and "has this file changed
 // since I last read it" — the last of which wants the size as well, since a
@@ -77,7 +77,7 @@ type FileInfo struct {
 }
 
 // Local is the System that runs git as a child process and reads files from
-// the machine difftui is running on. It is the default.
+// the machine discobox-review is running on. It is the default.
 type Local struct{}
 
 var _ System = Local{}
@@ -137,7 +137,7 @@ func (Local) Rename(oldPath, newPath string) error { return os.Rename(oldPath, n
 // os.CreateTemp would pick, is what lets an editor recognise the file type;
 // the fresh directory is what keeps the name from colliding.
 func (Local) WriteTempFile(name string, data []byte) (string, error) {
-	dir, err := os.MkdirTemp("", "difftui-")
+	dir, err := os.MkdirTemp("", "discobox-review-")
 	if err != nil {
 		return "", err
 	}
@@ -149,7 +149,7 @@ func (Local) WriteTempFile(name string, data []byte) (string, error) {
 	return path, nil
 }
 
-// Stat reports what difftui needs to know about a path.
+// Stat reports what discobox-review needs to know about a path.
 func (Local) Stat(path string) (FileInfo, error) {
 	info, err := os.Stat(path)
 	if err != nil {

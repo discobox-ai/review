@@ -13,8 +13,8 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/discobox-ai/difftui/internal/git"
-	"github.com/discobox-ai/difftui/internal/review"
+	"github.com/discobox-ai/review/internal/git"
+	"github.com/discobox-ai/review/internal/review"
 )
 
 type focusArea int
@@ -34,7 +34,7 @@ const (
 )
 
 // reloadInterval is how often the review file is checked for changes made
-// outside difftui.
+// outside discobox-review.
 //
 // It is polled rather than watched because polling one small file once a
 // second costs nothing measurable and works the same on every filesystem a
@@ -49,7 +49,7 @@ const reloadInterval = time.Second
 // size of the change, so there has to be a limit somewhere. It is per file
 // rather than over the review as a whole, because you read one file at a time:
 // a review being large is no reason for the thirty line file in it to lose its
-// colours. This used to be a budget over the whole review, and difftui's own
+// colours. This used to be a budget over the whole review, and discobox-review's own
 // source tripped it — every file went plain, and nothing said why.
 const maxLexLines = 10000
 
@@ -71,7 +71,7 @@ type Model struct {
 	zoom  bool
 
 	// What is being reviewed. baseRef is what the user asked for, empty to
-	// let difftui work one out; base is what that came to.
+	// let discobox-review work one out; base is what that came to.
 	branch  string
 	baseRef string
 	base    git.Base
@@ -166,7 +166,7 @@ type compose struct {
 // New builds the initial model for a repository.
 //
 // base is the ref the review is measured from, or empty to take whatever the
-// saved review names and, failing that, whatever difftui works out.
+// saved review names and, failing that, whatever discobox-review works out.
 func New(repo *git.Repo, base string) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Write a comment"
@@ -255,7 +255,7 @@ type fileMsg struct {
 }
 
 // rescanCmd asks git everything, and builds the stack, off the render path.
-// Parsing and lexing a whole review is the one expensive thing difftui does,
+// Parsing and lexing a whole review is the one expensive thing discobox-review does,
 // and doing it here means a big change never makes the window stutter.
 func (m Model) rescanCmd() tea.Cmd {
 	repo, baseRef, context := m.repo, m.baseRef, m.context
@@ -364,7 +364,7 @@ func buildFiles(diff, pending string, states map[string]git.State) []*reviewFile
 //
 // One file's colours have nothing to do with another's, and this already runs
 // off the render path, so the only thing standing between a review and its
-// syntax is wall clock — which is what more than one core is for. difftui's
+// syntax is wall clock — which is what more than one core is for. discobox-review's
 // own source goes from about nine tenths of a second to under two.
 func lexAll(files []*reviewFile) {
 	var wg sync.WaitGroup
@@ -616,7 +616,7 @@ func (m *Model) readReview() (base string) {
 }
 
 // writeReview saves the review, and remembers what it wrote so that the next
-// tick does not mistake difftui's own write for somebody else's.
+// tick does not mistake discobox-review's own write for somebody else's.
 func (m *Model) writeReview() {
 	m.rv.Branch = m.branch
 	m.rv.Base = m.baseRef
@@ -629,7 +629,7 @@ func (m *Model) writeReview() {
 
 // mutate changes the review and saves it, re-reading first.
 //
-// The re-read is what makes difftui and an agent able to work on the same
+// The re-read is what makes discobox-review and an agent able to work on the same
 // review at the same time. Neither can lock the file, but both write it whole,
 // so a change applied to what is on disk right now — rather than to what was
 // on disk when the window was last drawn — cannot quietly drop a comment
@@ -644,7 +644,7 @@ func (m *Model) mutate(fn func(*review.State)) {
 }
 
 // pickUpChanges is the poll: it notices the review file being written by
-// something that is not difftui and takes the change straight onto the screen.
+// something that is not discobox-review and takes the change straight onto the screen.
 func (m *Model) pickUpChanges() tea.Cmd {
 	if !m.ready {
 		return nil
@@ -935,7 +935,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Quit):
 		return m.doQuit()
 	case key.Matches(msg, m.keys.Help):
-		m.dialog = textDialog("difftui — keys", helpText())
+		m.dialog = textDialog("discobox-review — keys", helpText())
 		return m, nil
 	case key.Matches(msg, m.keys.Post):
 		return m.doPost()
@@ -981,7 +981,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.QuitKey):
 		return m.doQuit()
 	case key.Matches(msg, m.keys.HelpKey):
-		m.dialog = textDialog("difftui — keys", helpText())
+		m.dialog = textDialog("discobox-review — keys", helpText())
 		return m, nil
 	case key.Matches(msg, m.keys.RescanKey):
 		return m.doRescan()
@@ -2030,7 +2030,7 @@ func commitItem(c git.Commit) string {
 }
 
 const (
-	autoBase   = "(let difftui choose)"
+	autoBase   = "(let discobox-review choose)"
 	commitBase = "Pick a commit…"
 	otherBase  = "Other ref…"
 )

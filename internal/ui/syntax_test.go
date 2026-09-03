@@ -7,7 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
-	"github.com/discobox-ai/difftui/internal/git"
+	"github.com/discobox-ai/review/internal/git"
 )
 
 // These tests read the escape sequences a row renders as. Nothing has to be

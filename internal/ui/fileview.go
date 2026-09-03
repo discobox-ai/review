@@ -3,7 +3,7 @@ package ui
 import (
 	"strings"
 
-	"github.com/discobox-ai/difftui/internal/git"
+	"github.com/discobox-ai/review/internal/git"
 )
 
 // fileView is the full screen reader that v opens: a whole file, rather than

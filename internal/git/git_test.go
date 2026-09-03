@@ -31,7 +31,7 @@ func testRepo(t *testing.T) *Repo {
 	return r
 }
 
-// run drives git directly. difftui itself no longer stages or commits, so the
+// run drives git directly. discobox-review itself no longer stages or commits, so the
 // tests have to build the states they want to read.
 func run(t *testing.T, r *Repo, args ...string) string {
 	t.Helper()
@@ -162,7 +162,7 @@ func TestPendingDiffNamesOnlyUncommittedLines(t *testing.T) {
 }
 
 // A repository with no base and nothing pushed still has a review: what has
-// not been committed. Falling back to HEAD is what stops difftui opening on an
+// not been committed. Falling back to HEAD is what stops discobox-review opening on an
 // empty window in a repository that has no remote.
 func TestRescanFallsBackToHEADWithNoRemote(t *testing.T) {
 	r := testRepo(t)
@@ -176,7 +176,7 @@ func TestRescanFallsBackToHEADWithNoRemote(t *testing.T) {
 		t.Errorf("base ref = %q, want HEAD", scan.Base.Ref)
 	}
 	if !scan.Base.Auto {
-		t.Error("a base difftui worked out is not marked as automatic")
+		t.Error("a base discobox-review worked out is not marked as automatic")
 	}
 	if !strings.Contains(scan.Diff, "+TWO") {
 		t.Errorf("uncommitted change missing from the review:\n%s", scan.Diff)
@@ -285,7 +285,7 @@ func TestBaseFollowsTheUpstream(t *testing.T) {
 	}
 }
 
-// A ref the user named wins over anything difftui would have worked out.
+// A ref the user named wins over anything discobox-review would have worked out.
 func TestBaseHonoursAChosenRef(t *testing.T) {
 	r := testRepo(t)
 	run(t, r, "checkout", "-q", "-b", "feature")
@@ -522,7 +522,7 @@ func TestWriteStateFileIsAtomic(t *testing.T) {
 	}
 }
 
-// The stamp is what tells difftui somebody else has written the review. It has
+// The stamp is what tells discobox-review somebody else has written the review. It has
 // to change when the contents change, even within the same second — which is
 // why it carries the size as well as the time.
 func TestStateFileStampNoticesAChange(t *testing.T) {

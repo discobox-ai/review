@@ -1,6 +1,6 @@
-// Package git wraps the git commands difftui drives.
+// Package git wraps the git commands discobox-review drives.
 //
-// difftui reads a repository and never writes one: everything here either
+// discobox-review reads a repository and never writes one: everything here either
 // asks git a question or opens a file for reading. The one exception is
 // checking out a branch, which is choosing what to review rather than
 // changing what is under review.
@@ -155,7 +155,7 @@ type Scan struct {
 	Merging bool
 
 	// Base is what the review is measured from. Ref is the name the user
-	// chose or difftui worked out, and SHA the merge base itself — the commit
+	// chose or discobox-review worked out, and SHA the merge base itself — the commit
 	// the branch and that ref last had in common, which is where this branch's
 	// work begins.
 	Base Base
@@ -179,7 +179,7 @@ type Scan struct {
 
 // Rescan collects the whole scan in one go.
 //
-// baseRef is the ref the review is measured against, or empty to let difftui
+// baseRef is the ref the review is measured against, or empty to let discobox-review
 // work one out. context is how many lines of context every diff is taken with,
 // so that changing it re-reads the review rather than re-rendering a stale one.
 func (r *Repo) Rescan(baseRef string, context int) (Scan, error) {
@@ -265,7 +265,7 @@ func (r *Repo) untrackedDiff(path, ctx string) (string, error) {
 //
 // It is assembled from three commands: the index side, the working directory
 // side, and the untracked files. A single "git status" cannot express it,
-// because status collapses the two sides into one letter each and difftui
+// because status collapses the two sides into one letter each and discobox-review
 // wants both.
 func (r *Repo) Status() ([]File, error) {
 	parent := "HEAD"
@@ -383,7 +383,7 @@ func parseRawDiff(out string, fn func(status byte, path, from string)) {
 	}
 }
 
-// mapState converts raw status characters into difftui's state characters.
+// mapState converts raw status characters into discobox-review's state characters.
 func mapState(x, y byte) State {
 	if x == '?' && y == '?' {
 		return "_O"
@@ -437,7 +437,7 @@ type Base struct {
 	Commit string // the same, abbreviated for the bar
 	Ahead  int    // commits on HEAD since the merge base
 	Behind int    // commits on Ref since the merge base
-	Auto   bool   // true when difftui picked the ref rather than the user
+	Auto   bool   // true when discobox-review picked the ref rather than the user
 	Err    string // why a ref the user named could not be used
 }
 
@@ -447,7 +447,7 @@ type Base struct {
 // than silently ignored — a review measured from somewhere other than where
 // you asked is worse than one that says it could not do as it was told.
 // Otherwise the branch's own upstream or the remote's default branch is used,
-// and failing both the review falls back to HEAD, which turns difftui into a
+// and failing both the review falls back to HEAD, which turns discobox-review into a
 // reader of uncommitted work rather than leaving it with nothing to show.
 func (r *Repo) ResolveBase(ref string, hasHEAD bool) Base {
 	if !hasHEAD {
@@ -642,7 +642,7 @@ func (r *Repo) Recent(n int) ([]Commit, error) {
 	return r.log("-n", strconv.Itoa(n), "HEAD")
 }
 
-// log reads commits in difftui's own format. The fields are separated by a
+// log reads commits in discobox-review's own format. The fields are separated by a
 // unit separator rather than a space, so that a subject may hold anything —
 // including runs of spaces, which is what makes them worth keeping.
 func (r *Repo) log(args ...string) ([]Commit, error) {
@@ -779,7 +779,7 @@ func (r *Repo) Remotes() ([]string, error) {
 	return names, nil
 }
 
-// Checkout switches branches. It is the one thing difftui changes about a
+// Checkout switches branches. It is the one thing discobox-review changes about a
 // repository, because choosing what to review is not reviewing.
 func (r *Repo) Checkout(branch string) (string, error) {
 	return r.run("checkout", branch)

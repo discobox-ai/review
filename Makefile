@@ -1,4 +1,4 @@
-BINARY := difftui
+BINARY := discobox-review
 
 .PHONY: build install test vet fmt clean
 

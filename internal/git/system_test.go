@@ -247,7 +247,7 @@ func TestRepoRunsOnAFakeSystem(t *testing.T) {
 			"ls-files --unmerged -z":                                   "",
 			"symbolic-ref --short HEAD":                                "main\n",
 		},
-		files: map[string]string{"/work/repo/.git/difftui-review.json": `{"version":1,"branch":"main"}`},
+		files: map[string]string{"/work/repo/.git/discobox-review.json": `{"version":1,"branch":"main"}`},
 	}
 
 	repo, err := OpenWith(fake, "/work/repo")
@@ -279,7 +279,7 @@ func TestRepoRunsOnAFakeSystem(t *testing.T) {
 	if repo.CurrentBranch() != "main" {
 		t.Errorf("branch = %q", repo.CurrentBranch())
 	}
-	if body, ok := repo.ReadStateFile("difftui-review.json"); !ok ||
+	if body, ok := repo.ReadStateFile("discobox-review.json"); !ok ||
 		!strings.Contains(body, `"branch":"main"`) {
 		t.Errorf("saved review = %q (present=%v)", body, ok)
 	}
