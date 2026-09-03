@@ -167,7 +167,9 @@ type compose struct {
 //
 // base is the ref the review is measured from, or empty to take whatever the
 // saved review names and, failing that, whatever discobox-review works out.
-func New(repo *git.Repo, base string) Model {
+// author is the name the comments written here are filed under, which the
+// caller has already resolved — the window never guesses it.
+func New(repo *git.Repo, base, author string) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Write a comment"
 	ta.ShowLineNumbers = false
@@ -199,7 +201,7 @@ func New(repo *git.Repo, base string) Model {
 		carries:    map[string]map[string]*git.Patch{},
 		folds:      map[string]bool{},
 		rv:         review.New(""),
-		author:     repo.UserName(),
+		author:     author,
 		mouse:      newMouseState(),
 	}
 }

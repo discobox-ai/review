@@ -100,7 +100,7 @@ func stored(t *testing.T, repo *git.Repo) *review.State {
 func TestCommentsThroughTheFile(t *testing.T) {
 	repo := testRepo(t)
 
-	if got := run(t, repo, "comment", "server.go:4", "why not check the error?"); !strings.HasPrefix(got, "t1") {
+	if got := run(t, repo, "comment", "--by", "git-user", "server.go:4", "why not check the error?"); !strings.HasPrefix(got, "t1") {
 		t.Errorf("comment printed %q, want it to name the new thread", got)
 	}
 	st := stored(t, repo)
@@ -153,21 +153,21 @@ func TestCommentRecordsTheLineItIsAbout(t *testing.T) {
 
 	// The new side is the working tree, tab and all: this is the line as it
 	// stands, not a tidied-up rendering of it.
-	run(t, repo, "comment", "server.go:4", "why not check the error?")
+	run(t, repo, "comment", "--by", "git-user", "server.go:4", "why not check the error?")
 	if got := stored(t, repo).Thread("t1").Text; got != "\treturn write()" {
 		t.Errorf("text = %q, want the working tree's line 4", got)
 	}
 
 	// The old side is the base, so it is the line the change took away —
 	// which is the only place that line still exists.
-	run(t, repo, "comment", "server.go:4", "--side", "old", "it was bare")
+	run(t, repo, "comment", "--by", "git-user", "server.go:4", "--side", "old", "it was bare")
 	if got := stored(t, repo).Thread("t2").Text; got != "\treturn nil" {
 		t.Errorf("old-side text = %q, want the base's line 4", got)
 	}
 
 	// A line the diff never mentions still has a text, because the side names
 	// a whole file rather than the part of it that changed.
-	run(t, repo, "comment", "server.go:1", "the package clause")
+	run(t, repo, "comment", "--by", "git-user", "server.go:1", "the package clause")
 	if got := stored(t, repo).Thread("t3").Text; got != "package main" {
 		t.Errorf("text = %q, want line 1 of the file", got)
 	}
@@ -179,11 +179,11 @@ func TestCommentRecordsTheLineItIsAbout(t *testing.T) {
 func TestCommentOnALineThatIsNotThere(t *testing.T) {
 	repo := testRepo(t)
 
-	run(t, repo, "comment", "server.go:999", "off the end")
+	run(t, repo, "comment", "--by", "git-user", "server.go:999", "off the end")
 	if got := stored(t, repo).Thread("t1").Text; got != "" {
 		t.Errorf("text = %q, want nothing at all", got)
 	}
-	run(t, repo, "comment", "nosuch.go:1", "no such file")
+	run(t, repo, "comment", "--by", "git-user", "nosuch.go:1", "no such file")
 	if got := stored(t, repo).Thread("t2").Text; got != "" {
 		t.Errorf("text = %q for a file that is not there", got)
 	}
@@ -198,12 +198,12 @@ func TestCommentOnALineThatIsNotThere(t *testing.T) {
 // else.
 func TestCommentOnARangeOfLines(t *testing.T) {
 	repo := testRepo(t)
-	run(t, repo, "comment", "server.go:4-6", "this whole block")
+	run(t, repo, "comment", "--by", "git-user", "server.go:4-6", "this whole block")
 	th := stored(t, repo).Threads[0]
 	if first, last := th.Span(); first != 4 || last != 6 {
 		t.Errorf("Span() = %d–%d, want 4–6", first, last)
 	}
-	run(t, repo, "comment", "server.go:2", "--side", "old", "and this")
+	run(t, repo, "comment", "--by", "git-user", "server.go:2", "--side", "old", "and this")
 	if got := stored(t, repo).Threads[1]; got.Side != review.SideOld {
 		t.Errorf("side = %q, want the old one", got.Side)
 	}
@@ -248,7 +248,7 @@ func TestAnchorSyntax(t *testing.T) {
 
 func TestListing(t *testing.T) {
 	repo := testRepo(t)
-	run(t, repo, "comment", "server.go:4", "first")
+	run(t, repo, "comment", "--by", "git-user", "server.go:4", "first")
 	run(t, repo, "comment", "other.go:1", "--by", "claude", "second")
 	run(t, repo, "resolve", "t2")
 
@@ -279,7 +279,7 @@ func TestListing(t *testing.T) {
 
 func TestShow(t *testing.T) {
 	repo := testRepo(t)
-	run(t, repo, "comment", "server.go:4", "why?")
+	run(t, repo, "comment", "--by", "git-user", "server.go:4", "why?")
 	run(t, repo, "reply", "t1", "--by", "claude", "because")
 
 	got := run(t, repo, "show", "t1")
@@ -295,7 +295,7 @@ func TestShow(t *testing.T) {
 // approval given here nullifiable like any other.
 func TestApproving(t *testing.T) {
 	repo := testRepo(t)
-	run(t, repo, "approve", "server.go", "other.go")
+	run(t, repo, "approve", "--by", "git-user", "server.go", "other.go")
 	st := stored(t, repo)
 	if !st.Approved("server.go") || !st.Approved("other.go") {
 		t.Fatalf("files = %+v", st.Files)
@@ -324,10 +324,10 @@ func TestStatus(t *testing.T) {
 	repo := testRepo(t)
 	write(t, repo.Dir, "other.go", "package main\n")
 	gitRun(t, repo.Dir, "add", "other.go")
-	run(t, repo, "comment", "server.go:4", "why?")
-	run(t, repo, "comment", "server.go:5", "and this")
+	run(t, repo, "comment", "--by", "git-user", "server.go:4", "why?")
+	run(t, repo, "comment", "--by", "git-user", "server.go:5", "and this")
 	run(t, repo, "resolve", "t2")
-	run(t, repo, "approve", "server.go")
+	run(t, repo, "approve", "--by", "git-user", "server.go")
 
 	got := fields(t, run(t, repo, "status"))
 	if got["branch"] != "feature" {
@@ -359,7 +359,7 @@ func TestStatus(t *testing.T) {
 // the file nullifies the approval, exactly as it does in the window.
 func TestStatusNullifiesAStaleApproval(t *testing.T) {
 	repo := testRepo(t)
-	run(t, repo, "approve", "server.go")
+	run(t, repo, "approve", "--by", "git-user", "server.go")
 
 	// Reading it stamps rather than nullifies: nothing has moved yet.
 	if got := fields(t, run(t, repo, "status")); got["approved"] != "1" {
@@ -445,13 +445,13 @@ func gitOut(t *testing.T, dir string, args ...string) string {
 // A review is of a branch, and the commands see the same one the window does.
 func TestEachBranchHasItsOwnReview(t *testing.T) {
 	repo := testRepo(t)
-	run(t, repo, "comment", "server.go:4", "on feature")
+	run(t, repo, "comment", "--by", "git-user", "server.go:4", "on feature")
 
 	gitRun(t, repo.Dir, "checkout", "-q", "main")
 	if got := run(t, repo, "list"); !strings.Contains(got, "no comments") {
 		t.Errorf("main inherited feature's comments:\n%s", got)
 	}
-	run(t, repo, "comment", "server.go:1", "on main")
+	run(t, repo, "comment", "--by", "git-user", "server.go:1", "on main")
 
 	gitRun(t, repo.Dir, "checkout", "-q", "feature")
 	got := run(t, repo, "list")
@@ -466,22 +466,22 @@ func TestEachBranchHasItsOwnReview(t *testing.T) {
 // Every way of getting it wrong says so, and changes nothing.
 func TestRefusals(t *testing.T) {
 	repo := testRepo(t)
-	run(t, repo, "comment", "server.go:4", "why?")
+	run(t, repo, "comment", "--by", "git-user", "server.go:4", "why?")
 	before, _ := repo.ReadStateFile(review.FileName)
 
 	for _, args := range [][]string{
 		{"show", "nope"},
 		{"show"},
-		{"reply", "nope", "x"},
-		{"reply", "t1"},
+		{"reply", "--by", "git-user", "nope", "x"},
+		{"reply", "--by", "git-user", "t1"},
 		{"resolve", "nope"},
 		{"resolve"},
 		{"delete", "nope"},
 		{"delete", "t1", "9"},
 		{"delete", "t1", "x"},
-		{"comment", "server.go", "no line"},
-		{"comment", "server.go:4"},
-		{"approve"},
+		{"comment", "--by", "git-user", "server.go", "no line"},
+		{"comment", "--by", "git-user", "server.go:4"},
+		{"approve", "--by", "git-user"},
 		{"list", "--nonsense"},
 		{"list", "--path"},
 		{"frobnicate"},
@@ -536,7 +536,7 @@ func TestDiffLineNumbersAreTheOnesCommentTakes(t *testing.T) {
 		t.Fatalf("the change is not in the diff:\n%s", got)
 	}
 
-	run(t, repo, "comment", "server.go:"+number, "here")
+	run(t, repo, "comment", "--by", "git-user", "server.go:"+number, "here")
 	th := stored(t, repo).Threads[0]
 	if strconv.Itoa(th.Line) != number {
 		t.Errorf("commented at line %d, having been told %s", th.Line, number)
@@ -557,8 +557,8 @@ func TestDiffLineNumbersAreTheOnesCommentTakes(t *testing.T) {
 
 func TestDiffHeadsEachFile(t *testing.T) {
 	repo := testRepo(t)
-	run(t, repo, "comment", "server.go:4", "why?")
-	run(t, repo, "approve", "server.go")
+	run(t, repo, "comment", "--by", "git-user", "server.go:4", "why?")
+	run(t, repo, "approve", "--by", "git-user", "server.go")
 
 	got := run(t, repo, "diff")
 	head := ""
@@ -709,7 +709,7 @@ func TestEveryCommandHasItsOwnHelp(t *testing.T) {
 // Asking for help must never do the thing instead.
 func TestHelpChangesNothing(t *testing.T) {
 	repo := testRepo(t)
-	run(t, repo, "comment", "server.go:4", "why?")
+	run(t, repo, "comment", "--by", "git-user", "server.go:4", "why?")
 	before, _ := repo.ReadStateFile(review.FileName)
 
 	for _, c := range Commands {
@@ -720,13 +720,53 @@ func TestHelpChangesNothing(t *testing.T) {
 	}
 }
 
+// Nothing writes a remark without being told whose it is. The name is not
+// guessed, because an agent running these commands would otherwise sign the
+// person's name to its own words; a person says git-user and gets theirs.
+func TestEveryRemarkIsSigned(t *testing.T) {
+	repo := testRepo(t)
+
+	for _, args := range [][]string{
+		{"comment", "server.go:4", "why?"},
+		{"reply", "t1", "because"},
+		{"approve", "server.go"},
+	} {
+		fails(t, repo, args...)
+		var out strings.Builder
+		err := Run(repo, args, &out)
+		if err == nil || !strings.Contains(err.Error(), GitUser) {
+			t.Errorf("%s refused with %v, want it to name --by %s", args[0], err, GitUser)
+		}
+	}
+	if st := stored(t, repo); len(st.Threads) != 0 || len(st.Files) != 0 {
+		t.Errorf("a command with no name to sign with wrote to the review anyway: %+v", st)
+	}
+
+	// git-user is the one name discobox-review looks up rather than takes as given.
+	run(t, repo, "comment", "--by", GitUser, "server.go:4", "why?")
+	run(t, repo, "approve", "--by", GitUser, "server.go")
+	st := stored(t, repo)
+	if by := st.Threads[0].Comments[0].By; by != "Test" {
+		t.Errorf("--by %s filed it under %q, want git's own user.name", GitUser, by)
+	}
+	if by := st.FileFor("server.go").By; by != "Test" {
+		t.Errorf("--by %s approved as %q, want git's own user.name", GitUser, by)
+	}
+
+	// Any other name is taken as it is written.
+	run(t, repo, "reply", "--by", "claude", "t1", "fixing it")
+	if by := stored(t, repo).Thread("t1").Comments[1].By; by != "claude" {
+		t.Errorf("--by claude filed it under %q", by)
+	}
+}
+
 // A flag belongs to the commands that take it, and is refused by the rest —
 // quietly ignoring one would mean a command that did not do what it was told.
 func TestFlagsBelongToTheirCommands(t *testing.T) {
 	repo := testRepo(t)
 	fails(t, repo, "list", "--stat")
-	fails(t, repo, "comment", "--raw", "server.go:4", "x")
-	fails(t, repo, "approve", "--open", "server.go")
+	fails(t, repo, "comment", "--by", "git-user", "--raw", "server.go:4", "x")
+	fails(t, repo, "approve", "--by", "git-user", "--open", "server.go")
 	fails(t, repo, "diff", "--by", "someone")
 
 	// And the ones that do belong are taken.

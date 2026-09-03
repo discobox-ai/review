@@ -34,9 +34,9 @@ make install   # $GOBIN/discobox-review
 ## Run
 
 ```sh
-discobox-review                      # the repository containing the current directory
-discobox-review ~/src/foo            # a specific working tree
-discobox-review -base origin/main    # measured from a ref of your choosing
+discobox-review -by git-user                   # the repository containing the current directory
+discobox-review -by git-user ~/src/foo         # a specific working tree
+discobox-review -by git-user -base origin/main # measured from a ref of your choosing
 ```
 
 **With nowhere to draw — output down a pipe, no terminal — it prints what it
@@ -501,12 +501,12 @@ picks the change up within the second.
 ```sh
 discobox-review base origin/main     # what the review is measured from, saved
 discobox-review diff                 # the review itself, with the line numbers below
-discobox-review comment server.go:42 "why not check the error here?"   # → t3
-discobox-review comment server.go:60-74 --by claude "this block is new"
+discobox-review comment --by git-user server.go:42 "why not check the error here?"  # → t3
+discobox-review comment --by claude server.go:60-74 "this block is new"
 discobox-review reply t3 --by claude "good catch, fixing"
 discobox-review resolve t3
 discobox-review delete t3 1          # one remark of it; without the number, all of it
-discobox-review approve server.go
+discobox-review approve --by git-user server.go
 ```
 
 ```
@@ -597,8 +597,13 @@ what it is for, the flags it accepts and a line showing it used. `discobox-revie
 commands that take it and is refused by the rest — a command that quietly
 ignored a flag would be a command that did not do what it was told.
 
-`--by NAME` says who a remark is from, and defaults to git's own `user.name` —
-an agent should pass its own. `--side old` anchors to the line the change
+`--by NAME` says who a remark is from, and has no default: every remark that
+goes into the review is signed by whoever asked for it. An agent passes its own
+name; a person passes `--by git-user`, which takes git's own `user.name`. The
+window is told the same way — it is opened `discobox-review -by git-user`, so
+the comments written in it are filed under the name git already knows you by.
+Nothing is guessed, because a guess would let an agent sign your name to its
+own words. `--side old` anchors to the line the change
 removed rather than the one it added. A place is written `path:line` or
 `path:line-line`, the way a place in a review is written everywhere else.
 

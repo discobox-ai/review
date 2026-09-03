@@ -113,7 +113,7 @@ func TestSubcommandsWorkWithNoTerminal(t *testing.T) {
 	if _, _, code := runBin(t, dir, "base", "main"); code != 0 {
 		t.Fatalf("base exited %d", code)
 	}
-	if out, _, code := runBin(t, dir, "comment", "a.txt:1", "why one?"); code != 0 ||
+	if out, _, code := runBin(t, dir, "comment", "--by", "git-user", "a.txt:1", "why one?"); code != 0 ||
 		!strings.HasPrefix(out, "t1") {
 		t.Fatalf("comment exited %d printing %q", code, out)
 	}

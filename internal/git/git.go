@@ -785,8 +785,8 @@ func (r *Repo) Checkout(branch string) (string, error) {
 	return r.run("checkout", branch)
 }
 
-// UserName is who a comment is from: git's own committer name, since that is
-// the name every other record of this work already carries.
+// UserName is git's own committer name, which is what `--by git-user` files a
+// remark under: the name every other record of this work already carries.
 func (r *Repo) UserName() string {
 	out, err := r.run("config", "user.name")
 	if err != nil {

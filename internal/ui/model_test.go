@@ -138,13 +138,13 @@ func newTestModel(t *testing.T) Model {
 // where scrolling — and so where a pane's idea of the reader's place — matters.
 func shortTestModel(t *testing.T) Model {
 	t.Helper()
-	m := New(testRepo(t), "main")
+	m := New(testRepo(t), "main", "Test")
 	return drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()())
 }
 
 func modelFor(t *testing.T, repo *git.Repo) Model {
 	t.Helper()
-	m := New(repo, "main")
+	m := New(repo, "main", "Test")
 	return drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40}, m.rescanCmd()())
 }
 
@@ -1284,7 +1284,7 @@ func TestACleanBranchSaysSo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(repo, "")
+	m := New(repo, "", "Test")
 	m = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 30}, m.rescanCmd()())
 	if len(m.view.files) != 0 {
 		t.Fatalf("a clean tree has %v to review", pathsOf(m))

@@ -46,8 +46,9 @@ func main() {
 
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	base := flag.String("base", "", "review from this ref instead of the one discobox-review works out")
+	by := flag.String("by", "", "who the comments written in the window are from; "+cli.GitUser+" takes git's own user.name")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: discobox-review [-version] [-base <ref>] [path]\n"+
+		fmt.Fprintf(os.Stderr, "usage: discobox-review -by <who> [-version] [-base <ref>] [path]\n"+
 			"       discobox-review <command> [args]\n\n"+
 			"Review a branch: every change from its merge base to the working\n"+
 			"tree, approved file by file and commented on line by line. With no\n"+
@@ -87,10 +88,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The window writes remarks too, so it is asked the same question the
+	// commands are asked, and refuses for the same reason: a comment carries
+	// the name of whoever wrote it, and nobody here can guess that. A person
+	// opening their own review passes -by git-user.
+	author, err := cli.Author(repo, *by)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "discobox-review:", err)
+		os.Exit(1)
+	}
+
 	// The alternate screen, the mouse and the keyboard enhancements are part
 	// of what the model's view asks the screen to be, rather than options
 	// settled here — see ui.Model.View.
-	p := tea.NewProgram(ui.New(repo, *base))
+	p := tea.NewProgram(ui.New(repo, *base, author))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "discobox-review:", err)
 		os.Exit(1)

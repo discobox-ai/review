@@ -77,17 +77,19 @@ var Commands = []Command{
 		Example: "discobox-review show t3",
 	},
 	{
-		Name: "comment", Args: "<path>:<line>[-<line>] <body>", What: "start a conversation",
+		Name: "comment", Args: "--by <who> <path>:<line>[-<line>] <body>", What: "start a conversation",
 		Flags: []string{"by", "side"},
 		Long: "A place is written path:line, or path:line-line for a block — the way\n" +
 			"a place in a review is written in an error message or a stack trace.\n" +
 			"The numbers are the ones discobox-review diff prints.\n\n" +
 			"--side old anchors to a line the change removed, which has no line in\n" +
-			"the file as it now stands.",
-		Example: `discobox-review comment server.go:42 "why not check the error here?"`,
+			"the file as it now stands.\n\n" +
+			"--by says who is speaking and has no default: an agent gives its own\n" +
+			"name, and a person gives git-user, which is git's user.name.",
+		Example: `discobox-review comment --by git-user server.go:42 "why not check the error here?"`,
 	},
 	{
-		Name: "reply", Args: "<id> <body>", What: "answer one",
+		Name: "reply", Args: "--by <who> <id> <body>", What: "answer one",
 		Flags:   []string{"by"},
 		Example: `discobox-review reply t3 --by claude "good catch, fixing"`,
 	},
@@ -106,13 +108,13 @@ var Commands = []Command{
 		Example: "discobox-review delete t3 1",
 	},
 	{
-		Name: "approve", Args: "<path>…", What: "sign off a file",
+		Name: "approve", Args: "--by <who> <path>…", What: "sign off a file",
 		Flags: []string{"by"},
 		Long: "No digest is written, exactly as a hand-written approval leaves none:\n" +
 			"discobox-review stamps in the change as it stands the next time anything\n" +
 			"reads the review, which is what keeps such an approval nullifiable.\n" +
 			"Edit the file afterwards and the approval falls.",
-		Example: "discobox-review approve internal/git/git.go",
+		Example: "discobox-review approve --by git-user internal/git/git.go",
 	},
 	{Name: "unapprove", Args: "<path>…", What: "take that back"},
 	{
@@ -137,7 +139,7 @@ var flagHelp = map[string]string{
 	"stat":     "the headings alone, without the diff under them",
 	"raw":      "the plain unified diff, for piping somewhere else",
 	"auto":     "let discobox-review work the base out again",
-	"by":       "who a remark is from (default: git's user.name)",
+	"by":       "who a remark is from — required; git-user for git's own user.name",
 	"side":     "old, to anchor to a line the change removed",
 	"open":     "only what is still open",
 	"resolved": "only what is not",
@@ -204,6 +206,14 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 		return err
 	}
 
+	// A command that writes a remark writes a name with it, and there is no
+	// name to fall back on: see Author.
+	if c.takes("by") {
+		if opts.by, err = Author(repo, opts.by); err != nil {
+			return fmt.Errorf("%s: %w", c.Name, err)
+		}
+	}
+
 	branch := repo.CurrentBranch()
 	st, err := review.Load(repo, branch)
 	if err != nil {
@@ -260,7 +270,7 @@ func Usage(out io.Writer) {
 	fmt.Fprintln(out, "these read and write the same review from a script.")
 	fmt.Fprintln(out)
 	for _, c := range Commands {
-		fmt.Fprintf(out, "  discobox-review %-9s %-32s %s\n", c.Name, c.Args, c.What)
+		fmt.Fprintf(out, "  discobox-review %-9s %-40s %s\n", c.Name, c.Args, c.What)
 	}
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "  discobox-review <command> --help   what that one does, in full")
@@ -380,13 +390,25 @@ func parseFlags(c Command, args []string) (options, []string, error) {
 	return o, rest, nil
 }
 
-// who is the name a remark is filed under: what was asked for, and otherwise
-// whoever git thinks is committing.
-func who(repo *git.Repo, o options) string {
-	if o.by != "" {
-		return o.by
+// GitUser is what --by is given to file a remark under git's own user.name.
+// It is spelled out rather than assumed, so that a name in the review is
+// always one somebody chose to put there.
+const GitUser = "git-user"
+
+// Author is the name a remark is filed under. There is no default: the review
+// is a record of who said what, and a name guessed on the writer's behalf is
+// the one way that record can be wrong without anybody noticing — an agent
+// running these commands would sign the person's name to its own remarks.
+// So --by is said every time: an agent gives its own name, and a person gives
+// git-user, which reads it from git.
+func Author(repo *git.Repo, by string) (string, error) {
+	switch by {
+	case "":
+		return "", fmt.Errorf("--by wants a name: who the remark is from, or %s to take git's own user.name", GitUser)
+	case GitUser:
+		return repo.UserName(), nil
 	}
-	return repo.UserName()
+	return by, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -726,7 +748,7 @@ func comment(st *review.State, repo *git.Repo, args []string, o options) (string
 	t := st.Start(&review.Thread{
 		Path: path, Side: side, Line: first, Lines: span,
 		Text: lineText(repo, st, side, path, first),
-	}, who(repo, o), strings.Join(args[1:], " "))
+	}, o.by, strings.Join(args[1:], " "))
 	return t.ID + "  " + where(t), nil
 }
 
@@ -775,7 +797,7 @@ func reply(st *review.State, repo *git.Repo, args []string, o options) (string, 
 	if len(args) < 2 {
 		return "", errors.New("reply wants an id and something to say")
 	}
-	if !st.Reply(args[0], who(repo, o), strings.Join(args[1:], " ")) {
+	if !st.Reply(args[0], o.by, strings.Join(args[1:], " ")) {
 		return "", fmt.Errorf("no such comment: %s", args[0])
 	}
 	return "replied to " + args[0], nil
@@ -857,7 +879,7 @@ func setApproved(st *review.State, repo *git.Repo, args []string, o options, wan
 			// No digest: discobox-review stamps in the change as it stands the next
 			// time it reads the review, which is what makes an approval given
 			// here nullifiable like any other.
-			st.Approve(path, "", who(repo, o))
+			st.Approve(path, "", o.by)
 			continue
 		}
 		st.Unapprove(path)
