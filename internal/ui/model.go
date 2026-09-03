@@ -1,37 +1,59 @@
 package ui
 
 import (
-	"fmt"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/discobox-ai/difftui/internal/git"
+	"github.com/discobox-ai/difftui/internal/review"
 )
 
 type focusArea int
 
 const (
-	focusWorkdir focusArea = iota
-	focusIndex
-	focusHistory // the selected commit's files, in place of the two above
-	focusCommits // the branch's own commits
-	focusDiff
-	focusCommit
+	focusFiles   focusArea = iota // the contents page, top left
+	focusReview                   // the stacked diff, right
+	focusHistory                  // the commits since the base, bottom left
+	focusCompose                  // the comment being written, under the review
 	focusCount
 )
 
 const (
-	defaultContext = 5 // git-gui's gui.diffcontext default
+	defaultContext = git.DefaultContext
 	minContext     = 1
 	maxContext     = 50
 )
 
-// Model is the git-gui main window.
+// reloadInterval is how often the review file is checked for changes made
+// outside difftui.
+//
+// It is polled rather than watched because polling one small file once a
+// second costs nothing measurable and works the same on every filesystem a
+// repository might be sitting on — including the network ones where a watch
+// quietly never fires. A second is well inside the time it takes to read what
+// an agent has written, so the update always looks immediate.
+const reloadInterval = time.Second
+
+// maxLexLines caps how much of one file is worth lexing.
+//
+// Highlighting is the one part of building the stack whose cost grows with the
+// size of the change, so there has to be a limit somewhere. It is per file
+// rather than over the review as a whole, because you read one file at a time:
+// a review being large is no reason for the thirty line file in it to lose its
+// colours. This used to be a budget over the whole review, and difftui's own
+// source tripped it — every file went plain, and nothing said why.
+const maxLexLines = 10000
+
+// Model is the review window.
 type Model struct {
 	repo *git.Repo
 	st   *styles
@@ -40,80 +62,79 @@ type Model struct {
 	width, height int
 	ready         bool
 
-	workdir *fileList
-	index   *fileList
-	history *fileList // the selected commit's files, shown in place of the two above
-	commits *commitList
-	diff    *diffView
-	commit  textarea.Model
+	files   *fileList
+	history *commitList
+	view    *reviewView
+	editor  textarea.Model
 
-	focus    focusArea
-	amend    bool
-	savedMsg string
+	focus focusArea
+	zoom  bool
 
+	// What is being reviewed. baseRef is what the user asked for, empty to
+	// let difftui work one out; base is what that came to.
 	branch  string
-	files   []git.File
+	baseRef string
+	base    git.Base
+	merging bool
 	context int
 
-	// Cached repository facts, refreshed by each rescan: the view must not
-	// shell out to git while drawing a frame.
-	hasHEAD bool
-	merging bool
-	// parent is the revision the scan was taken against, and the one every
-	// diff taken from it has to use. Keeping it means moving the cursor does
-	// not ask git for it again on every file.
-	parent string
-	// base is where the branch stands against the remote's default branch,
-	// shown next to the branch name. Its Ref is empty when there is nothing
-	// to measure against.
-	base git.Base
+	// basePinned is set once the base has been chosen for this session — on
+	// the command line, or with b — and stops the saved review handing it
+	// back to whatever it was measured from last time.
+	basePinned bool
 
-	// diffs holds the text of every diff fetched since the last rescan, so
-	// walking back over files already looked at costs nothing. gen counts the
-	// scans: it is part of the key, so a diff can never outlive the scan it
-	// was taken against. want is the diff the pane should be showing, which
-	// decides whether one arriving is still the one to draw.
-	diffs     map[diffID]string
-	diffBytes int
-	gen       int
-	want      diffID
-	// histories is the same idea for the file lists of the commits looked at
-	// since the last rescan. A commit's contents cannot change under us, but
-	// the branch can be rewritten, so they go with the scan all the same.
-	histories map[string][]git.File
+	// The working tree's own review — every change from the base — kept even
+	// while a single commit is being read, since it is the space comments are
+	// stored in and the thing approvals are about.
+	work   []*reviewFile
+	workBy map[string]*reviewFile
+	state  map[string]git.State
 
-	// The commit buffer is persisted to the git directory, the way git-gui
-	// does it. msgBackedUp is the buffer contents as of the last backup, so
-	// comparing against it stands in for Tk's "edit modified" flag.
-	msgBackedUp string
-	bckExists   bool
+	// commit is the commit being read, empty for the whole review. Its files
+	// and the diffs that carry comments in and out of it are kept for as long
+	// as the scan they were taken against.
+	commit     string
+	commits    map[string][]*reviewFile
+	carries    map[string]map[string]*git.Patch
+	loading    string // a commit whose diff has been asked for
+	gen        int
+	folds      map[string]bool // the folds the reader has opened or closed by hand
+	rescanning bool
+
+	// hideDone takes the files that are done with off the screen altogether,
+	// leaving what is unapproved or still being argued about. Folding puts a
+	// file out of the way; this puts it out of the review.
+	hideDone bool
+
+	// The review document, and enough of its file to notice somebody else
+	// writing one.
+	rv     *review.State
+	stamp  git.Stamp
+	author string
+	rvErr  string
+
+	// compose is the comment being written, nil when none is.
+	compose *compose
+
+	// count is the digits typed in front of a command, vim's way of saying
+	// how many or which one. Only "go to line" uses it so far.
+	count string
+
+	// dark is what the terminal says its own background is. The diff bands are
+	// backgrounds themselves, so they are the one part of the palette that has
+	// to know. It starts true because a terminal that never answers is far
+	// more likely to be dark than light.
+	dark bool
 
 	status   string
 	statusOK bool
+	statusWa bool
 	statusEr bool
 
 	dialog *dialog
+	md     *mdView
+	file   *fileView
 	quit   bool
-
-	// md is the full screen markdown reader, on screen while non-nil. It sits
-	// over everything the way a dialog does, and takes the keys the same way.
-	md *mdView
-
-	// composeOpen is whether the commit message is on screen. Nothing opens it
-	// but Ctrl-Enter, so the diff keeps the whole right column until the
-	// moment you say you are writing a commit.
-	composeOpen bool
-
-	// rescanning marks the transient "Rescanning…" status so it can be
-	// cleared when the scan lands, rather than sitting there looking like
-	// work still in progress.
-	rescanning bool
-
-	// zoom gives the focused pane the whole window. The layout is four panes
-	// because four things are worth watching at once; zoom is for the moments
-	// when one of them is the only thing worth watching, and a diff read at
-	// full width is a different diff from one read in a third of the screen.
-	zoom bool
 
 	// rects is where each pane was last drawn, title row included, so a click
 	// can be resolved to the pane under it. layout fills it in, which keeps
@@ -121,97 +142,69 @@ type Model struct {
 	// is clicked in a single place.
 	rects [focusCount]rect
 
-	// mouse is the text selection the mouse makes. It is a pointer because
-	// the Model is copied on every update and a selection is a gesture in
-	// progress, which has to survive that.
+	// mouse is the text selection the mouse makes, and bar the scrollbar being
+	// dragged. Both are pointers because the Model is copied on every update
+	// and a gesture in progress has to survive that.
 	mouse *mouseState
+	bar   *barDrag
+}
+
+// compose is a comment being written, and where it will be filed when it is
+// posted.
+type compose struct {
+	title  string
+	thread string // the thread being replied to, empty to start a new one
+	path   string
+	side   string
+	line   int
+	span   int    // how many lines the remark covers, from a V selection
+	at     int    // index into the file's diff lines of the last of them
+	text   string // the first line as it read, kept with the thread
+	origin *review.Origin
 }
 
 // New builds the initial model for a repository.
-func New(repo *git.Repo) Model {
+//
+// base is the ref the review is measured from, or empty to take whatever the
+// saved review names and, failing that, whatever difftui works out.
+func New(repo *git.Repo, base string) Model {
 	ta := textarea.New()
-	ta.Placeholder = "Enter commit message"
+	ta.Placeholder = "Write a comment"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.Prompt = ""
 
-	m := Model{
-		repo:    repo,
-		st:      newStyles(),
-		keys:    newKeyMap(),
-		workdir: newFileList(git.SideWorkdir),
-		index:   newFileList(git.SideIndex),
-		history: newFileList(git.SideCommit),
-		commits: newCommitList(),
-		diff:    newDiffView(),
-		commit:  ta,
-		// git-gui starts with the cursor in the message buffer; starting on
-		// the first unstaged file is friendlier in a terminal, where it also
-		// makes the single letter keys live straight away.
-		focus:     focusWorkdir,
-		context:   defaultContext,
-		diffs:     map[diffID]string{},
-		histories: map[string][]git.File{},
-		mouse:     newMouseState(),
+	return Model{
+		repo:       repo,
+		st:         newStyles(true),
+		keys:       newKeyMap(),
+		files:      newFileList(),
+		history:    newCommitList(),
+		view:       newReviewView(),
+		editor:     ta,
+		focus:      focusReview,
+		baseRef:    base,
+		basePinned: base != "",
+		context:    defaultContext,
+		workBy:     map[string]*reviewFile{},
+		state:      map[string]git.State{},
+		commits:    map[string][]*reviewFile{},
+		carries:    map[string]map[string]*git.Patch{},
+		folds:      map[string]bool{},
+		rv:         review.New(""),
+		author:     repo.UserName(),
+		mouse:      newMouseState(),
 	}
-	m.loadSavedMessage()
-	return m
 }
 
-// loadSavedMessage restores the commit buffer that a previous session left
-// behind. git-gui prefers its periodic backup, unless the message saved on a
-// clean exit is newer, in which case the stale backup is discarded and the
-// saved message is picked up by the first rescan.
-func (m *Model) loadSavedMessage() {
-	bck, ok := m.repo.ReadStateFile(git.BackupFile)
-	if !ok {
-		return
-	}
-	m.bckExists = true
-	if m.repo.StateFileExists(git.MsgFile) {
-		if m.repo.StateFileNewer(git.BackupFile, git.MsgFile) {
-			_ = m.repo.RemoveStateFile(git.MsgFile)
-		} else {
-			_ = m.repo.RemoveStateFile(git.BackupFile)
-			m.bckExists = false
-			return
-		}
-	}
-	m.setMessage(bck)
-}
-
-// setMessage replaces the commit buffer and marks it as already backed up.
-func (m *Model) setMessage(s string) {
-	m.commit.SetValue(normalizeMessage(s))
-	m.msgBackedUp = m.commit.Value()
-}
-
-// msgDirty reports whether the buffer changed since the last backup.
-func (m *Model) msgDirty() bool { return m.commit.Value() != m.msgBackedUp }
-
-// normalizeMessage strips trailing whitespace from every line and trims the
-// message, matching what git-gui writes out.
-func normalizeMessage(s string) string {
-	lines := strings.Split(s, "\n")
-	for i, l := range lines {
-		lines[i] = strings.TrimRight(l, " \t\r")
-	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
-}
-
-// Init starts the first rescan.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.rescanCmd(), textarea.Blink, backupTick())
+	return tea.Batch(m.rescanCmd(), textarea.Blink, reloadTick())
 }
 
-// backupInterval matches git-gui, which re-writes its crash backup every two
-// seconds while the buffer has unsaved edits.
-const backupInterval = 2 * time.Second
+type reloadTickMsg struct{}
 
-type backupTickMsg struct{}
-
-func backupTick() tea.Cmd {
-	return tea.Tick(backupInterval, func(time.Time) tea.Msg { return backupTickMsg{} })
+func reloadTick() tea.Cmd {
+	return tea.Tick(reloadInterval, func(time.Time) tea.Msg { return reloadTickMsg{} })
 }
 
 // ---------------------------------------------------------------------------
@@ -219,27 +212,19 @@ func backupTick() tea.Cmd {
 // ---------------------------------------------------------------------------
 
 type rescanMsg struct {
-	scan git.Scan
-	err  error
+	scan  git.Scan
+	files []*reviewFile
+	err   error
 }
 
-// diffID names a diff by everything that decides its text: the file, the side
-// it is taken from, how much context, and the scan it belongs to. Two requests
-// with the same key have the same answer, which is what makes them worth
-// keeping.
-type diffID struct {
-	path    string
-	side    git.Side
-	context int
-	commit  string // the commit being looked at, empty for the working tree
-	gen     int
-}
-
-type diffMsg struct {
-	file git.File
-	key  diffID
-	text string
-	err  error
+// commitFilesMsg is one commit's diff, together with the diffs that carry a
+// comment between that commit and the working tree.
+type commitFilesMsg struct {
+	hash  string
+	gen   int
+	files []*reviewFile
+	carry map[string]*git.Patch
+	err   error
 }
 
 type opMsg struct {
@@ -248,70 +233,83 @@ type opMsg struct {
 	rescan bool
 }
 
-// historyMsg is the file list of a commit being looked at. It carries the hash
-// it was asked for, so a list arriving after the cursor has moved on is
-// dropped rather than shown against the wrong commit.
-type historyMsg struct {
-	hash  string
-	gen   int
-	files []git.File
-	err   error
-}
-
-// markdownMsg is a file's text arriving for the markdown reader. It carries
-// the scan generation so a reader is never opened over a window that has
-// moved on to a different scan.
+// markdownMsg is a file's text arriving for the markdown reader.
 type markdownMsg struct {
 	title   string
 	gen     int
 	text    string
-	changed map[int]bool // source lines the diff touched, for the gutter marks
+	changed map[int]bool
 	err     error
 }
 
-// committedMsg is the result of the commit itself, kept apart from opMsg
-// because what follows a commit — emptying the buffer, leaving amend mode —
-// must happen only when one was really made.
-type committedMsg struct {
-	out string
-	err error
+// fileMsg is a whole file arriving for the reader that v and o open.
+type fileMsg struct {
+	path    string
+	base    string
+	side    fileSide
+	at      int // the line to open on, from the line the cursor was reading
+	gen     int
+	text    string
+	changed map[int]bool
+	err     error
 }
 
+// rescanCmd asks git everything, and builds the stack, off the render path.
+// Parsing and lexing a whole review is the one expensive thing difftui does,
+// and doing it here means a big change never makes the window stutter.
 func (m Model) rescanCmd() tea.Cmd {
-	// git-gui's PARENT: while amending, the index is measured against HEAD's
-	// parent, so the staged list shows the whole amended commit. Rescan works
-	// it out along with everything else the scan needs.
-	repo, amend := m.repo, m.amend
+	repo, baseRef, context := m.repo, m.baseRef, m.context
 	return func() tea.Msg {
-		scan, err := repo.Rescan(amend)
-		return rescanMsg{scan: scan, err: err}
-	}
-}
-
-func (m Model) diffCmd(f git.File, key diffID) tea.Cmd {
-	repo, parent := m.repo, m.parent
-	return func() tea.Msg {
-		var text string
-		var err error
-		if key.commit != "" {
-			text, err = repo.CommitDiff(key.commit, f, key.context)
-		} else {
-			text, err = repo.Diff(f, key.side, key.context, parent)
+		scan, err := repo.Rescan(baseRef, context)
+		if err != nil {
+			return rescanMsg{scan: scan, err: err}
 		}
-		return diffMsg{file: f, key: key, text: text, err: err}
+		states := map[string]git.State{}
+		for _, f := range scan.Files {
+			states[f.Path] = f.State
+		}
+		return rescanMsg{scan: scan, files: buildFiles(scan.Diff, scan.Pending, states)}
 	}
 }
 
-// historyCmd loads the files a commit changed.
-func (m Model) historyCmd(hash string) tea.Cmd {
-	repo, gen := m.repo, m.gen
+// commitCmd loads one commit's own diff, and the diffs that carry comments in
+// and out of it.
+func (m Model) commitCmd(hash string) tea.Cmd {
+	repo, gen, context := m.repo, m.gen, m.context
+	// Every path this commit touched needs carrying, because a comment can be
+	// written against any line of it, and so does every path already carrying
+	// one, because those have to be found again in here.
+	commented := map[string]bool{}
+	for _, t := range m.rv.Threads {
+		commented[t.Path] = true
+	}
 	return func() tea.Msg {
-		files, err := repo.CommitFiles(hash)
-		return historyMsg{hash: hash, gen: gen, files: files, err: err}
+		text, err := repo.CommitDiff(hash, context)
+		if err != nil {
+			return commitFilesMsg{hash: hash, gen: gen, err: err}
+		}
+		files := buildFiles(text, "", nil)
+
+		want := make(map[string]bool, len(files)+len(commented))
+		for _, f := range files {
+			want[f.path] = true
+		}
+		for p := range commented {
+			want[p] = true
+		}
+		carry := make(map[string]*git.Patch, len(want))
+		for p := range want {
+			out, err := repo.CarryDiff(hash, p)
+			if err != nil {
+				continue
+			}
+			carry[p] = git.ParsePatch(out)
+		}
+		return commitFilesMsg{hash: hash, gen: gen, files: files, carry: carry}
 	}
 }
 
-// op wraps a git mutation so its result lands in the status bar.
+// op wraps a command whose result lands in the status bar.
 func op(text string, rescan bool, fn func() error) tea.Cmd {
 	return func() tea.Msg {
 		if err := fn(); err != nil {
@@ -321,11 +319,75 @@ func op(text string, rescan bool, fn func() error) tea.Cmd {
 	}
 }
 
+// buildFiles turns a diff covering many files into the stack's sections:
+// parsed, tab-expanded, lexed and measured, all of it once.
+func buildFiles(diff, pending string, states map[string]git.State) []*reviewFile {
+	patches := git.ParseMulti(diff)
+
+	// The same tree measured from HEAD says which lines are not in a commit
+	// yet. It is keyed by the seam so that a deletion can be marked too.
+	uncommitted := map[string]map[int]bool{}
+	for _, p := range git.ParseMulti(pending) {
+		if p.Path != "" {
+			uncommitted[p.Path] = p.ChangedNewLines()
+		}
+	}
+
+	files := make([]*reviewFile, 0, len(patches))
+	for _, p := range patches {
+		if p.Path == "" {
+			continue
+		}
+		f := &reviewFile{
+			path: p.Path, from: p.From, patch: p,
+			lines: p.Render(), digest: review.Digest(p),
+			pending: uncommitted[p.Path], state: states[p.Path],
+		}
+		f.adds, f.dels = p.Stat()
+		f.texts = make([]string, len(f.lines))
+		for i, l := range f.lines {
+			if isCodeLine(l.Kind) {
+				f.texts[i] = expandTabs(codeText(l.Text))
+			} else {
+				f.texts[i] = l.Text
+			}
+		}
+		f.emph = pairEmphasis(f.lines, f.texts)
+		f.plain = len(f.lines) > maxLexLines
+		files = append(files, f)
+	}
+	lexAll(files)
+	return files
+}
+
+// lexAll highlights every file, several at a time.
+//
+// One file's colours have nothing to do with another's, and this already runs
+// off the render path, so the only thing standing between a review and its
+// syntax is wall clock — which is what more than one core is for. difftui's
+// own source goes from about nine tenths of a second to under two.
+func lexAll(files []*reviewFile) {
+	var wg sync.WaitGroup
+	slot := make(chan struct{}, max(runtime.GOMAXPROCS(0), 1))
+	for _, f := range files {
+		if f.plain {
+			continue
+		}
+		wg.Add(1)
+		go func(f *reviewFile) {
+			defer wg.Done()
+			slot <- struct{}{}
+			defer func() { <-slot }()
+			f.spans = highlightLines(f.path, f.lines, f.texts)
+		}(f)
+	}
+	wg.Wait()
+}
+
 // ---------------------------------------------------------------------------
 // Update
 // ---------------------------------------------------------------------------
 
-// Update handles a single message.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -335,28 +397,77 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// names are no longer the lines it was made over.
 		m.mouse.clear()
 		m.layout()
+		m.view.build()
+		m.view.clamp()
 		if m.md != nil {
 			m.md.resize(m.width, m.height)
+		}
+		if m.file != nil {
+			m.file.resize(m.width, m.height)
 		}
 		return m, nil
 
 	case tea.MouseMsg:
 		return m.onMouse(msg)
 
+	case tea.BackgroundColorMsg:
+		// The terminal has said what colour it is. Only the diff bands care,
+		// but they are most of what the pane draws, so the palette is built
+		// again rather than patched.
+		if dark := msg.IsDark(); dark != m.dark {
+			m.dark, m.st = dark, newStyles(dark)
+		}
+		return m, nil
+
 	case rescanMsg:
 		return m.onRescan(msg)
 
-	case diffMsg:
-		return m.onDiff(msg)
-
-	case historyMsg:
-		return m.onHistory(msg)
+	case commitFilesMsg:
+		return m.onCommitFiles(msg)
 
 	case markdownMsg:
 		return m.onMarkdown(msg)
 
-	case committedMsg:
-		return m.onCommitted(msg)
+	case fileMsg:
+		return m.onFile(msg)
+
+	case fileLineMsg:
+		if m.file != nil {
+			m.file.goToLine(msg.line)
+		}
+		return m, nil
+
+	case reloadTickMsg:
+		return m, tea.Batch(m.pickUpChanges(), reloadTick())
+
+	case approveAllMsg:
+		m.mutate(func(st *review.State) {
+			for _, p := range msg.paths {
+				st.Approve(p, msg.digests[p], msg.by)
+			}
+		})
+		m.setOK("Approved " + plural(len(msg.paths), "file", "files"))
+		return m, nil
+
+	case deleteMsg:
+		if msg.comment < 0 {
+			m.mutate(func(st *review.State) { st.Remove(msg.id) })
+			m.setOK("Deleted " + msg.id)
+			return m, nil
+		}
+		gone := false
+		m.mutate(func(st *review.State) {
+			_, gone = st.RemoveComment(msg.id, msg.comment)
+		})
+		if gone {
+			m.setOK("Deleted the last comment, and " + msg.id + " with it")
+		} else {
+			m.setOK("Deleted a comment from " + msg.id)
+		}
+		return m, nil
+
+	case baseChosenMsg:
+		return m.onBaseChosen(msg.ref)
 
 	case opMsg:
 		if msg.err != nil {
@@ -366,85 +477,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.setOK(msg.text)
 		if msg.rescan {
-			// The rescan refreshes the diff itself once it lands, which is
-			// the only point the diff can be right again.
 			return m, m.rescanCmd()
 		}
 		return m, nil
 
-	case backupTickMsg:
-		m.backupMessage()
-		return m, backupTick()
-
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m.onKey(msg)
 	}
 	return m, nil
 }
 
-// backupMessage writes the periodic crash backup of the commit buffer.
-func (m *Model) backupMessage() {
-	if !m.msgDirty() && !m.bckExists {
-		return
-	}
-	switch body := normalizeMessage(m.commit.Value()); {
-	case body == "":
-		if m.bckExists {
-			_ = m.repo.RemoveStateFile(git.BackupFile)
-			m.bckExists = false
-		}
-	case m.msgDirty():
-		if err := m.repo.WriteStateFile(git.BackupFile, body); err == nil {
-			m.bckExists = true
-		}
-	}
-	m.msgBackedUp = m.commit.Value()
-}
-
-// saveOnQuit stashes the commit buffer so the next session starts where this
-// one left off. An amend message is deliberately not kept: it belongs to a
-// commit that already exists.
-func (m *Model) saveOnQuit() {
-	if m.amend {
-		// git-gui only applies this check when the buffer changed since its
-		// last backup, so quitting mid-amend can promote the backup into the
-		// next session's message. Applying it uniformly is the small fix.
-		_ = m.repo.RemoveStateFile(git.MsgFile)
-		_ = m.repo.RemoveStateFile(git.BackupFile)
-		m.bckExists = false
-		return
-	}
-	switch {
-	case m.bckExists && !m.msgDirty():
-		// Nothing changed since the last backup, so promote it.
-		if err := m.repo.RenameStateFile(git.BackupFile, git.MsgFile); err == nil {
-			m.bckExists = false
-		}
-	case m.msgDirty():
-		if body := normalizeMessage(m.commit.Value()); body != "" {
-			_ = m.repo.WriteStateFile(git.MsgFile, body)
-		} else {
-			_ = m.repo.RemoveStateFile(git.MsgFile)
-		}
-	}
-	if m.bckExists {
-		_ = m.repo.RemoveStateFile(git.BackupFile)
-		m.bckExists = false
-	}
-}
-
-// doQuit saves the commit buffer on the way out.
 func (m Model) doQuit() (tea.Model, tea.Cmd) {
-	m.saveOnQuit()
 	m.quit = true
 	return m, tea.Quit
 }
 
+// onRescan takes delivery of a fresh reading of the repository.
 func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 	m.mouse.clear()
-	// Clear the transient "Rescanning…" note now the scan has landed. A
-	// message from a command that triggered the rescan, such as "Staged 1
-	// file", is left alone: it is reporting the command, not the scan.
 	if m.rescanning {
 		m.rescanning = false
 		if m.status == "Rescanning…" {
@@ -455,202 +505,404 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 		m.setError(firstLine(msg.err.Error()))
 		return m, nil
 	}
+
 	m.branch = msg.scan.Branch
-	m.files = msg.scan.Files
-	m.hasHEAD = msg.scan.HasHEAD
 	m.merging = msg.scan.Merging
-	m.parent = msg.scan.Parent
 	m.base = msg.scan.Base
+	if msg.scan.Base.Err != "" {
+		m.setError(msg.scan.Base.Err)
+	}
 
-	// The working tree has moved under every diff taken against the last scan,
-	// so they all go. Counting the scan retires the ones still in flight.
-	m.gen++
-	m.diffs, m.diffBytes = map[diffID]string{}, 0
-	m.histories = map[string][]git.File{}
-
-	var work, idx []git.File
+	m.work = msg.files
+	m.workBy = make(map[string]*reviewFile, len(msg.files))
+	for _, f := range msg.files {
+		m.workBy[f.path] = f
+	}
+	m.state = map[string]git.State{}
 	for _, f := range msg.scan.Files {
-		if f.State.Unstaged() {
-			work = append(work, f)
-		}
-		if f.State.Staged() {
-			idx = append(idx, f)
-		}
+		m.state[f.Path] = f.State
 	}
-	m.workdir.setFiles(work)
-	m.index.setFiles(idx)
-	m.commits.setCommits(msg.scan.Commits)
 
-	// The cursor cannot stay in a pane that is no longer there: unstaging the
-	// last file takes the message buffer away, and a commit that was pushed or
-	// rewritten takes the history with it.
+	// Everything taken against the last scan is out of date: a commit's diff
+	// belongs to a branch that may have been rewritten, and the diffs that
+	// carry comments certainly belong to a working tree that has moved.
+	m.gen++
+	m.commits = map[string][]*reviewFile{}
+	m.carries = map[string]map[string]*git.Patch{}
+	m.loading = ""
+
+	m.history.base = m.base.Ref
+	m.history.setCommits(msg.scan.Commits)
+	if _, ok := m.history.selected(); !ok {
+		m.commit = ""
+	}
+
+	m.adoptReview()
+	m.rebuild()
+
 	if !m.paneVisible(m.focus) {
-		m.focus = focusDiff
-		m.commit.Blur()
+		m.focus = focusReview
+		m.editor.Blur()
 	}
-
-	m.loadMessageChain(msg.scan.Merge)
-
 	m.layout()
-	cmd := m.onCommitSelected()
-	return m, cmd
+	return m, m.selectedCommitCmd()
 }
 
-// browsing reports whether the cursor in the branch history is on a commit
-// rather than on the working tree. It is the switch the whole left column
-// turns on: the two working lists give way to that commit's files.
-func (m *Model) browsing() bool {
-	_, ok := m.commits.selected()
-	return ok
-}
-
-// showCommits reports whether the branch has any commits of its own to list.
-// With none — level with the base, or no base at all — the pane is not there.
-func (m *Model) showCommits() bool { return len(m.commits.commits) > 0 }
-
-// onHistory takes delivery of a commit's file list, and shows it only if the
-// cursor is still on that commit.
-func (m Model) onHistory(msg historyMsg) (tea.Model, tea.Cmd) {
+// onCommitFiles takes delivery of a commit's diff, and shows it only if the
+// history cursor is still on that commit.
+func (m Model) onCommitFiles(msg commitFilesMsg) (tea.Model, tea.Cmd) {
 	m.mouse.clear()
 	if msg.gen != m.gen {
 		return m, nil
 	}
-	c, ok := m.commits.selected()
-	if !ok || c.Hash != msg.hash {
-		return m, nil
+	if m.loading == msg.hash {
+		m.loading = ""
 	}
 	if msg.err != nil {
-		m.setError("Reading " + c.Short + ": " + firstLine(msg.err.Error()))
+		m.setError("Reading " + abbrevHash(msg.hash) + ": " + firstLine(msg.err.Error()))
 		return m, nil
 	}
-	m.histories[msg.hash] = msg.files
-	m.history.label = "Files in " + c.Short
-	m.history.setFiles(msg.files)
-	m.layout()
-	cmd := m.refreshDiffCmd()
-	return m, cmd
-}
-
-// onDiff takes delivery of a diff. Moving the cursor quickly leaves several in
-// flight at once, and they need not come back in the order they were asked
-// for, so what arrives is filed under its own key and drawn only if it is
-// still the one the pane is waiting for. The rest are not wasted: the cursor
-// coming back to them finds them already here.
-func (m Model) onDiff(msg diffMsg) (tea.Model, tea.Cmd) {
-	m.mouse.clear()
-	if msg.key.gen != m.gen {
-		// Taken against a scan that has since been replaced.
-		return m, nil
-	}
-	if msg.err != nil {
-		if msg.key == m.want {
-			m.diff.setMessage("* " + msg.err.Error())
-		}
-		return m, nil
-	}
-	m.keepDiff(msg.key, msg.text)
-	if msg.key == m.want {
-		m.diff.setPatch(msg.file, msg.key, msg.text)
+	m.commits[msg.hash] = msg.files
+	m.carries[msg.hash] = msg.carry
+	if m.commit == msg.hash {
+		m.rebuild()
 	}
 	return m, nil
 }
 
-// loadMessageChain fills an untouched commit buffer from the first source
-// that has something, in git-gui's order: the message saved on the last exit,
-// then a merge, a squash, and finally commit.template.
-func (m *Model) loadMessageChain(mergeMsg string) {
-	if m.bckExists || m.amend {
-		return
+// ---------------------------------------------------------------------------
+// The review file
+// ---------------------------------------------------------------------------
+
+// adoptReview picks up the review of whatever branch is checked out, moving
+// the one already there aside when it belongs to a different branch.
+//
+// A review is of a branch, so switching branches has to switch reviews. Doing
+// it by moving files rather than by keying them inside one means the live file
+// is always at one path, holding one review, in the flattest shape an agent
+// could ask for — which is the whole reason the state is a file at all.
+func (m *Model) adoptReview() {
+	review.Adopt(m.repo, m.branch)
+	if saved := m.readReview(); !m.basePinned {
+		m.baseRef = saved
 	}
-	if m.msgDirty() && strings.TrimSpace(m.commit.Value()) != "" {
-		return
-	}
-	if saved, ok := m.repo.ReadStateFile(git.MsgFile); ok {
-		m.setMessage(saved)
-		return
-	}
-	if mergeMsg != "" {
-		m.setMessage(mergeMsg)
-		return
-	}
-	if s := m.repo.SquashMessage(); s != "" {
-		m.setMessage(s)
-		return
-	}
-	if t := m.repo.CommitTemplate(); t != "" {
-		m.setMessage(t)
-	}
+	m.reconcile()
 }
 
-// diffBudget caps what is kept between rescans. A diff is text, and a few
-// hundred of them are nothing, but a tree with thousands of changed files
-// would mount up: past the budget the lot is dropped and filled again.
-const diffBudget = 8 << 20
-
-// keepDiff files a diff under its key, within the budget.
-func (m *Model) keepDiff(key diffID, text string) {
-	if _, dup := m.diffs[key]; dup {
-		return
+// readReview loads the review file and reports the base it names, which is not
+// always the one on screen: it is how a review picked up in the next session,
+// or handed over by an agent, says where it is measured from. Adopting it is
+// the caller's business, because a base the user has just chosen must not be
+// undone by the re-read that goes with saving it.
+//
+// A file that will not parse leaves what is already on screen alone and says
+// so: an agent caught halfway through writing one is a moment, not a reason to
+// lose a review.
+func (m *Model) readReview() (base string) {
+	data, ok := m.repo.ReadStateFile(review.FileName)
+	if !ok {
+		m.rv, m.rvErr = review.New(m.branch), ""
+		m.stamp = git.Stamp{}
+		return m.baseRef
 	}
-	if m.diffBytes+len(text) > diffBudget {
-		m.diffs = map[diffID]string{}
-		m.diffBytes = 0
+	st, err := review.Parse([]byte(data))
+	if err != nil {
+		m.rvErr = "the review file will not parse: " + firstLine(err.Error())
+		return m.baseRef
 	}
-	m.diffs[key] = text
-	m.diffBytes += len(text)
+	m.rv, m.rvErr = st, ""
+	m.stamp = m.repo.StateFileStamp(review.FileName)
+	return m.rv.Base
 }
 
-// refreshDiffCmd brings the diff pane up to date with whatever the active list
-// points at, and runs git only when it has to. The diff already on screen is
-// left alone — scrolled where it was, and all — and one already taken since
-// the last rescan is redrawn from what was kept. Only a file not looked at yet
-// costs a git.
-func (m *Model) refreshDiffCmd() tea.Cmd {
-	list, side := m.activeList()
-	var f *git.File
-	if list != nil {
-		f = list.current()
+// writeReview saves the review, and remembers what it wrote so that the next
+// tick does not mistake difftui's own write for somebody else's.
+func (m *Model) writeReview() {
+	m.rv.Branch = m.branch
+	m.rv.Base = m.baseRef
+	if err := m.repo.WriteStateFile(review.FileName, string(m.rv.Bytes())); err != nil {
+		m.setError("Saving the review: " + firstLine(err.Error()))
+		return
 	}
-	if f == nil {
-		m.want = diffID{}
-		m.diff.clear()
+	m.stamp = m.repo.StateFileStamp(review.FileName)
+}
+
+// mutate changes the review and saves it, re-reading first.
+//
+// The re-read is what makes difftui and an agent able to work on the same
+// review at the same time. Neither can lock the file, but both write it whole,
+// so a change applied to what is on disk right now — rather than to what was
+// on disk when the window was last drawn — cannot quietly drop a comment
+// somebody else added a moment ago.
+func (m *Model) mutate(fn func(*review.State)) {
+	if m.stamp != m.repo.StateFileStamp(review.FileName) {
+		m.readReview()
+	}
+	fn(m.rv)
+	m.writeReview()
+	m.rebuild()
+}
+
+// pickUpChanges is the poll: it notices the review file being written by
+// something that is not difftui and takes the change straight onto the screen.
+func (m *Model) pickUpChanges() tea.Cmd {
+	if !m.ready {
 		return nil
 	}
-	key := diffID{path: f.Path, side: side, context: m.context, gen: m.gen}
-	if c, ok := m.commits.selected(); ok {
-		key.commit = c.Hash
-	}
-	m.want = key
-	if m.diff.shown == key {
+	if stamp := m.repo.StateFileStamp(review.FileName); stamp == m.stamp {
 		return nil
 	}
-	if text, ok := m.diffs[key]; ok {
-		m.diff.setPatch(*f, key, text)
-		m.diff.clamp()
-		return nil
+	base := m.readReview()
+	moved := !m.basePinned && base != m.baseRef
+	if moved {
+		m.baseRef = base
 	}
-	return m.diffCmd(*f, key)
+	m.reconcile()
+	m.rebuild()
+	if moved {
+		// The base is what every diff on screen was taken against, so a
+		// review that names a different one has to be read again from git.
+		m.rescanning = true
+		return m.rescanCmd()
+	}
+	return nil
 }
 
-// activeList returns the list that owns the current diff. When the diff pane
-// or commit buffer has focus, the last list that was focused wins.
-func (m *Model) activeList() (*fileList, git.Side) {
-	if m.browsing() {
-		return m.history, git.SideCommit
+// reconcile checks the approvals against the changes now in front of the
+// reviewer, and says so when one has fallen.
+func (m *Model) reconcile() {
+	if len(m.work) == 0 {
+		return
 	}
-	switch m.focus {
-	case focusIndex:
-		return m.index, git.SideIndex
-	case focusWorkdir:
-		return m.workdir, git.SideWorkdir
+	digests := make(map[string]string, len(m.work))
+	for _, f := range m.work {
+		digests[f.path] = f.digest
 	}
-	if m.diff.file != nil && m.diff.side == git.SideIndex {
-		return m.index, git.SideIndex
+	changed, nullified := m.rv.Reconcile(digests)
+	if !changed {
+		return
 	}
-	return m.workdir, git.SideWorkdir
+	m.writeReview()
+	switch len(nullified) {
+	case 0:
+	case 1:
+		m.setWarn(nullified[0] + " changed since it was approved")
+	default:
+		m.setWarn(plural(len(nullified), "approval", "approvals") + " nullified: files changed since they were read")
+	}
 }
 
-func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+// ---------------------------------------------------------------------------
+// Building what is on screen
+// ---------------------------------------------------------------------------
+
+// rebuild puts the review document together with the diff and hands the result
+// to the panes. It is the one place that decides what is on screen, so
+// anything that changes either half — a rescan, a comment, an agent's edit,
+// a fold — ends here.
+func (m *Model) rebuild() {
+	files, label := m.work, "Review"
+	if m.commit != "" {
+		if c, ok := m.history.selected(); ok {
+			label = "Commit " + c.Short + "  " + c.Subject
+		}
+		files = m.commits[m.commit]
+		if files == nil {
+			// Nothing to show until the diff arrives; what was on screen
+			// belongs to a different commit.
+			files = nil
+		}
+	} else if m.base.Ref != "" {
+		label = "Review · from " + m.base.Ref
+	}
+
+	files = m.place(files)
+	// A file that is done with — approved, with nothing outstanding — is left
+	// out entirely while the filter is on. The count of them goes with the
+	// panes, so that what they say about the review as a whole stays true
+	// about the review as a whole.
+	hidden := 0
+	if m.hideDone {
+		kept := files[:0]
+		for _, f := range files {
+			if f.done() {
+				hidden++
+				continue
+			}
+			kept = append(kept, f)
+		}
+		files = kept
+	}
+
+	m.view.setFiles(files, m.commit, label)
+	m.view.hidden = hidden
+	m.files.hidden = hidden
+	m.view.note = m.emptyNote()
+	m.files.label = ""
+	if m.commit != "" {
+		if c, ok := m.history.selected(); ok {
+			m.files.label = "Files in " + c.Short
+		}
+	}
+	m.files.setEntries(entriesFor(files))
+	m.layout()
+}
+
+// emptyNote is what the review pane says when it has nothing to show, which is
+// either the end of the job or the beginning of it.
+func (m *Model) emptyNote() string {
+	if m.hideDone && len(m.work) > 0 {
+		return "Nothing left to read: every file is approved and every comment answered.\n" +
+			"Press f to see them all again."
+	}
+	if m.commit != "" {
+		if m.loading != "" {
+			return "Reading the commit…"
+		}
+		return "This commit changed nothing."
+	}
+	if m.base.Ref == "" {
+		return "Nothing to review."
+	}
+	return "Nothing to review: this branch matches " + m.base.Ref + "."
+}
+
+// place hangs every comment off the line it belongs to.
+//
+// Comments are stored against the working tree, which is not the space a
+// single commit's diff is drawn in, so reading a commit carries each one back
+// through the diff between that commit and the working tree. One that will not
+// carry is not dropped: it becomes one of the file's loose remarks, shown
+// under its heading rather than beside a line that is not there.
+func (m *Model) place(files []*reviewFile) []*reviewFile {
+	carry := m.carries[m.commit]
+	byPath := map[string]*reviewFile{}
+	out := make([]*reviewFile, 0, len(files))
+	for _, f := range files {
+		f.threads, f.loose = map[int][]*review.Thread{}, nil
+		f.total, f.open = m.rv.CountFor(f.path)
+		f.approved = m.rv.Approved(f.path)
+		f.nullified = m.rv.Nullified(f.path)
+		f.folded = m.foldedFor(f)
+		if m.commit != "" {
+			// The state of the working tree says nothing about a commit that
+			// is already made.
+			f.state = ""
+		} else {
+			f.state = m.state[f.path]
+		}
+		byPath[f.path] = f
+		out = append(out, f)
+	}
+
+	split := m.view.splitting()
+	for _, f := range out {
+		// The rows have to exist before a comment can be hung off one, and the
+		// pane lays them out again when it draws. Both ask the same question
+		// of the same width, so both get the same answer.
+		f.buildRows(split)
+		newAt, oldAt := f.lineRows()
+		for _, t := range m.rv.ThreadsFor(f.path) {
+			side := t.Side
+			first, last := t.Span()
+			if m.commit != "" {
+				// Threads live in the working tree's numbering; this view is
+				// in the commit's.
+				var ok bool
+				first, ok = review.CarryBack(carry[f.path], side, first)
+				if !ok {
+					f.loose = append(f.loose, t)
+					continue
+				}
+				last, _ = review.CarryBack(carry[f.path], side, last)
+				side = review.SideNew
+			}
+			at := newAt
+			if side == review.SideOld {
+				at = oldAt
+			}
+			// A remark about a block of lines is drawn under the last of them,
+			// which is where it reads as being about what came above it. If
+			// that line is not in this diff, the first one will do.
+			idx, ok := at[last]
+			if !ok {
+				idx, ok = at[first]
+			}
+			if !ok || !t.Anchored() {
+				f.loose = append(f.loose, t)
+				continue
+			}
+			f.threads[idx] = append(f.threads[idx], t)
+		}
+	}
+
+	// A comment can outlive the change it was about: the file may have been
+	// put back, or the base moved past it. Losing it silently would be the
+	// worst thing this window could do, so the file keeps its place in the
+	// stack with nothing but its remarks in it.
+	var gone []*reviewFile
+	for _, t := range m.rv.Threads {
+		if byPath[t.Path] != nil {
+			continue
+		}
+		f := byPath["\x00"+t.Path]
+		if f == nil {
+			f = &reviewFile{path: t.Path, gone: true, threads: map[int][]*review.Thread{}}
+			f.total, f.open = m.rv.CountFor(t.Path)
+			f.folded = m.folds[t.Path]
+			byPath["\x00"+t.Path] = f
+			gone = append(gone, f)
+		}
+		f.loose = append(f.loose, t)
+	}
+	sort.Slice(gone, func(i, j int) bool { return gone[i].path < gone[j].path })
+	return append(out, gone...)
+}
+
+// foldedFor decides whether a file starts folded.
+//
+// A file that has been approved and has nothing outstanding on it is done
+// with, so it folds away and the review is what is left. Anything the reader
+// has folded or unfolded by hand overrides that, because they were looking at
+// it more recently than this rule was written.
+func (m *Model) foldedFor(f *reviewFile) bool {
+	if v, ok := m.folds[f.path]; ok {
+		return v
+	}
+	return f.done()
+}
+
+// entriesFor is the contents page beside the stack.
+func entriesFor(files []*reviewFile) []fileEntry {
+	out := make([]fileEntry, 0, len(files))
+	for _, f := range files {
+		e := fileEntry{
+			path: f.path, from: f.from, adds: f.adds, dels: f.dels,
+			approved: f.approved, nullified: f.nullified,
+			open: f.open, total: f.total,
+			pending: f.state.Pending(),
+		}
+		if f.gone {
+			e.pending = "no longer changed"
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// abbrevHash shortens a hash for a message, matching what the history shows.
+func abbrevHash(hash string) string {
+	if len(hash) > 7 {
+		return hash[:7]
+	}
+	return hash
+}
+
+// ---------------------------------------------------------------------------
+// Keys
+// ---------------------------------------------------------------------------
+
+func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.dialog != nil {
 		cmd, closed := m.dialog.update(msg)
 		if closed {
@@ -660,57 +912,45 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// A mouse selection is dropped by Esc before Esc means anything else, so
-	// nobody is ever stuck behind a highlight: the second press does whatever
-	// the key normally does. This is above the reader because the reader has
-	// selections too, and its Esc closes it.
+	// nobody is ever stuck behind a highlight.
 	if m.mouse.hasSelection() && key.Matches(msg, m.keys.Cancel) {
 		m.mouse.clear()
 		return m, nil
 	}
 
-	// The markdown reader owns the screen, so it owns the keys.
+	// A full screen reader owns the screen, so it owns the keys.
 	if m.md != nil {
 		return m.markdownKey(msg)
 	}
+	if m.file != nil {
+		return m.fileKey(msg)
+	}
 
-	// A status message lasts until the next key press. Clearing it here
-	// rather than after dispatch means an action that sets its own message
-	// still gets to show it.
+	// A status message lasts until the next key press. Clearing it here rather
+	// than after dispatch means an action that sets its own message still gets
+	// to show it.
 	m.clearStatus()
 
-	// The only keys that work everywhere, message buffer included.
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m.doQuit()
 	case key.Matches(msg, m.keys.Help):
 		m.dialog = textDialog("difftui — keys", helpText())
 		return m, nil
-	case key.Matches(msg, m.keys.Commit):
-		return m.doCommit()
+	case key.Matches(msg, m.keys.Post):
+		return m.doPost()
 	case key.Matches(msg, m.keys.Rescan):
-		m.setOK("Rescanning…")
-		m.rescanning = true
-		return m, m.rescanCmd()
-	case key.Matches(msg, m.keys.FocusWorkdir):
-		return m.setFocus(focusWorkdir)
-	case key.Matches(msg, m.keys.FocusIndex):
-		return m.setFocus(focusIndex)
-	case key.Matches(msg, m.keys.FocusDiff):
-		return m.setFocus(focusDiff)
-	case key.Matches(msg, m.keys.FocusCommits):
-		if !m.showCommits() {
+		return m.doRescan()
+	case key.Matches(msg, m.keys.FocusFiles):
+		return m.setFocus(focusFiles)
+	case key.Matches(msg, m.keys.FocusReview):
+		return m.setFocus(focusReview)
+	case key.Matches(msg, m.keys.FocusHistory):
+		if !m.showHistory() {
 			m.setError("This branch has no commits of its own")
 			return m, nil
 		}
-		return m.setFocus(focusCommits)
-	case key.Matches(msg, m.keys.FocusCommit):
-		// Alt-4 means "take me to the message", so it brings it up if it is
-		// not already. That is not a second way in behind your back: the
-		// message stays hidden until you ask for it, and this is asking.
-		// Alt-5 refuses when the branch has no commits because that pane has
-		// nothing to show; this one always has something to show.
-		m.composeOpen = true
-		return m.setFocus(focusCommit)
+		return m.setFocus(focusHistory)
 	case key.Matches(msg, m.keys.NextPane):
 		return m.setFocus(m.stepPane(1))
 	case key.Matches(msg, m.keys.PrevPane):
@@ -719,123 +959,157 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.toggleZoom(m.focus)
 	}
 
-	// In the message buffer every letter is text, so the command letters
-	// below are not reachable from it: Tab or Esc leaves first.
-	if m.focus == focusCommit {
-		return m.commitKey(msg)
+	// In the composer every letter is text, so none of the commands below are
+	// reachable from it: Esc leaves first.
+	if m.focus == focusCompose {
+		return m.composeKey(msg)
 	}
 
-	// U acts on the commit selected in the branch history, from wherever you
-	// press it, so the key means one thing everywhere. It is taken before the
-	// guard below because it is the one change history is allowed to make.
-	if key.Matches(msg, m.keys.PopKey) {
-		return m.doPop()
-	}
-
-	// History is read only: the commands that change the working tree or the
-	// index have nothing to act on while an earlier commit is on screen.
-	if m.browsing() {
-		switch {
-		case key.Matches(msg, m.keys.Toggle),
-			key.Matches(msg, m.keys.StageKey),
-			key.Matches(msg, m.keys.UnstageKey),
-			key.Matches(msg, m.keys.RevertKey),
-			key.Matches(msg, m.keys.Delete),
-			key.Matches(msg, m.keys.StageLine),
-			key.Matches(msg, m.keys.RevertHunk):
-			c, _ := m.commits.selected()
-			m.setError("Looking at " + c.Short + "; select the working tree to change anything")
+	// A count in front of a command, the way vim takes one. Any other key
+	// ends it, so it is taken and cleared here and handed to whatever runs
+	// next; only g and G do anything with it.
+	count := m.count
+	m.count = ""
+	if m.focus == focusReview {
+		if d, ok := digit(msg); ok && (d != '0' || count != "") {
+			m.count = count + string(d)
 			return m, nil
 		}
 	}
 
-	// Commands. A letter each, live in the file lists and the diff.
 	switch {
 	case key.Matches(msg, m.keys.QuitKey):
 		return m.doQuit()
 	case key.Matches(msg, m.keys.HelpKey):
 		m.dialog = textDialog("difftui — keys", helpText())
 		return m, nil
-	case key.Matches(msg, m.keys.StageKey):
-		return m.doStage()
-	case key.Matches(msg, m.keys.UnstageKey):
-		return m.doUnstage()
-	case key.Matches(msg, m.keys.RevertKey):
-		return m.doRevert()
-	case key.Matches(msg, m.keys.SignOffKey):
-		return m.doSignOff()
-	case key.Matches(msg, m.keys.AmendKey):
-		return m.toggleAmend()
+	case key.Matches(msg, m.keys.RescanKey):
+		return m.doRescan()
+	case key.Matches(msg, m.keys.ApproveKey):
+		return m.doApprove()
+	case key.Matches(msg, m.keys.ApproveAll):
+		return m.doApproveAll()
+	case key.Matches(msg, m.keys.FoldAll):
+		return m.doFoldAll()
+	case key.Matches(msg, m.keys.HideDone):
+		return m.doHideDone()
+	case key.Matches(msg, m.keys.SplitKey):
+		return m.doSplit()
+	case key.Matches(msg, m.keys.CommentKey):
+		return m.doComment()
+	case key.Matches(msg, m.keys.ReplyKey):
+		return m.doReply()
+	case key.Matches(msg, m.keys.ResolveKey):
+		return m.doResolve()
+	case key.Matches(msg, m.keys.DeleteKey):
+		return m.doDelete()
+	case key.Matches(msg, m.keys.BaseKey):
+		return m.doChooseBase()
 	case key.Matches(msg, m.keys.EditKey):
 		return m.doEdit()
+	case key.Matches(msg, m.keys.ViewKey):
+		return m.doViewFile(sideNow)
+	case key.Matches(msg, m.keys.ViewOldKey):
+		return m.doViewFile(sideBefore)
 	case key.Matches(msg, m.keys.MarkdownKey):
 		return m.doMarkdown()
+	case key.Matches(msg, m.keys.CheckoutKey):
+		return m.doCheckout()
 	case key.Matches(msg, m.keys.LessContextKey):
 		return m.changeContext(-1)
 	case key.Matches(msg, m.keys.MoreContextKey):
 		return m.changeContext(+1)
-	case key.Matches(msg, m.keys.PushKey):
-		return m.doPush()
-	case key.Matches(msg, m.keys.MergeKey):
-		return m.doMerge()
-	case key.Matches(msg, m.keys.BranchKey):
-		return m.doCreateBranch()
-	case key.Matches(msg, m.keys.CheckoutKey):
-		return m.doCheckout()
-	case key.Matches(msg, m.keys.RescanKey):
-		m.setOK("Rescanning…")
-		m.rescanning = true
-		return m, m.rescanCmd()
-	case key.Matches(msg, m.keys.Delete):
-		return m.doDelete()
 	}
 
 	switch m.focus {
-	case focusDiff:
-		return m.diffKey(msg)
-	case focusCommits:
-		return m.commitsKey(msg)
+	case focusReview:
+		return m.reviewKey(msg, count)
+	case focusHistory:
+		return m.historyKey(msg)
 	}
-	return m.listKey(msg)
+	return m.filesKey(msg)
 }
 
-// commitsKey drives the branch history. Moving the cursor changes which
-// version of the branch the rest of the window is showing, so every move ends
-// in a reload of the pane above and the diff beside it.
-func (m Model) commitsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) doRescan() (tea.Model, tea.Cmd) {
+	m.setOK("Rescanning…")
+	m.rescanning = true
+	return m, m.rescanCmd()
+}
+
+// filesKey drives the contents page. Moving the cursor scrolls the review to
+// that file, which is the whole point of the pane.
+func (m Model) filesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	moved := true
 	switch {
 	case key.Matches(msg, m.keys.Up):
-		if m.commits.cursor <= 0 {
+		if m.files.cursor <= 0 {
+			return m, nil
+		}
+		m.files.move(-1)
+	case key.Matches(msg, m.keys.Down):
+		if m.files.cursor >= len(m.files.entries)-1 {
+			if t, ok := m.paneBelow(m.focus); ok {
+				return m.enterPane(t, entryTop)
+			}
+			return m, nil
+		}
+		m.files.move(1)
+	case key.Matches(msg, m.keys.PageUp):
+		m.files.move(-max(m.files.height-1, 1))
+	case key.Matches(msg, m.keys.PageDown):
+		m.files.move(max(m.files.height-1, 1))
+	case key.Matches(msg, m.keys.Home):
+		m.files.moveTo(0)
+	case key.Matches(msg, m.keys.End):
+		m.files.moveTo(len(m.files.entries) - 1)
+	case key.Matches(msg, m.keys.Right), key.Matches(msg, m.keys.Toggle):
+		// Right and Space both mean "show me this one", and land in the
+		// review with the file at the top of the pane.
+		m.view.jumpToFile(m.files.currentPath())
+		return m.setFocus(focusReview)
+	case key.Matches(msg, m.keys.NextFile):
+		m.files.move(1)
+	case key.Matches(msg, m.keys.PrevFile):
+		m.files.move(-1)
+	case key.Matches(msg, m.keys.ZoomKey):
+		return m.toggleZoom(m.focus)
+	default:
+		moved = false
+	}
+	if moved {
+		m.view.jumpToFile(m.files.currentPath())
+	}
+	return m, nil
+}
+
+// historyKey drives the commits. Moving the cursor changes what the review
+// pane is showing: the whole change, or one step of it.
+func (m Model) historyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	moved := true
+	switch {
+	case key.Matches(msg, m.keys.Up):
+		if m.history.cursor <= 0 {
 			if t, ok := m.paneAbove(m.focus); ok {
 				return m.enterPane(t, entryBottom)
 			}
 			return m, nil
 		}
-		m.commits.move(-1)
+		m.history.move(-1)
 	case key.Matches(msg, m.keys.Down):
-		if m.commits.cursor >= m.commits.rows()-1 {
+		if m.history.cursor >= m.history.rows()-1 {
 			return m, nil
 		}
-		m.commits.move(1)
-	case key.Matches(msg, m.keys.Left):
-		if t, ok := m.paneLeft(focusDiff); ok {
-			return m.enterPane(t, entryKeep)
-		}
-		return m, nil
-	case key.Matches(msg, m.keys.Right):
-		if t, ok := m.paneRight(m.focus); ok {
-			return m.enterPane(t, entryKeep)
-		}
-		return m, nil
+		m.history.move(1)
 	case key.Matches(msg, m.keys.PageUp):
-		m.commits.move(-max(m.commits.height-1, 1))
+		m.history.move(-max(m.history.height-1, 1))
 	case key.Matches(msg, m.keys.PageDown):
-		m.commits.move(max(m.commits.height-1, 1))
+		m.history.move(max(m.history.height-1, 1))
 	case key.Matches(msg, m.keys.Home):
-		m.commits.moveTo(0)
+		m.history.moveTo(0)
 	case key.Matches(msg, m.keys.End):
-		m.commits.moveTo(m.commits.rows() - 1)
+		m.history.moveTo(m.history.rows() - 1)
+	case key.Matches(msg, m.keys.Right), key.Matches(msg, m.keys.Toggle):
+		return m.setFocus(focusReview)
 	case key.Matches(msg, m.keys.ZoomKey):
 		return m.toggleZoom(m.focus)
 	default:
@@ -844,64 +1118,362 @@ func (m Model) commitsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !moved {
 		return m, nil
 	}
-	cmd := m.onCommitSelected()
-	return m, cmd
+	return m, m.selectedCommitCmd()
 }
 
-// onCommitSelected reloads the left column and the diff for whatever the
-// history cursor now points at: a commit's own files, or the working tree.
-func (m *Model) onCommitSelected() tea.Cmd {
+// selectedCommitCmd switches the review to whatever the history has picked,
+// and asks for its diff when it has not been read yet.
+func (m *Model) selectedCommitCmd() tea.Cmd {
+	hash := ""
+	if c, ok := m.history.selected(); ok {
+		hash = c.Hash
+	}
+	m.commit = hash
 	m.mouse.clear()
-	m.layout()
-	if c, ok := m.commits.selected(); ok {
-		files, known := m.histories[c.Hash]
-		if !known {
-			// Nothing to show until the list arrives; the diff would otherwise
-			// sit there belonging to whatever was on screen before.
-			m.history.label = ""
-			m.history.setFiles(nil)
-			m.diff.clear()
-			return m.historyCmd(c.Hash)
-		}
-		m.history.label = "Files in " + c.Short
-		m.history.setFiles(files)
-		m.layout()
-		return m.refreshDiffCmd()
+	if hash != "" && m.commits[hash] == nil {
+		m.loading = hash
+		m.rebuild()
+		return m.commitCmd(hash)
 	}
-	m.history.label = ""
-	m.history.setFiles(nil)
-	return m.refreshDiffCmd()
+	m.rebuild()
+	return nil
 }
 
-// Panes are laid out as a two by two grid, so moving off the edge of one lands
-// on its neighbour:
-//
-//	unstaged │ diff
-//	─────────┼────────
-//	staged   │ commit
-//
-// paneAbove and friends return the neighbour in a direction, or false when
-// there is nothing there.
-// leftPanes is the left column from top to bottom, holding only what is on
-// screen: the working lists or the commit's files in their place, and the
-// branch history under them when the branch has commits of its own.
-func (m *Model) leftPanes() []focusArea {
-	var out []focusArea
-	if m.browsing() {
-		out = append(out, focusHistory)
-	} else {
-		out = append(out, focusWorkdir, focusIndex)
+// digit reports whether a key press is a single digit and nothing else. A key
+// carries the text it produced, so a digit is a key whose text is one digit,
+// with no modifier held.
+func digit(msg tea.KeyPressMsg) (rune, bool) {
+	if msg.Mod != 0 || len([]rune(msg.Text)) != 1 {
+		return 0, false
 	}
-	if m.showCommits() {
-		out = append(out, focusCommits)
+	if r := []rune(msg.Text)[0]; r >= '0' && r <= '9' {
+		return r, true
+	}
+	return 0, false
+}
+
+// reviewKey drives the stack itself. count is the digits typed in front of the
+// key, empty when there were none.
+func (m Model) reviewKey(msg tea.KeyPressMsg, count string) (tea.Model, tea.Cmd) {
+	// While a visual selection is open the cursor stays inside the pane:
+	// running off the end would abandon the gesture halfway.
+	if m.view.visual() {
+		switch {
+		case key.Matches(msg, m.keys.Up):
+			m.view.move(-1)
+			return m.follow(), nil
+		case key.Matches(msg, m.keys.Down):
+			m.view.move(1)
+			return m.follow(), nil
+		case key.Matches(msg, m.keys.Left):
+			m.view.scrollH(-hScrollStep)
+			return m, nil
+		case key.Matches(msg, m.keys.Right):
+			m.view.scrollH(hScrollStep)
+			return m, nil
+		case key.Matches(msg, m.keys.Cancel):
+			m.view.clearVisual()
+			return m, nil
+		}
+	}
+
+	switch {
+	case key.Matches(msg, m.keys.Up):
+		if m.view.cursor <= 0 {
+			return m, nil
+		}
+		m.view.move(-1)
+	case key.Matches(msg, m.keys.Down):
+		if m.view.cursor >= len(m.view.rows)-1 {
+			return m, nil
+		}
+		m.view.move(1)
+	case key.Matches(msg, m.keys.Left):
+		// Left runs the code back to the margin before it means the pane on
+		// the left, the way down runs to the last row before it means the one
+		// below.
+		if m.view.scrollH(-hScrollStep) {
+			return m, nil
+		}
+		if t, ok := m.paneLeft(m.focus); ok {
+			return m.enterPane(t, entryKeep)
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.Right):
+		m.view.scrollH(hScrollStep)
+		return m, nil
+	case key.Matches(msg, m.keys.PageUp):
+		m.view.move(-max(m.view.bodyRows()-1, 1))
+	case key.Matches(msg, m.keys.PageDown):
+		m.view.move(max(m.view.bodyRows()-1, 1))
+	case key.Matches(msg, m.keys.Home):
+		// 24g goes to line 24, as 24G does in vim. Bare, they are still the
+		// two ends of the review.
+		if n, ok := lineCount(count); ok {
+			return m.gotoLine(n)
+		}
+		m.view.moveTo(0)
+	case key.Matches(msg, m.keys.End):
+		if n, ok := lineCount(count); ok {
+			return m.gotoLine(n)
+		}
+		m.view.moveTo(len(m.view.rows) - 1)
+	case key.Matches(msg, m.keys.NextHunk):
+		m.view.jumpHunk(1)
+	case key.Matches(msg, m.keys.PrevHunk):
+		m.view.jumpHunk(-1)
+	case key.Matches(msg, m.keys.NextFile):
+		m.view.jumpFile(1)
+	case key.Matches(msg, m.keys.PrevFile):
+		m.view.jumpFile(-1)
+	case key.Matches(msg, m.keys.NextThread):
+		if !m.view.jumpThread(1, m.rv) {
+			m.setOK("No open comment below here")
+		}
+	case key.Matches(msg, m.keys.PrevThread):
+		if !m.view.jumpThread(-1, m.rv) {
+			m.setOK("No open comment above here")
+		}
+	case key.Matches(msg, m.keys.Visual):
+		m.view.toggleVisual()
+		return m, nil
+	case key.Matches(msg, m.keys.ZoomKey):
+		return m.toggleZoom(m.focus)
+	case key.Matches(msg, m.keys.Toggle):
+		return m.doToggle()
+	default:
+		return m, nil
+	}
+	return m.follow(), nil
+}
+
+// lineCount reads a typed count, refusing one too large to be a line number in
+// anything anybody would review.
+func lineCount(count string) (int, bool) {
+	if count == "" || len(count) > 9 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(count)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// gotoLine jumps to a numbered line of the file the cursor is in, counted in
+// the file as it now stands — which is the space every comment and every
+// compiler error names a line in.
+//
+// Most of a file is not in its own diff, so a line that is not on screen
+// anywhere lands on the nearest one that is, and says so rather than pretending
+// it went where it was asked.
+func (m Model) gotoLine(n int) (tea.Model, tea.Cmd) {
+	r, ok := m.view.row()
+	if !ok || r.file < 0 {
+		m.setError("Nothing to go to")
+		return m, nil
+	}
+	f := m.view.files[r.file]
+	row, exact, found := m.view.lineRow(r.file, n)
+	if !found {
+		m.setError(f.path + " has no line " + itoa(n) + " in this diff")
+		return m, nil
+	}
+	m.view.reveal(row)
+	if !exact {
+		at := 0
+		if l, ok := m.view.files[r.file].rowLine(m.view.rows[row].line); ok {
+			at = l.New
+		}
+		m.setWarn(f.path + " line " + itoa(n) + " is not in the diff; nearest is " + itoa(at))
+	} else {
+		m.setOK(f.path + ":" + itoa(n))
+	}
+	return m.follow(), nil
+}
+
+// follow keeps the contents page on the file the cursor has reached, so the
+// two halves of the window never disagree about where you are.
+func (m Model) follow() Model {
+	m.files.selectPath(m.view.pathAt())
+	return m
+}
+
+// doToggle is Space in the review: it opens or shuts whatever the cursor is
+// on. One verb, three objects — a file's section, a closed conversation, and a
+// line, which has nothing to open and so offers the thing you would want next.
+func (m Model) doToggle() (tea.Model, tea.Cmd) {
+	r, ok := m.view.row()
+	if !ok {
+		return m, nil
+	}
+	switch {
+	case r.kind == rowFile:
+		return m.doFold()
+	case r.kind == rowThread:
+		id := r.thread
+		t := m.rv.Thread(id)
+		if t != nil && t.Resolved {
+			m.view.expanded[id] = !m.view.expanded[id]
+			m.view.build()
+			m.view.clamp()
+			return m, nil
+		}
+		return m.doReply()
+	}
+	return m.doComment()
+}
+
+// doFold opens or shuts the file the cursor is in.
+func (m Model) doFold() (tea.Model, tea.Cmd) {
+	f, ok := m.view.file()
+	if !ok {
+		return m, nil
+	}
+	m.folds[f.path] = !f.folded
+	m.rebuild()
+	m.view.jumpToFile(f.path)
+	return m, nil
+}
+
+// doHideDone takes the finished files off the screen, or puts them back.
+//
+// Folding a file gets it out of the way and leaves it in the review, which is
+// right while you are still reading. This is for the other half of the job:
+// once most of a change has been signed off, what is left is the list of
+// things still wanting something, and everything else is noise between them.
+func (m Model) doHideDone() (tea.Model, tea.Cmd) {
+	m.hideDone = !m.hideDone
+	path := m.view.pathAt()
+	m.rebuild()
+	if m.hideDone {
+		// The file being read may have been one of the ones that went.
+		if !m.view.jumpToFile(path) {
+			m.view.clamp()
+		}
+		if n := m.view.hidden; n == 0 {
+			m.setOK("Nothing is finished with yet · f shows every file again")
+		} else {
+			m.setOK("Hiding " + plural(n, "finished file", "finished files") + " · f shows them again")
+		}
+		return m, nil
+	}
+	m.view.jumpToFile(path)
+	m.setOK("Showing every file")
+	return m, nil
+}
+
+// doSplit draws the two sides of the change beside each other, or one above
+// the other again.
+//
+// Neither is the right way round for everything: a unified diff reads as one
+// text and is what a patch is, while a split one lines up what a line was
+// against what it became, which is what you want when the change is an edit
+// rather than an insertion. So it is a key rather than a setting.
+func (m Model) doSplit() (tea.Model, tea.Cmd) {
+	m.view.split = !m.view.split
+	path := m.view.pathAt()
+	m.rebuild()
+	m.view.jumpToFile(path)
+	switch {
+	case !m.view.split:
+		m.setOK("Unified diff")
+	case m.view.splitting():
+		m.setOK("Split diff")
+	default:
+		// Asked for and remembered, but not drawn: the pane will split itself
+		// as soon as it is wide enough.
+		m.setWarn("Split diff needs " + itoa(minSplitWidth) + " columns; showing unified until then")
+	}
+	return m, nil
+}
+
+// doFoldAll shuts every file, or opens every file when they are already shut.
+//
+// One key for both because they are the same want at two moments: a long
+// review folded down to its headings is the map of it, and that is worth
+// reaching whether you are coming from having everything open or from having
+// read your way down to nothing. Anything still open decides which way it
+// goes, so the first press always tidies.
+//
+// Opening them again steps over the ones that are done with. A file folds
+// itself away once it has been approved with nothing outstanding on it, and
+// "show me everything" plainly means everything there is still something to
+// do about — undoing that would hand back the pile the folding was clearing.
+// So opening hands each file to the rule rather than forcing it open, and only
+// the files that rule does not fold come back.
+func (m Model) doFoldAll() (tea.Model, tea.Cmd) {
+	if len(m.view.files) == 0 {
+		return m, nil
+	}
+	fold := false
+	for _, f := range m.view.files {
+		if !f.folded {
+			fold = true
+			break
+		}
+	}
+	path := m.view.pathAt()
+
+	kept := 0
+	for _, f := range m.view.files {
+		switch {
+		case fold:
+			m.folds[f.path] = true
+		case f.done():
+			delete(m.folds, f.path)
+			kept++
+		default:
+			m.folds[f.path] = false
+		}
+	}
+	// Unless there is nothing else left, in which case the second press has to
+	// do something: a review where every file is done with would otherwise
+	// have a key that looks broken.
+	if !fold && kept == len(m.view.files) {
+		for _, f := range m.view.files {
+			m.folds[f.path] = false
+		}
+		kept = 0
+	}
+
+	m.rebuild()
+	// The file you were reading is the one to still be looking at, whichever
+	// way it went.
+	m.view.jumpToFile(path)
+	m.files.selectPath(path)
+	switch {
+	case fold:
+		m.setOK("Folded " + plural(len(m.view.files), "file", "files"))
+	case kept > 0:
+		m.setOK("Opened " + plural(len(m.view.files)-kept, "file", "files") +
+			" · " + itoa(kept) + " approved left folded")
+	default:
+		m.setOK("Opened " + plural(len(m.view.files), "file", "files"))
+	}
+	return m, nil
+}
+
+// ---------------------------------------------------------------------------
+// Panes
+// ---------------------------------------------------------------------------
+
+// leftPanes is the left column from top to bottom, holding only what is on
+// screen.
+func (m *Model) leftPanes() []focusArea {
+	out := []focusArea{focusFiles}
+	if m.showHistory() {
+		out = append(out, focusHistory)
 	}
 	return out
 }
 
-// paneAbove is a method because the left column's contents vary.
+// showHistory reports whether the branch has any commits of its own to list.
+func (m *Model) showHistory() bool { return len(m.history.commits) > 0 }
+
 func (m *Model) paneAbove(f focusArea) (focusArea, bool) {
-	if f == focusCommit {
-		return focusDiff, true
+	if f == focusCompose {
+		return focusReview, true
 	}
 	panes := m.leftPanes()
 	for i, p := range panes {
@@ -913,10 +1485,7 @@ func (m *Model) paneAbove(f focusArea) (focusArea, bool) {
 }
 
 func (m *Model) paneBelow(f focusArea) (focusArea, bool) {
-	if f == focusDiff {
-		if m.composeOpen {
-			return focusCommit, true
-		}
+	if f == focusReview {
 		return f, false
 	}
 	panes := m.leftPanes()
@@ -928,18 +1497,12 @@ func (m *Model) paneBelow(f focusArea) (focusArea, bool) {
 	return f, false
 }
 
-// paneVisible reports whether a pane is on screen at all, which decides what
-// Tab and the Alt keys can reach.
 func (m *Model) paneVisible(f focusArea) bool {
 	switch f {
-	case focusWorkdir, focusIndex:
-		return !m.browsing()
 	case focusHistory:
-		return m.browsing()
-	case focusCommits:
-		return m.showCommits()
-	case focusCommit:
-		return m.composeOpen
+		return m.showHistory()
+	case focusCompose:
+		return m.compose != nil
 	}
 	return true
 }
@@ -956,41 +1519,11 @@ func (m *Model) stepPane(delta int) focusArea {
 	return m.focus
 }
 
-// paneLeft returns to whichever file list owns the diff currently on show,
-// rather than to a fixed pane. git-gui tracks the same thing as
-// current_diff_side, so leaving the diff and coming back keeps you on the file
-// you were looking at.
+// paneLeft is which pane the review hands the cursor back to.
 func (m *Model) paneLeft(f focusArea) (focusArea, bool) {
 	switch f {
-	case focusDiff, focusCommit:
-		if m.browsing() {
-			return focusHistory, true
-		}
-		if _, side := m.activeList(); side == git.SideIndex {
-			return focusIndex, true
-		}
-		return focusWorkdir, true
-	}
-	return f, false
-}
-
-// paneRight sends both lists to the diff: it is the pane you want next from
-// either one. The commit buffer is below the diff, reached with down.
-// paneRight sends the lists to the diff, and the branch history to whatever it
-// has selected: the commit's files when it is on a commit, the diff when it is
-// on the working tree. Right therefore chains down the column — history, then
-// files, then the diff — which is the only way into the files pane by arrow,
-// since leaving the history upwards means passing its top row and so leaving
-// the commit behind.
-func (m *Model) paneRight(f focusArea) (focusArea, bool) {
-	switch f {
-	case focusCommits:
-		if m.browsing() {
-			return focusHistory, true
-		}
-		return focusDiff, true
-	case focusWorkdir, focusIndex, focusHistory:
-		return focusDiff, true
+	case focusReview, focusCompose:
+		return focusFiles, true
 	}
 	return f, false
 }
@@ -1004,38 +1537,28 @@ const (
 	entryBottom
 )
 
-// enterPane focuses a neighbouring pane, placing its cursor at the edge the
-// move arrived from so that continuing to hold the key keeps going the same
-// way.
 func (m Model) enterPane(f focusArea, e entry) (tea.Model, tea.Cmd) {
 	switch f {
-	case focusWorkdir, focusIndex, focusHistory:
-		l := m.workdir
-		switch f {
-		case focusIndex:
-			l = m.index
-		case focusHistory:
-			l = m.history
-		}
+	case focusFiles:
 		switch e {
 		case entryTop:
-			l.moveTo(0)
+			m.files.moveTo(0)
 		case entryBottom:
-			l.moveTo(len(l.files) - 1)
+			m.files.moveTo(len(m.files.entries) - 1)
 		}
-	case focusCommits:
+	case focusHistory:
 		switch e {
 		case entryTop:
-			m.commits.moveTo(0)
+			m.history.moveTo(0)
 		case entryBottom:
-			m.commits.moveTo(m.commits.rows() - 1)
+			m.history.moveTo(m.history.rows() - 1)
 		}
-	case focusDiff:
+	case focusReview:
 		switch e {
 		case entryTop:
-			m.diff.moveTo(0)
+			m.view.moveTo(0)
 		case entryBottom:
-			m.diff.moveTo(len(m.diff.lines) - 1)
+			m.view.moveTo(len(m.view.rows) - 1)
 		}
 	}
 	return m.setFocus(f)
@@ -1045,464 +1568,588 @@ func (m Model) setFocus(f focusArea) (tea.Model, tea.Cmd) {
 	m.focus = f
 	// A selection belongs to the pane it was made in and to the moment it was
 	// made in, so leaving that pane ends it.
-	if f != focusDiff {
-		m.diff.clearVisual()
-	}
-	if f != focusWorkdir {
-		m.workdir.clearVisual()
-	}
-	if f != focusIndex {
-		m.index.clearVisual()
+	if f != focusReview {
+		m.view.clearVisual()
 	}
 	m.layout()
-	if f == focusCommit {
-		m.commit.Focus()
+	if f == focusCompose {
+		m.editor.Focus()
 		return m, textarea.Blink
 	}
-	m.commit.Blur()
-	if f == focusWorkdir || f == focusIndex {
-		cmd := m.refreshDiffCmd()
-		return m, cmd
-	}
-	return m, nil
-}
-
-func (m Model) listKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	list, side := m.activeList()
-	if list == nil {
-		return m, nil
-	}
-	// While a selection is open the cursor stays inside the list: running off
-	// the end into the next pane would abandon the selection mid-gesture. The
-	// diff pane holds its own selection the same way.
-	if list.visual() {
-		switch {
-		case key.Matches(msg, m.keys.Up):
-			list.move(-1)
-			cmd := m.refreshDiffCmd()
-			return m, cmd
-		case key.Matches(msg, m.keys.Down):
-			list.move(1)
-			cmd := m.refreshDiffCmd()
-			return m, cmd
-		case key.Matches(msg, m.keys.Cancel):
-			list.clearVisual()
-			return m, nil
-		}
-	}
-
-	moved := true
-	switch {
-	case key.Matches(msg, m.keys.Up):
-		// At the top of a list, carry on into the pane above.
-		if list.cursor <= 0 {
-			if t, ok := m.paneAbove(m.focus); ok {
-				return m.enterPane(t, entryBottom)
-			}
-			return m, nil
-		}
-		list.move(-1)
-	case key.Matches(msg, m.keys.Down):
-		if list.cursor >= len(list.files)-1 {
-			if t, ok := m.paneBelow(m.focus); ok {
-				return m.enterPane(t, entryTop)
-			}
-			return m, nil
-		}
-		list.move(1)
-	case key.Matches(msg, m.keys.Left):
-		if t, ok := m.paneLeft(m.focus); ok {
-			return m.enterPane(t, entryKeep)
-		}
-		return m, nil
-	case key.Matches(msg, m.keys.Right):
-		if t, ok := m.paneRight(m.focus); ok {
-			return m.enterPane(t, entryKeep)
-		}
-		return m, nil
-	case key.Matches(msg, m.keys.PageUp):
-		list.move(-max(list.height-1, 1))
-	case key.Matches(msg, m.keys.PageDown):
-		list.move(max(list.height-1, 1))
-	case key.Matches(msg, m.keys.Home):
-		list.moveTo(0)
-	case key.Matches(msg, m.keys.End):
-		list.moveTo(len(list.files) - 1)
-	case key.Matches(msg, m.keys.Toggle):
-		// git-gui's icon click: stage from the unstaged list, unstage from
-		// the staged list. With a selection open it takes the whole of it.
-		if side == git.SideIndex {
-			return m.doUnstage()
-		}
-		return m.doStage()
-	case key.Matches(msg, m.keys.Visual):
-		list.toggleVisual()
-		moved = false
-	case key.Matches(msg, m.keys.ZoomKey):
-		return m.toggleZoom(m.focus)
-	default:
-		moved = false
-	}
-	if moved {
-		cmd := m.refreshDiffCmd()
-		return m, cmd
-	}
-	return m, nil
-}
-
-func (m Model) diffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// While a visual selection is open the cursor stays inside the diff:
-	// running off the end would abandon the selection mid-gesture.
-	if m.diff.visual() {
-		switch {
-		case key.Matches(msg, m.keys.Up):
-			m.diff.move(-1)
-			return m, nil
-		case key.Matches(msg, m.keys.Down):
-			m.diff.move(1)
-			return m, nil
-		case key.Matches(msg, m.keys.Left):
-			m.diff.scrollH(-hScrollStep)
-			return m, nil
-		case key.Matches(msg, m.keys.Right):
-			m.diff.scrollH(hScrollStep)
-			return m, nil
-		case key.Matches(msg, m.keys.Cancel):
-			m.diff.clearVisual()
-			return m, nil
-		case key.Matches(msg, m.keys.Toggle):
-			// Space and Enter stage what is selected, as in the lists.
-			return m.doStageLines()
-		}
-	}
-
-	switch {
-	case key.Matches(msg, m.keys.Up):
-		if m.diff.cursor <= 0 {
-			if t, ok := m.paneAbove(m.focus); ok {
-				return m.enterPane(t, entryBottom)
-			}
-			return m, nil
-		}
-		m.diff.move(-1)
-	case key.Matches(msg, m.keys.Down):
-		if m.diff.cursor >= len(m.diff.lines)-1 {
-			if t, ok := m.paneBelow(m.focus); ok {
-				return m.enterPane(t, entryTop)
-			}
-			return m, nil
-		}
-		m.diff.move(1)
-	case key.Matches(msg, m.keys.Left):
-		// Left runs the code back to the margin before it means the pane on
-		// the left, the way down runs to the last line before it means the
-		// pane below.
-		if m.diff.scrollH(-hScrollStep) {
-			return m, nil
-		}
-		if t, ok := m.paneLeft(m.focus); ok {
-			return m.enterPane(t, entryKeep)
-		}
-		return m, nil
-	case key.Matches(msg, m.keys.Right):
-		if m.diff.scrollH(hScrollStep) {
-			return m, nil
-		}
-		if t, ok := m.paneRight(m.focus); ok {
-			return m.enterPane(t, entryKeep)
-		}
-		return m, nil
-	case key.Matches(msg, m.keys.PageUp):
-		m.diff.move(-max(m.diff.bodyRows()-1, 1))
-	case key.Matches(msg, m.keys.PageDown):
-		m.diff.move(max(m.diff.bodyRows()-1, 1))
-	case key.Matches(msg, m.keys.Home):
-		m.diff.moveTo(0)
-	case key.Matches(msg, m.keys.End):
-		m.diff.moveTo(len(m.diff.lines) - 1)
-	case key.Matches(msg, m.keys.Visual):
-		m.diff.toggleVisual()
-	case key.Matches(msg, m.keys.ZoomKey):
-		return m.toggleZoom(m.focus)
-	case key.Matches(msg, m.keys.StageLine):
-		return m.doStageLines()
-	case key.Matches(msg, m.keys.Toggle):
-		return m.doStage()
-	}
-	switch {
-	case key.Matches(msg, m.keys.NextHunk):
-		m.diff.jumpHunk(1)
-	case key.Matches(msg, m.keys.PrevHunk):
-		m.diff.jumpHunk(-1)
-	case key.Matches(msg, m.keys.RevertHunk):
-		return m.doRevertHunk()
-	}
+	m.editor.Blur()
 	return m, nil
 }
 
 // ---------------------------------------------------------------------------
-// Actions
+// The review's own commands
 // ---------------------------------------------------------------------------
 
 func (m Model) changeContext(delta int) (tea.Model, tea.Cmd) {
-	m.context = min(max(m.context+delta, minContext), maxContext)
-	m.setOK(fmt.Sprintf("Diff context: %d lines", m.context))
-	cmd := m.refreshDiffCmd()
-	return m, cmd
+	want := min(max(m.context+delta, minContext), maxContext)
+	if want == m.context {
+		return m, nil
+	}
+	m.context = want
+	m.setOK("Diff context: " + itoa(m.context) + " lines")
+	return m, m.rescanCmd()
 }
 
-func (m Model) doStage() (tea.Model, tea.Cmd) {
-	if m.focus == focusDiff {
-		return m.doHunk(false)
-	}
-	list, side := m.activeList()
-	if side == git.SideIndex {
-		// Already staged; git-gui's Ctrl-T on the index list is a no-op.
-		return m, nil
-	}
-	paths := list.targets()
-	if len(paths) == 0 {
-		return m, nil
-	}
-	list.clearVisual()
-	return m, op(fmt.Sprintf("Staged %s", plural(len(paths), "file", "files")), true,
-		func() error { return m.repo.Stage(paths) })
-}
-
-func (m Model) doUnstage() (tea.Model, tea.Cmd) {
-	if m.focus == focusDiff {
-		return m.doHunk(true)
-	}
-	list := m.index
-	if m.focus == focusWorkdir {
-		// Nothing to unstage from the working directory list.
-		return m, nil
-	}
-	paths := list.targets()
-	if len(paths) == 0 {
-		return m, nil
-	}
-	list.clearVisual()
-	repo, parent := m.repo, m.parent
-	return m, op(fmt.Sprintf("Unstaged %s", plural(len(paths), "file", "files")), true,
-		func() error { return repo.Unstage(paths, parent) })
-}
-
-// doHunk stages or unstages the hunk under the diff cursor.
-func (m Model) doHunk(forceUnstage bool) (tea.Model, tea.Cmd) {
-	if m.diff.patch == nil {
-		return m, nil
-	}
-	h := m.diff.currentHunk()
-	patch, ok := m.diff.patch.HunkPatch(h)
-	if !ok {
-		m.setError("Cursor is not inside a hunk")
-		return m, nil
-	}
-	unstage := m.diff.side == git.SideIndex || forceUnstage
-	label := "Staged hunk"
-	if unstage {
-		label = "Unstaged hunk"
-	}
-	repo := m.repo
-	return m, op(label, true, func() error { return repo.ApplyPatch(patch, true, unstage) })
-}
-
-func (m Model) doStageLines() (tea.Model, tea.Cmd) {
-	if m.diff.patch == nil {
-		return m, nil
-	}
-	h, sel := m.diff.selection()
-	if h < 0 || len(sel) == 0 {
-		m.setError("No added or removed lines selected")
-		return m, nil
-	}
-	unstage := m.diff.side == git.SideIndex
-	patch, ok := m.diff.patch.LinePatch(h, sel, unstage)
-	if !ok {
-		m.setError("Nothing to apply")
-		return m, nil
-	}
-	m.diff.anchor = -1
-	label := fmt.Sprintf("Staged %s", plural(len(sel), "line", "lines"))
-	if unstage {
-		label = fmt.Sprintf("Unstaged %s", plural(len(sel), "line", "lines"))
-	}
-	repo := m.repo
-	return m, op(label, true, func() error { return repo.ApplyPatch(patch, true, unstage) })
-}
-
-func (m Model) doRevertHunk() (tea.Model, tea.Cmd) {
-	if m.diff.patch == nil || m.diff.side == git.SideIndex {
-		m.setError("Revert Hunk only applies to unstaged changes")
-		return m, nil
-	}
-	h := m.diff.currentHunk()
-	patch, ok := m.diff.patch.HunkPatch(h)
-	if !ok {
-		return m, nil
-	}
-	repo := m.repo
-	m.dialog = confirmDialog("Revert Hunk",
-		"Any unstaged changes in this hunk will be permanently lost by the revert.",
-		func(string) tea.Cmd {
-			return op("Reverted hunk", true, func() error { return repo.ApplyPatch(patch, false, true) })
-		})
-	return m, nil
-}
-
-func (m Model) doRevert() (tea.Model, tea.Cmd) {
-	list, _ := m.activeList()
-	paths := list.targets()
-	if len(paths) == 0 {
-		return m, nil
-	}
-	// Untracked files have nothing to revert to; git-gui deletes them.
-	untracked := true
-	for _, p := range paths {
-		if st, ok := m.stateOf(p); !ok || st != "_O" {
-			untracked = false
-			break
+// target is the file a file-level command acts on: the one the review cursor
+// is in, or the one the contents page has picked when that is where you are.
+func (m *Model) target() (string, bool) {
+	if m.focus == focusFiles {
+		if p := m.files.currentPath(); p != "" {
+			return p, true
 		}
+		return "", false
 	}
-	repo := m.repo
-	if untracked {
-		m.dialog = confirmDialog("Delete Untracked Files",
-			fmt.Sprintf("Delete %s from the working directory? This cannot be undone.",
-				plural(len(paths), "untracked file", "untracked files")),
-			func(string) tea.Cmd {
-				return op("Deleted untracked files", true, func() error { return repo.Delete(paths) })
-			})
-		return m, nil
-	}
-	m.dialog = confirmDialog("Revert Changes",
-		fmt.Sprintf("Revert changes in %s?\n\nAny unstaged changes will be permanently lost by the revert.",
-			plural(len(paths), "file", "files")),
-		func(string) tea.Cmd {
-			return op("Reverted changes", true, func() error { return repo.Revert(paths) })
-		})
-	return m, nil
-}
-
-func (m Model) doDelete() (tea.Model, tea.Cmd) {
-	list, _ := m.activeList()
-	paths := list.targets()
-	if len(paths) == 0 {
-		return m, nil
-	}
-	var untracked []string
-	for _, p := range paths {
-		if st, ok := m.stateOf(p); ok && st == "_O" {
-			untracked = append(untracked, p)
-		}
-	}
-	if len(untracked) == 0 {
-		m.setError("Select untracked files to delete")
-		return m, nil
-	}
-	repo := m.repo
-	m.dialog = confirmDialog("Delete Untracked Files",
-		fmt.Sprintf("Delete %s? This cannot be undone.",
-			plural(len(untracked), "untracked file", "untracked files")),
-		func(string) tea.Cmd {
-			return op("Deleted untracked files", true, func() error { return repo.Delete(untracked) })
-		})
-	return m, nil
-}
-
-func (m *Model) stateOf(path string) (git.State, bool) {
-	for _, f := range m.files {
-		if f.Path == path {
-			return f.State, true
-		}
+	if f, ok := m.view.file(); ok {
+		return f.path, true
 	}
 	return "", false
 }
 
-func (m Model) doSignOff() (tea.Model, tea.Cmd) {
-	line, err := m.repo.SignOff()
-	if err != nil {
-		m.setError(err.Error())
-		m.dialog = messageDialog("Sign Off", err.Error(), true)
+// doApprove signs off a file, or takes the signature back.
+//
+// What is approved is the change, not the name: the digest of the file's whole
+// change from the base goes in with it, so that editing the file afterwards
+// nullifies the approval rather than leaving a tick against something nobody
+// read. That holds whichever view the key was pressed in, since there is only
+// one review and a commit is a part of it.
+func (m Model) doApprove() (tea.Model, tea.Cmd) {
+	path, ok := m.target()
+	if !ok {
+		m.setError("No file to approve")
 		return m, nil
 	}
-	msg := m.commit.Value()
-	if strings.Contains(msg, line) {
-		m.setOK("Already signed off")
+	// Deciding about a file hands its fold back to the rule that folds what is
+	// done with, so a file approved after F opened everything still goes away.
+	delete(m.folds, path)
+	if m.rv.Approved(path) {
+		m.mutate(func(st *review.State) { st.Unapprove(path) })
+		m.setOK("Approval withdrawn from " + path)
 		return m, nil
 	}
-	trimmed := strings.TrimRight(msg, "\n")
-	switch {
-	case trimmed == "":
-		msg = line
-	case lastLineIsTrailer(trimmed):
-		msg = trimmed + "\n" + line
-	default:
-		msg = trimmed + "\n\n" + line
+	f := m.workBy[path]
+	if f == nil {
+		m.setError(path + " is not part of this review")
+		return m, nil
 	}
-	m.commit.SetValue(msg)
-	m.setOK("Added Signed-off-by trailer")
+	digest, author := f.digest, m.author
+	m.mutate(func(st *review.State) { st.Approve(path, digest, author) })
+	m.setOK("Approved " + path)
 	return m, nil
 }
 
-// lastLineIsTrailer reports whether the message already ends in a trailer
-// block, in which case the sign off joins it rather than starting a new
-// paragraph. This is what git-gui's do_signoff checks.
-func lastLineIsTrailer(msg string) bool {
-	lines := strings.Split(msg, "\n")
-	last := strings.TrimSpace(lines[len(lines)-1])
-	if last == "" {
-		return true
-	}
-	i := strings.Index(last, ": ")
-	if i <= 0 {
-		return false
-	}
-	for _, r := range last[:i] {
-		if r != '-' && !(r >= 'A' && r <= 'Z') && !(r >= 'a' && r <= 'z') {
-			return false
+// doApproveAll signs off everything still outstanding, which is worth having
+// for the review that turns out to be all noise — and worth asking about
+// first, since it is the one key here that can say a lot at once.
+func (m Model) doApproveAll() (tea.Model, tea.Cmd) {
+	var pending []string
+	for _, f := range m.work {
+		if !m.rv.Approved(f.path) {
+			pending = append(pending, f.path)
 		}
 	}
-	return true
+	if len(pending) == 0 {
+		m.setOK("Every file is already approved")
+		return m, nil
+	}
+	digests := map[string]string{}
+	for _, p := range pending {
+		digests[p] = m.workBy[p].digest
+	}
+	author := m.author
+	m.dialog = confirmDialog("Approve everything",
+		"Approve "+plural(len(pending), "file", "files")+" in one go?\n\n"+
+			"Each approval is of the change as it stands now, so anything\n"+
+			"edited afterwards comes back unapproved.",
+		func(string) tea.Cmd {
+			return func() tea.Msg { return approveAllMsg{paths: pending, digests: digests, by: author} }
+		})
+	return m, nil
 }
 
-// fileInView is the file the window is about right now — the one the diff is
-// showing — and the commit it is being looked at in, empty for the working
-// tree. It is what both e and m act on, so each means the same thing from
-// either list and from the diff itself.
-func (m *Model) fileInView() (*git.File, string, git.Side) {
-	list, side := m.activeList()
-	f := list.current()
-	var commit string
-	if c, ok := m.commits.selected(); ok {
-		commit = c.Hash
+type approveAllMsg struct {
+	paths   []string
+	digests map[string]string
+	by      string
+}
+
+// doComment starts a conversation about the line under the cursor.
+func (m Model) doComment() (tea.Model, tea.Cmd) {
+	if m.focus == focusFiles {
+		m.setError("Comments go on lines — press → for the review first")
+		return m, nil
 	}
-	return f, commit, side
+	f, l, span, last, ok := m.view.commentTarget()
+	if !ok {
+		m.setError("Put the cursor on a line of the diff to comment on it")
+		return m, nil
+	}
+	c := &compose{
+		path: f.path, span: span, at: last,
+		text: strings.TrimRight(codeText(l.Text), "\r"),
+	}
+
+	if m.commit == "" {
+		// The review's own coordinates: the working tree for a line that is
+		// in it, the base for one this change took away.
+		if l.Kind == '-' {
+			c.side, c.line = review.SideOld, l.Old
+		} else {
+			c.side, c.line = review.SideNew, l.New
+		}
+	} else {
+		// A run of lines in a commit need not still be a run in the working
+		// tree, so a remark carried out of one is anchored to a single line.
+		c.span = 1
+		// A remark made against one commit belongs to the review as a whole,
+		// so it is carried into the working tree's numbering here, once, at
+		// the moment it is written. A deleted line has no line of its own out
+		// there, so it is carried by its seam — the place in the file where it
+		// used to be — which is where a reader would look for it.
+		carried, ok := review.Carry(m.carries[m.commit][f.path], review.SideNew, l.Seam)
+		c.side, c.line = review.SideNew, carried
+		if !ok {
+			c.line = 0
+		}
+		side := review.SideNew
+		line := l.New
+		if l.Kind == '-' {
+			side, line = review.SideOld, l.Old
+		}
+		c.origin = &review.Origin{Commit: m.commit, Side: side, Line: line}
+	}
+
+	where := f.path + ":" + itoa(c.line)
+	switch {
+	case c.line == 0:
+		where = f.path + " (no longer a line in the working tree)"
+	case c.span > 1:
+		where = f.path + ":" + itoa(c.line) + "–" + itoa(c.line+c.span-1)
+	}
+	c.title = "Comment on " + where
+	m.view.clearVisual()
+	return m.openCompose(c)
+}
+
+// doReply adds to the conversation the cursor is in.
+func (m Model) doReply() (tea.Model, tea.Cmd) {
+	id := m.view.thread()
+	if id == "" {
+		m.setError("Put the cursor on a comment to reply to it")
+		return m, nil
+	}
+	t := m.rv.Thread(id)
+	if t == nil {
+		m.setError("That comment is no longer there")
+		return m, nil
+	}
+	return m.openCompose(&compose{
+		title: "Reply to " + t.ID + " on " + t.Path, thread: t.ID, path: t.Path, at: -1,
+	})
+}
+
+// openCompose puts an empty box into the stack at the place the comment will
+// land, and the keyboard into it.
+func (m Model) openCompose(c *compose) (tea.Model, tea.Cmd) {
+	m.compose = c
+	m.editor.SetValue("")
+	m.editor.CursorStart()
+
+	line := -1
+	if c.thread == "" {
+		line = c.at
+	}
+	m.view.draft = &draft{path: c.path, line: line, thread: c.thread}
+	m.refreshDraft()
+	if first, last, ok := m.view.draftSpan(); ok {
+		m.view.cursor = first
+		// A little of the code above the box, since that is what the comment
+		// is about and what it should be written while looking at.
+		m.view.revealSpan(max(first-draftLead, 0), last)
+	}
+	return m.setFocus(focusCompose)
+}
+
+// draftLead is how many rows above the box are kept on screen: enough of the
+// line being commented on, and its neighbours, to write about it.
+const draftLead = 4
+
+// draftTextWidth is how wide the field inside the box is: the pane's content,
+// less the indent the box shares with a comment thread and the box's own
+// border and padding.
+func (m *Model) draftTextWidth() int {
+	return max(m.view.contentWidth()-threadIndent-3, 8)
+}
+
+// refreshDraft redraws the box. The rows in the stack carry only an index into
+// it, so a keystroke costs the box and nothing else — unless the box changed
+// height, when the stack has to be laid out again around it.
+func (m *Model) refreshDraft() {
+	d := m.view.draft
+	if d == nil {
+		return
+	}
+	m.editor.SetWidth(m.draftTextWidth())
+	m.editor.SetHeight(min(max(m.editor.LineCount(), 1), maxDraftHeight))
+
+	before := len(d.lines)
+	d.lines = m.drawDraft()
+	if len(d.lines) != before {
+		m.view.build()
+		if first, last, ok := m.view.draftSpan(); ok {
+			m.view.cursor = min(max(m.view.cursor, first), last)
+			m.view.revealSpan(max(first-draftLead, 0), last)
+		}
+		m.view.clamp()
+	}
+}
+
+// postHint names the key that posts, and it names the one that arrives in
+// every terminal rather than the one a hand reaches for first. See the Post
+// binding for why those are not the same key.
+const postHint = "Ctrl-S posts · Esc discards"
+
+// maxDraftHeight is how tall the box grows before it starts scrolling inside
+// itself. Past that it is covering more of the diff than the remark is worth
+// having beside it.
+const maxDraftHeight = 10
+
+// drawDraft renders the box: a rule round the field, its title saying where
+// the comment will land, and its foot saying how to post it.
+func (m *Model) drawDraft() []string {
+	w := max(m.view.contentWidth()-threadIndent, 12)
+	title := "Comment"
+	if m.compose != nil {
+		title = m.compose.title
+	}
+
+	out := []string{m.draftEdge(w, "╭", title, m.st.commentHead, "╮")}
+	for _, l := range strings.Split(m.editor.View(), "\n") {
+		out = append(out, strings.Repeat(" ", threadIndent)+
+			m.st.commentRule.Render("│ ")+
+			fitANSI(l, max(w-3, 0))+
+			m.st.commentRule.Render("│"))
+	}
+	out = append(out, m.draftEdge(w, "╰", postHint, m.st.commentFoot, "╯"))
+	return out
+}
+
+// draftEdge is the top or bottom of the box: a corner, a word about what the
+// box is for, and the rule running out to the far corner.
+func (m *Model) draftEdge(w int, corner, label string, ink lipgloss.Style, end string) string {
+	room := max(w-5, 1)
+	label = truncate(label, room)
+	fill := max(room-width(label), 0)
+	rule := m.st.commentRule
+	return strings.Repeat(" ", threadIndent) +
+		rule.Render(corner+"─ ") + ink.Render(label) +
+		rule.Render(" "+strings.Repeat("─", fill)+end)
+}
+
+// closeDraft takes the box out of the stack and puts the cursor somewhere
+// sensible: on the thread just written, when there is one, and otherwise back
+// on the line the box was about.
+func (m *Model) closeDraft(thread string) {
+	d := m.view.draft
+	m.view.draft = nil
+	m.compose = nil
+	m.editor.SetValue("")
+	m.rebuild()
+	switch {
+	case thread != "":
+		if i, ok := m.view.threadRowAt(thread); ok {
+			m.view.reveal(i)
+			return
+		}
+	case d != nil && d.line >= 0:
+		if i, ok := m.view.diffRowAt(d.path, d.line); ok {
+			m.view.reveal(i)
+			return
+		}
+	}
+	m.view.clamp()
+}
+
+// doPost files what has been written. It is the only command reachable from
+// inside the composer, where every letter is text.
+func (m Model) doPost() (tea.Model, tea.Cmd) {
+	if m.compose == nil {
+		m.setError("Nothing to post — press c on a line to write a comment")
+		return m, nil
+	}
+	body := strings.TrimSpace(m.editor.Value())
+	if body == "" {
+		// The answer to "you have written nothing" is to type, and the cursor
+		// is already where that happens.
+		m.setError("Write something first")
+		return m.setFocus(focusCompose)
+	}
+	c, author := m.compose, m.author
+	id := c.thread
+	if c.thread != "" {
+		m.mutate(func(st *review.State) { st.Reply(c.thread, author, body) })
+		m.setOK("Replied to " + c.thread)
+	} else {
+		m.mutate(func(st *review.State) {
+			t := st.Start(&review.Thread{
+				Path: c.path, Side: c.side, Line: c.line, Lines: c.span,
+				Text: c.text, Origin: c.origin,
+			}, author, body)
+			id = t.ID
+		})
+		m.setOK("Commented on " + c.path + " as " + id)
+	}
+	m.closeDraft(id)
+	return m.setFocus(focusReview)
+}
+
+// doResolve closes the conversation the cursor is in, or opens it again.
+func (m Model) doResolve() (tea.Model, tea.Cmd) {
+	id := m.view.thread()
+	if id == "" {
+		m.setError("Put the cursor on a comment to resolve it")
+		return m, nil
+	}
+	t := m.rv.Thread(id)
+	if t == nil {
+		m.setError("That comment is no longer there")
+		return m, nil
+	}
+	want := !t.Resolved
+	m.mutate(func(st *review.State) { st.SetResolved(id, want) })
+	if want {
+		delete(m.view.expanded, id)
+		m.setOK("Resolved " + id)
+	} else {
+		m.setOK("Reopened " + id)
+	}
+	return m, nil
+}
+
+// doDelete throws away what the cursor is on: one remark when it is on one,
+// and the whole conversation when it is on the rule above or the hint below.
+//
+// Resolving is what you normally want — it keeps the record of what was asked
+// and answered. This is for the thing written in the wrong place, or the reply
+// that turned out to be about something else.
+func (m Model) doDelete() (tea.Model, tea.Cmd) {
+	id := m.view.thread()
+	if id == "" {
+		m.setError("Put the cursor on a comment to delete it")
+		return m, nil
+	}
+	t := m.rv.Thread(id)
+	if t == nil {
+		return m, nil
+	}
+
+	// One remark out of several. Taking the last one would leave an anchor on
+	// a line with nothing to say, so that is the whole conversation either way
+	// and the question says so.
+	if at, i, ok := m.view.comment(); ok && at == id && len(t.Comments) > 1 {
+		c := t.Comments[i]
+		body := "Delete this one remark from " + id + " on " + t.Path + "?\n\n" +
+			"  " + firstLine(c.Body) + "\n\n" +
+			plural(len(t.Comments)-1, "comment", "comments") + " left in the conversation."
+		m.dialog = confirmDialog("Delete a comment", body, func(string) tea.Cmd {
+			return func() tea.Msg { return deleteMsg{id: id, comment: i} }
+		})
+		return m, nil
+	}
+
+	body := "Delete " + id + " on " + t.Path + " and the " +
+		plural(len(t.Comments), "comment", "comments") + " in it?\n\n" +
+		"Resolving it instead keeps the record."
+	m.dialog = confirmDialog("Delete a conversation", body, func(string) tea.Cmd {
+		return func() tea.Msg { return deleteMsg{id: id, comment: -1} }
+	})
+	return m, nil
+}
+
+// deleteMsg is the answer to the question: a whole thread when comment is -1,
+// and one remark of it otherwise.
+type deleteMsg struct {
+	id      string
+	comment int
+}
+
+// doChooseBase picks what the review is measured from.
+func (m Model) doChooseBase() (tea.Model, tea.Cmd) {
+	items := []string{autoBase}
+	items = append(items, m.repo.Refs()...)
+	items = append(items, commitBase, otherBase)
+	m.dialog = listDialog("Review base",
+		"Measure this branch from which ref?\n"+
+			"The review is everything between its merge base with that ref\n"+
+			"and the working tree.",
+		items, func(choice string) tea.Cmd {
+			return func() tea.Msg { return baseChosenMsg{ref: choice} }
+		})
+	return m, nil
+}
+
+// recentCommits is how many of the branch's own commits the picker offers.
+// Far enough back to reach the start of a piece of work, and not so far that
+// the list stops being a list.
+const recentCommits = 60
+
+// doChooseCommitBase offers the branch's own history as the base.
+//
+// A ref is the right answer when there is one, but the point you want to
+// measure from is often somewhere in your own commits — "review what I did
+// after this" — and that point has no name but its hash.
+func (m Model) doChooseCommitBase() (tea.Model, tea.Cmd) {
+	commits, err := m.repo.Recent(recentCommits)
+	if err != nil || len(commits) == 0 {
+		m.setError("No commits to measure from")
+		return m, nil
+	}
+	items := make([]string, 0, len(commits))
+	for _, c := range commits {
+		items = append(items, commitItem(c))
+	}
+	m.dialog = listDialog("Review from a commit",
+		"Measure from which commit?\n"+
+			"The review becomes everything after it: what that commit left\n"+
+			"behind, up to the working tree.",
+		items, func(choice string) tea.Cmd {
+			// The hash leads the row, so it is what comes back off it.
+			hash, _, _ := strings.Cut(choice, " ")
+			return func() tea.Msg { return baseChosenMsg{ref: hash} }
+		})
+	return m, nil
+}
+
+// commitItem is one row of the commit picker. The hash comes first because it
+// is both what identifies the commit and what is read back off the choice.
+func commitItem(c git.Commit) string {
+	return c.Short + "  " + pad(c.When, 14) + "  " + c.Subject
+}
+
+const (
+	autoBase   = "(let difftui choose)"
+	commitBase = "Pick a commit…"
+	otherBase  = "Other ref…"
+)
+
+type baseChosenMsg struct{ ref string }
+
+// onBaseChosen takes a new base and reads the whole review again against it.
+//
+// The base goes into the review file, so it survives the session and an agent
+// reading the file knows what the comments are measured from. Approvals are
+// left alone: they are claims about a change, and a change measured from
+// somewhere else is a different change, so the digests settle it on the next
+// scan without anything here having to guess.
+func (m Model) onBaseChosen(ref string) (tea.Model, tea.Cmd) {
+	switch ref {
+	case autoBase:
+		m.baseRef = ""
+	case commitBase:
+		return m.doChooseCommitBase()
+	case otherBase:
+		m.dialog = inputDialog("Review base", "Name a branch, tag or commit:", "origin/main",
+			func(s string) tea.Cmd {
+				s = strings.TrimSpace(s)
+				return func() tea.Msg { return baseChosenMsg{ref: s} }
+			})
+		return m, nil
+	case "":
+		return m, nil
+	default:
+		m.baseRef = ref
+	}
+	m.basePinned = true
+	m.mutate(func(*review.State) {})
+	if m.baseRef == "" {
+		m.setOK("Base: whatever this branch is built on")
+	} else {
+		m.setOK("Base: " + m.baseRef)
+	}
+	m.rescanning = true
+	return m, m.rescanCmd()
+}
+
+func (m Model) doCheckout() (tea.Model, tea.Cmd) {
+	branches, err := m.repo.Branches()
+	if err != nil || len(branches) == 0 {
+		m.setError("No branches available")
+		return m, nil
+	}
+	repo := m.repo
+	m.dialog = listDialog("Check out a branch",
+		"Review which branch instead?", branches,
+		func(b string) tea.Cmd {
+			return op("Checked out "+b, true, func() error { _, err := repo.Checkout(b); return err })
+		})
+	return m, nil
+}
+
+// ---------------------------------------------------------------------------
+// The composer
+// ---------------------------------------------------------------------------
+
+func (m Model) composeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Cancel):
+		m.closeDraft("")
+		m.setOK("Comment discarded")
+		return m.setFocus(focusReview)
+	case key.Matches(msg, m.keys.NextPane):
+		return m.setFocus(focusReview)
+	}
+	var cmd tea.Cmd
+	m.editor, cmd = m.editor.Update(msg)
+	m.refreshDraft()
+	return m, cmd
+}
+
+// ---------------------------------------------------------------------------
+// Reading a file
+// ---------------------------------------------------------------------------
+
+// fileInView is the file every "open this" command acts on, and the commit it
+// should be read at.
+func (m *Model) fileInView() (string, string, *reviewFile) {
+	path, ok := m.target()
+	if !ok {
+		return "", "", nil
+	}
+	var f *reviewFile
+	for _, cand := range m.view.files {
+		if cand.path == path {
+			f = cand
+			break
+		}
+	}
+	return path, m.commit, f
 }
 
 // doEdit opens the file in view in the user's editor, handing it the terminal
-// until it exits. While an earlier commit is on screen the editor gets that
-// commit's version of the file, as a read-only copy: history reads well in an
-// editor, it just cannot be written there.
+// until it exits. While a commit is on screen the editor gets that commit's
+// version, as a read-only copy: history reads well in an editor, it just
+// cannot be written there.
 func (m Model) doEdit() (tea.Model, tea.Cmd) {
-	f, commit, _ := m.fileInView()
-	if f == nil {
+	path, commit, _ := m.fileInView()
+	if path == "" {
 		m.setError("No file to edit")
 		return m, nil
 	}
-	editor, tmp, err := m.repo.EditAt(commit, f.Path)
+	editor, tmp, err := m.repo.EditAt(commit, path)
 	if err != nil {
 		m.setError(err.Error())
 		return m, nil
 	}
-	return m, tea.Exec(editor, editorClosed(m.repo, f.Path, tmp))
+	return m, tea.Exec(editor, editorClosed(m.repo, path, tmp))
 }
 
 // editorClosed is what happens once the editor exits. For a working tree file
 // the rescan is not optional: the editor may well have changed the file, and
-// the scan is how the lists and the diff catch up with it. A commit's file
-// was only a read-only copy, so there is nothing to rescan — only the copy to
-// sweep up.
+// the scan is how the review catches up with it — including nullifying an
+// approval of what it used to say.
 //
 // It is a function of its own rather than a closure inside doEdit because
 // bubbletea runs it in the runtime rather than through Update, which puts it
@@ -1530,48 +2177,276 @@ func isMarkdown(path string) bool {
 	return false
 }
 
-// doMarkdown opens the file in view in the full screen markdown reader. It
-// reads whichever version the window is showing: the working tree's, or the
-// selected commit's — reading is the one thing history is happy to allow.
+// doMarkdown opens the file in view in the full screen markdown reader, at
+// whichever version the window is showing.
 func (m Model) doMarkdown() (tea.Model, tea.Cmd) {
-	f, commit, side := m.fileInView()
-	if f == nil {
+	path, commit, f := m.fileInView()
+	if path == "" {
 		m.setError("No file to read")
 		return m, nil
 	}
-	if !isMarkdown(f.Path) {
-		m.setError(f.Path + " is not a markdown file")
+	if !isMarkdown(path) {
+		m.setError(path + " is not a markdown file")
 		return m, nil
 	}
-	title := f.Path
-	if c, ok := m.commits.selected(); ok {
-		title += " @ " + c.Short
+	title := path
+	if commit != "" {
+		title += " @ " + abbrevHash(commit)
 	}
-	repo, gen, parent, file := m.repo, m.gen, m.parent, *f
+	// The margin marks come out of the diff already on screen, so reading a
+	// file costs one command rather than two.
+	var changed map[int]bool
+	if f != nil && f.patch != nil {
+		changed = f.patch.ChangedNewLines()
+	}
+	repo, gen := m.repo, m.gen
 	return m, func() tea.Msg {
-		text, err := repo.FileContent(commit, file.Path)
+		text, err := repo.FileContent(commit, path)
 		if err != nil {
 			return markdownMsg{title: title, gen: gen, err: err}
-		}
-		// The same diff the pane shows, taken again at minimal context, marks
-		// the changed lines in the margin. Failing to take it only costs the
-		// marks, never the text.
-		var diff string
-		if commit != "" {
-			diff, _ = repo.CommitDiff(commit, file, 1)
-		} else {
-			diff, _ = repo.Diff(file, side, 1, parent)
-		}
-		var changed map[int]bool
-		if diff != "" {
-			changed = git.ParsePatch(diff).ChangedNewLines()
 		}
 		return markdownMsg{title: title, gen: gen, text: text, changed: changed}
 	}
 }
 
-// onMarkdown puts the reader up once the text arrives, unless the window has
-// been rescanned out from under the request.
+// doViewFile opens the whole file the cursor is in, on one side or the other
+// of the change.
+//
+// It opens at the line being read, so coming here from a line of the diff
+// lands on that line in the file rather than at the top of it: the question
+// the diff raised is about the code around this line, and this is the answer
+// to it.
+func (m Model) doViewFile(side fileSide) (tea.Model, tea.Cmd) {
+	path, commit, f := m.fileInView()
+	if path == "" {
+		m.setError("No file to read")
+		return m, nil
+	}
+
+	// The two sides of the change, named the way the review names them: the
+	// working tree and the base, or a commit and its parent.
+	at, base := "", m.base.Ref
+	if commit != "" {
+		at, base = commit, abbrevHash(commit)+"^"
+	}
+	if side == sideBefore {
+		at = m.base.SHA
+		if commit != "" {
+			at = commit + "^"
+		}
+	}
+
+	// Where in the file to open, and which of its lines the review touches,
+	// both counted on the side being read.
+	line, changed := m.viewAnchor(f, side)
+
+	repo, gen, want := m.repo, m.gen, path
+	return m, func() tea.Msg {
+		text, err := repo.FileContent(at, want)
+		if err != nil {
+			return fileMsg{path: want, side: side, gen: gen, err: err}
+		}
+		return fileMsg{
+			path: want, base: base, side: side, at: line,
+			gen: gen, text: text, changed: changed,
+		}
+	}
+}
+
+// viewAnchor is the line the reader should open on and the lines of that side
+// the review touches, both read off the diff already on screen — so opening
+// the file costs one command and no second look at the change.
+func (m *Model) viewAnchor(f *reviewFile, side fileSide) (int, map[int]bool) {
+	changed := map[int]bool{}
+	if f == nil {
+		return 0, changed
+	}
+	for _, l := range f.lines {
+		switch {
+		case side == sideBefore && l.Kind == '-':
+			changed[l.Old] = true
+		case side == sideNow && l.Kind == '+':
+			changed[l.New] = true
+		}
+	}
+
+	line := 0
+	if _, l, ok := m.view.line(); ok {
+		if side == sideBefore {
+			line = l.Old
+		} else {
+			line = l.New
+			if line == 0 {
+				// A removed line has no line of its own on this side; the
+				// seam is where it used to be, which is where to look.
+				line = l.Seam
+			}
+		}
+	}
+	return line, changed
+}
+
+// onFile puts the reader up once the file arrives.
+func (m Model) onFile(msg fileMsg) (tea.Model, tea.Cmd) {
+	m.mouse.clear()
+	if msg.gen != m.gen {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.setError(msg.path + ": " + firstLine(msg.err.Error()))
+		return m, nil
+	}
+	m.file = newFileView(msg.path, msg.base, msg.side, msg.text, msg.changed, m.width, m.height)
+	m.file.goToLine(msg.at)
+	return m, nil
+}
+
+// fileKey drives the reader: scrolling, hopping between the runs the review
+// touched, switching sides, and the ways out.
+func (m Model) fileKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return m.doQuit()
+	case key.Matches(msg, m.keys.Cancel), key.Matches(msg, m.keys.QuitKey):
+		m.mouse.clear()
+		m.file = nil
+		return m, nil
+	case key.Matches(msg, m.keys.ViewKey):
+		if m.file.side == sideNow {
+			// Reading it already; v again puts it away, the way m does.
+			m.mouse.clear()
+			m.file = nil
+			return m, nil
+		}
+		return m.switchSide(sideNow)
+	case key.Matches(msg, m.keys.ViewOldKey):
+		if m.file.side == sideBefore {
+			m.mouse.clear()
+			m.file = nil
+			return m, nil
+		}
+		return m.switchSide(sideBefore)
+	case key.Matches(msg, m.keys.EditKey):
+		// Reading a file and then editing it is one thought, so it does not
+		// need to be two trips through the window.
+		m.file = nil
+		return m.doEdit()
+	case key.Matches(msg, m.keys.Up):
+		m.file.move(-1)
+	case key.Matches(msg, m.keys.Down):
+		m.file.move(1)
+	case key.Matches(msg, m.keys.Left):
+		m.file.scrollH(-hScrollStep)
+	case key.Matches(msg, m.keys.Right):
+		m.file.scrollH(hScrollStep)
+	case key.Matches(msg, m.keys.PageUp):
+		m.file.move(-max(m.file.body()-1, 1))
+	case key.Matches(msg, m.keys.PageDown):
+		m.file.move(max(m.file.body()-1, 1))
+	case key.Matches(msg, m.keys.Home):
+		m.file.moveTo(0)
+	case key.Matches(msg, m.keys.End):
+		m.file.moveTo(len(m.file.lines) - 1)
+	case key.Matches(msg, m.keys.NextHunk):
+		m.file.jump(1)
+	case key.Matches(msg, m.keys.PrevHunk):
+		m.file.jump(-1)
+	}
+	return m, nil
+}
+
+// switchSide reads the other version of the file being read, keeping the line
+// as nearly as the two sides allow: the point of the gesture is to see what
+// this line used to say.
+func (m Model) switchSide(side fileSide) (tea.Model, tea.Cmd) {
+	m.mouse.clear()
+	line := m.file.cursor + 1
+	if f := m.fileFor(m.file.path); f != nil {
+		line = carryLine(f, m.file.side, side, line)
+	}
+	m.file = nil
+	mdl, cmd := m.doViewFile(side)
+	return mdl, tea.Batch(cmd, func() tea.Msg { return fileLineMsg{line} })
+}
+
+// fileLineMsg puts the reader on a line once the other side has arrived.
+type fileLineMsg struct{ line int }
+
+// carryLine moves a line number from one side of a file's change to the other,
+// using the diff already on screen.
+//
+// A line both sides have is carried exactly. A line only one side has was part
+// of an edit, and its counterpart is the line it replaced: the nth line the
+// change added stands where the nth line it removed used to, which is the
+// pairing the diff itself draws one above the other. Failing that — a pure
+// insertion, with nothing on the other side to have replaced — it falls back
+// to the last line before it that both sides have, which is where a reader
+// would start looking.
+func carryLine(f *reviewFile, from, to fileSide, line int) int {
+	side := func(l git.DiffLine) (here, there int) {
+		if from == sideBefore {
+			return l.Old, l.New
+		}
+		return l.New, l.Old
+	}
+
+	best, hunk, rank := 0, -1, -1
+	for _, l := range f.lines {
+		if !isCodeLine(l.Kind) {
+			continue
+		}
+		here, there := side(l)
+		if here == line {
+			if there > 0 {
+				return there // both sides have it
+			}
+			hunk = l.Hunk
+			break
+		}
+		if here > 0 && there > 0 {
+			best = there
+		}
+	}
+	if hunk < 0 {
+		return best
+	}
+
+	// Where the line stands among the ones its side of this hunk added, and
+	// what stands at the same place among the ones the other side lost.
+	var mine, theirs []int
+	for _, l := range f.lines {
+		if l.Hunk != hunk || !isCodeLine(l.Kind) {
+			continue
+		}
+		switch here, there := side(l); {
+		case here > 0 && there == 0:
+			if here == line {
+				rank = len(mine)
+			}
+			mine = append(mine, here)
+		case there > 0 && here == 0:
+			theirs = append(theirs, there)
+		}
+	}
+	switch {
+	case rank < 0 || len(theirs) == 0:
+		return best
+	case rank < len(theirs):
+		return theirs[rank]
+	}
+	return theirs[len(theirs)-1]
+}
+
+// fileFor is a file's section of the stack, by path.
+func (m *Model) fileFor(path string) *reviewFile {
+	for _, f := range m.view.files {
+		if f.path == path {
+			return f
+		}
+	}
+	return nil
+}
+
 func (m Model) onMarkdown(msg markdownMsg) (tea.Model, tea.Cmd) {
 	m.mouse.clear()
 	if msg.gen != m.gen {
@@ -1586,7 +2461,7 @@ func (m Model) onMarkdown(msg markdownMsg) (tea.Model, tea.Cmd) {
 }
 
 // markdownKey drives the reader: scrolling, and the keys that put it away.
-func (m Model) markdownKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) markdownKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m.doQuit()
@@ -1616,275 +2491,18 @@ func (m Model) markdownKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// closeCompose puts the message away, keeping what was typed for next time.
-// Tab only moves the cursor off it; Esc is what dismisses it.
-func (m Model) closeCompose() (tea.Model, tea.Cmd) {
-	m.composeOpen = false
-	return m.setFocus(focusDiff)
+// ---------------------------------------------------------------------------
+// Status
+// ---------------------------------------------------------------------------
+
+func (m *Model) clearStatus()   { m.status, m.statusOK, m.statusEr, m.statusWa = "", false, false, false }
+func (m *Model) setOK(s string) { m.status, m.statusOK, m.statusEr, m.statusWa = s, true, false, false }
+func (m *Model) setWarn(s string) {
+	m.status, m.statusOK, m.statusEr, m.statusWa = s, false, false, true
 }
-
-func (m Model) toggleAmend() (tea.Model, tea.Cmd) {
-	if !m.hasHEAD {
-		m.setError("There is nothing to amend; no commit exists yet")
-		return m, nil
-	}
-	m.amend = !m.amend
-	if m.amend {
-		m.savedMsg = m.commit.Value()
-		m.commit.SetValue(m.repo.LastCommitMessage())
-		m.setOK("Amending the last commit")
-	} else {
-		m.commit.SetValue(m.savedMsg)
-		m.savedMsg = ""
-		m.setOK("New commit")
-	}
-	return m, m.rescanCmd()
+func (m *Model) setError(s string) {
+	m.status, m.statusOK, m.statusEr, m.statusWa = s, false, true, false
 }
-
-// commitKey drives the message buffer. It is a full text editor, so every
-// readline key belongs to it and every letter is text. Only Esc and an arrow
-// at the very edge of the text walk out, which keeps h/j/k/l typable.
-func (m Model) commitKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Cancel) {
-		return m.closeCompose()
-	}
-	info := m.commit.LineInfo()
-	atFirstLine := m.commit.Line() == 0 && info.RowOffset == 0
-	switch msg.String() {
-	case "up":
-		if atFirstLine {
-			if t, ok := m.paneAbove(focusCommit); ok {
-				return m.enterPane(t, entryBottom)
-			}
-		}
-	case "left":
-		if atFirstLine && info.ColumnOffset == 0 {
-			if t, ok := m.paneLeft(focusCommit); ok {
-				return m.enterPane(t, entryKeep)
-			}
-		}
-	}
-	var cmd tea.Cmd
-	m.commit, cmd = m.commit.Update(msg)
-	return m, cmd
-}
-
-// commitProblem reports why the commit cannot be made, or "" when it can.
-// git-gui refuses the same three cases.
-// The three are short because they are read in the status bar, which has one
-// line and shares it with the file counts.
-//
-// They are checked in the order you would have to fix them: something to
-// commit, then something to commit it as. Reporting an empty message to
-// somebody who has staged nothing would send them to the message buffer, which
-// is not even on screen, to solve the wrong problem.
-func (m Model) commitProblem() string {
-	for _, f := range m.files {
-		if f.State.Unmerged() {
-			return "Unmerged: " + f.Path + " has conflicts to resolve and stage first"
-		}
-	}
-	if !m.committable() {
-		return "Nothing staged to commit"
-	}
-	if m.messageEmpty() {
-		return "Enter a commit message"
-	}
-	return ""
-}
-
-// messageEmpty reports whether the buffer holds nothing worth committing.
-func (m *Model) messageEmpty() bool { return strings.TrimSpace(m.commit.Value()) == "" }
-
-// doCommit is the whole of Ctrl-Enter, which escalates one step per press:
-//
-//  1. the message is not up      → put it up and put the cursor in it
-//  2. it is up but not focused   → put the cursor back in it
-//  3. it is up and focused       → ask, and then commit on y
-//
-// Each press does one thing, and the press that commits is always made from
-// the message itself, so there is no way to commit without having just looked
-// at what you wrote.
-func (m Model) doCommit() (tea.Model, tea.Cmd) {
-	if !m.composeOpen {
-		m.composeOpen = true
-		return m.setFocus(focusCommit)
-	}
-	if m.focus != focusCommit {
-		return m.setFocus(focusCommit)
-	}
-	if problem := m.commitProblem(); problem != "" {
-		// The status bar rather than a dialog: the message is on screen and
-		// the cursor is already in it, so a box would cover the one thing that
-		// needs doing.
-		m.setError(problem)
-		return m, nil
-	}
-	question := fmt.Sprintf("Commit %s to %s?",
-		plural(len(m.index.files), "staged file", "staged files"), m.branch)
-	if m.amend {
-		question = "Rewrite the last commit on " + m.branch + "?"
-	}
-	repo, amend := m.repo, m.amend
-	message := normalizeMessage(m.commit.Value())
-	m.dialog = confirmDialog("Commit", question, func(string) tea.Cmd {
-		return func() tea.Msg {
-			out, err := repo.Commit(message, amend)
-			if err != nil {
-				return committedMsg{err: err}
-			}
-			// The message is in the commit now, so the stashed copies go.
-			_ = repo.RemoveStateFile(git.MsgFile)
-			_ = repo.RemoveStateFile(git.BackupFile)
-			return committedMsg{out: out}
-		}
-	})
-	return m, nil
-}
-
-// onCommitted empties the buffer once the commit has actually been made, and
-// leaves it alone when it has not, so nothing typed is lost to a failure.
-func (m Model) onCommitted(msg committedMsg) (tea.Model, tea.Cmd) {
-	if msg.err != nil {
-		m.setError("Commit: " + firstLine(msg.err.Error()))
-		m.dialog = messageDialog("Commit failed", msg.err.Error(), true)
-		return m, m.rescanCmd()
-	}
-	m.setMessage("")
-	m.bckExists = false
-	m.amend = false
-	m.savedMsg = ""
-	m.composeOpen = false
-	if m.focus == focusCommit {
-		m.focus = focusDiff
-		m.commit.Blur()
-	}
-	m.layout()
-	m.setOK("Created commit: " + firstLine(msg.out))
-	return m, m.rescanCmd()
-}
-
-// doPop takes the selected commit and everything after it off the branch,
-// leaving their changes staged. Selecting the oldest of a run and popping is
-// how you undo the whole run at once.
-func (m Model) doPop() (tea.Model, tea.Cmd) {
-	c, ok := m.commits.selected()
-	if !ok {
-		m.setError("Select a commit first; the working tree has nothing to pop")
-		return m, nil
-	}
-	repo := m.repo
-	parent, ok := repo.Parent(c.Hash)
-	if !ok {
-		m.setError(c.Short + " has no parent to reset to")
-		return m, nil
-	}
-	// The cursor sits one row below the working tree for the newest commit, so
-	// its position is exactly how many commits come off.
-	popped := plural(m.commits.cursor, "commit", "commits")
-	m.dialog = confirmDialog("Reset",
-		fmt.Sprintf("Pop %s off %s, back to %s?\n\n"+
-			"Everything they contained stays staged, and the working tree is "+
-			"not touched. Nothing is lost: the commits remain in the reflog.",
-			popped, m.branch, abbrevHash(parent)),
-		func(string) tea.Cmd {
-			return op("Popped "+popped+" off "+m.branch, true,
-				func() error { return repo.ResetSoft(parent) })
-		})
-	return m, nil
-}
-
-func (m Model) doPush() (tea.Model, tea.Cmd) {
-	remotes, err := m.repo.Remotes()
-	if err != nil || len(remotes) == 0 {
-		m.dialog = messageDialog("Push", "No remotes are configured for this repository.", true)
-		return m, nil
-	}
-	repo, branch := m.repo, m.branch
-	choose := func(remote string) tea.Cmd {
-		return func() tea.Msg {
-			out, err := repo.Push(remote, branch, false, false)
-			if err != nil {
-				return opMsg{text: "Push to " + remote, err: err}
-			}
-			return opMsg{text: "Pushed " + branch + " to " + remote + ": " + firstLine(out), rescan: true}
-		}
-	}
-	if len(remotes) == 1 {
-		m.dialog = confirmDialog("Push",
-			fmt.Sprintf("Push branch %s to %s?", branch, remotes[0]),
-			func(string) tea.Cmd { return choose(remotes[0]) })
-		return m, nil
-	}
-	m.dialog = listDialog("Push", "Push branch "+branch+" to which remote?", remotes, choose)
-	return m, nil
-}
-
-func (m Model) doMerge() (tea.Model, tea.Cmd) {
-	if m.merging {
-		repo := m.repo
-		m.dialog = confirmDialog("Abort Merge",
-			"Abort the merge in progress? Any resolved conflicts will be lost.",
-			func(string) tea.Cmd {
-				return op("Merge aborted", true, func() error { _, err := repo.AbortMerge(); return err })
-			})
-		return m, nil
-	}
-	branches, err := m.repo.Branches()
-	if err != nil || len(branches) == 0 {
-		m.setError("No branches to merge")
-		return m, nil
-	}
-	var others []string
-	for _, b := range branches {
-		if b != m.branch {
-			others = append(others, b)
-		}
-	}
-	if len(others) == 0 {
-		m.setError("No other branch to merge")
-		return m, nil
-	}
-	repo, cur := m.repo, m.branch
-	m.dialog = listDialog("Local Merge", "Merge which branch into "+cur+"?", others,
-		func(b string) tea.Cmd {
-			return func() tea.Msg {
-				out, err := repo.Merge(b)
-				if err != nil {
-					return opMsg{text: "Merge " + b, err: err, rescan: true}
-				}
-				return opMsg{text: "Merged " + b + ": " + firstLine(out), rescan: true}
-			}
-		})
-	return m, nil
-}
-
-func (m Model) doCheckout() (tea.Model, tea.Cmd) {
-	branches, err := m.repo.Branches()
-	if err != nil || len(branches) == 0 {
-		m.setError("No branches available")
-		return m, nil
-	}
-	repo := m.repo
-	m.dialog = listDialog("Checkout Branch", "Switch to which branch?", branches,
-		func(b string) tea.Cmd {
-			return op("Checked out "+b, true, func() error { _, err := repo.Checkout(b); return err })
-		})
-	return m, nil
-}
-
-func (m Model) doCreateBranch() (tea.Model, tea.Cmd) {
-	repo := m.repo
-	m.dialog = inputDialog("Create Branch", "Name the new branch:", "feature/…",
-		func(name string) tea.Cmd {
-			return op("Created branch "+name, true, func() error { _, err := repo.CreateBranch(name); return err })
-		})
-	return m, nil
-}
-
-func (m *Model) clearStatus()      { m.status, m.statusOK, m.statusEr = "", false, false }
-func (m *Model) setOK(s string)    { m.status, m.statusOK, m.statusEr = s, true, false }
-func (m *Model) setError(s string) { m.status, m.statusOK, m.statusEr = s, false, true }
 
 func firstLine(s string) string {
 	s = strings.TrimSpace(s)
@@ -1892,626 +2510,4 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
-}
-
-// ---------------------------------------------------------------------------
-// Layout and view
-// ---------------------------------------------------------------------------
-
-// layout recomputes pane geometry, reproducing git-gui's paned window: the
-// two file lists stacked on the left, the diff above the commit area on the
-// right.
-func (m *Model) layout() {
-	if m.width <= 0 || m.height <= 0 {
-		return
-	}
-	m.rects = [focusCount]rect{}
-	body := max(m.height-2, 4) // branch bar and status bar
-
-	if m.zoom {
-		m.layoutZoom(body)
-		return
-	}
-
-	leftW := max(min(m.width*34/100, 46), 24)
-	if leftW > m.width-30 {
-		leftW = max(m.width/3, 12)
-	}
-	rightW := max(m.width-leftW-1, 10)
-	if m.leftCollapsed() {
-		leftW, rightW = 0, m.width
-	}
-
-	// The branch history takes the bottom of the left column, no more than a
-	// third of it and no more than it has to show, so a single commit does not
-	// leave a hole. What is left goes to the working lists, or to the selected
-	// commit's files in their place.
-	listsH := body
-	if m.showCommits() {
-		commitsH := min(max(body/3, 4), m.commits.rows()+1)
-		listsH = max(body-commitsH, 3)
-		m.commits.width, m.commits.height = leftW, max(body-listsH-1, 1)
-	}
-	if m.browsing() {
-		m.history.width, m.history.height = leftW, max(listsH-1, 1)
-	} else {
-		workH := listsH / 2
-		stagedH := listsH - workH
-		m.workdir.width, m.workdir.height = leftW, max(workH-1, 1)
-		m.index.width, m.index.height = leftW, max(stagedH-1, 1)
-	}
-
-	// The message sits under the diff, and only once it has been opened.
-	commitH := 0
-	if m.composeOpen {
-		commitH = min(10, max(body/2, 5))
-	}
-	diffH := max(body-commitH, 3)
-	m.diff.width, m.diff.height = rightW, max(diffH-1, 1)
-	if commitH > 0 {
-		// One column narrower than the pane: viewCommitArea insets it to line
-		// up with the title.
-		m.commit.SetWidth(max(rightW-1, 10))
-		m.commit.SetHeight(max(commitH-1, 2))
-	}
-
-	// Where each pane lands, walked in the order View joins them. Doing it
-	// here rather than measuring the rendered frame is what keeps a click and
-	// the thing it landed on agreeing: both come out of this one arithmetic.
-	y := 1 // below the branch bar
-	if !m.leftCollapsed() {
-		if m.browsing() {
-			m.rects[focusHistory] = rect{0, y, leftW, 1 + m.history.height}
-			y += 1 + m.history.height
-		} else {
-			m.rects[focusWorkdir] = rect{0, y, leftW, 1 + m.workdir.height}
-			y += 1 + m.workdir.height
-			m.rects[focusIndex] = rect{0, y, leftW, 1 + m.index.height}
-			y += 1 + m.index.height
-		}
-		if m.showCommits() {
-			m.rects[focusCommits] = rect{0, y, leftW, 1 + m.commits.height}
-		}
-	}
-	rightX := 0
-	if !m.leftCollapsed() {
-		rightX = leftW + 1 // past the separator column
-	}
-	y = 1
-	m.rects[focusDiff] = rect{rightX, y, rightW, 1 + m.diff.height}
-	y += 1 + m.diff.height
-	if m.composeOpen {
-		m.rects[focusCommit] = rect{rightX, y, rightW, 1 + m.commit.Height()}
-	}
-
-	m.clampPanes()
-}
-
-// layoutZoom gives the focused pane the whole window. Nothing else is drawn,
-// so nothing else is laid out and nothing else can be clicked.
-func (m *Model) layoutZoom(body int) {
-	w, h := m.width, max(body-1, 1) // one row goes to the pane's own title
-	switch m.focus {
-	case focusWorkdir:
-		m.workdir.width, m.workdir.height = w, h
-	case focusIndex:
-		m.index.width, m.index.height = w, h
-	case focusHistory:
-		m.history.width, m.history.height = w, h
-	case focusCommits:
-		m.commits.width, m.commits.height = w, h
-	case focusDiff:
-		m.diff.width, m.diff.height = w, h
-	case focusCommit:
-		m.commit.SetWidth(max(w-1, 10))
-		m.commit.SetHeight(max(h, 2))
-	}
-	m.rects[m.focus] = rect{0, 1, w, body}
-	m.clampPanes()
-}
-
-func (m *Model) clampPanes() {
-	m.workdir.clamp()
-	m.index.clamp()
-	m.history.clamp()
-	m.commits.clamp()
-	m.diff.clamp()
-}
-
-// toggleZoom gives a pane the whole window, or hands the window back.
-//
-// Zooming a pane is also going to it. With one pane on screen there is nowhere
-// else for the keyboard to be, and a focus sitting on something invisible is
-// how a window ends up ignoring keys for no reason anyone can see.
-func (m Model) toggleZoom(f focusArea) (tea.Model, tea.Cmd) {
-	if !m.paneVisible(f) {
-		return m, nil
-	}
-	if m.zoom && m.focus == f {
-		m.zoom = false
-		m.layout()
-		return m, nil
-	}
-	m.zoom = true
-	return m.setFocus(f)
-}
-
-// narrowWidth is where the window stops being wide enough for both columns.
-// Below it a pane roughly a third of the screen wide leaves the diff too
-// narrow to read code in, which is the one thing the window is for.
-const narrowWidth = 100
-
-// leftCollapsed reports whether the left column gives up its space entirely.
-//
-// It does so only on a narrow window, and only while the focus is on the right
-// hand column, so moving right reads as "show me this properly" and moving
-// left brings the lists straight back. On a wide window nothing moves, because
-// nothing needs to.
-func (m *Model) leftCollapsed() bool {
-	if m.width >= narrowWidth {
-		return false
-	}
-	return m.focus == focusDiff || m.focus == focusCommit
-}
-
-// committable reports whether there is anything to make a commit out of:
-// something staged, an amend, or a merge being concluded. An amend with
-// nothing staged is still a commit.
-//
-// This is no longer what decides whether the message is on screen — Ctrl-Enter
-// decides that — only whether a commit could be made at all.
-func (m *Model) committable() bool {
-	return len(m.index.files) > 0 || m.amend || m.merging
-}
-
-// View renders the whole window.
-func (m Model) View() string {
-	if m.quit {
-		return ""
-	}
-	if !m.ready {
-		return "Loading…"
-	}
-
-	middle := m.viewZoomed()
-	if !m.zoom {
-		var stack []string
-		if m.browsing() {
-			stack = append(stack, m.viewPane(focusHistory))
-		} else {
-			stack = append(stack, m.viewPane(focusWorkdir), m.viewPane(focusIndex))
-		}
-		if m.showCommits() {
-			stack = append(stack, m.viewPane(focusCommits))
-		}
-		left := lipgloss.JoinVertical(lipgloss.Left, stack...)
-		right := m.viewPane(focusDiff)
-		if m.composeOpen {
-			right = lipgloss.JoinVertical(lipgloss.Left, right, m.viewCommitArea(m.diff.width))
-		}
-
-		middle = right
-		if !m.leftCollapsed() {
-			bodyH := max(m.height-2, 4)
-			sep := strings.TrimRight(strings.Repeat("│\n", bodyH), "\n")
-			middle = lipgloss.JoinHorizontal(lipgloss.Top, left, m.st.sep.Render(sep), right)
-		}
-	}
-
-	view := lipgloss.JoinVertical(lipgloss.Left,
-		m.viewBranchBar(), middle, m.viewStatusBar())
-
-	if m.dialog != nil {
-		return m.dialog.view(m.st, m.width, m.height)
-	}
-	if m.md != nil {
-		return paintSelection(m.md.view(m.st), m.mouse.selectionIn(focusReader), mdSel{m.md})
-	}
-	return view
-}
-
-// viewPane draws one pane, with whatever the mouse has selected in it painted
-// over the top.
-func (m Model) viewPane(f focusArea) string {
-	focused := m.focus == f
-	var view string
-	switch f {
-	case focusWorkdir:
-		view = m.workdir.view(m.st, focused)
-	case focusIndex:
-		view = m.index.view(m.st, focused)
-	case focusHistory:
-		view = m.history.view(m.st, focused)
-	case focusCommits:
-		view = m.commits.view(m.st, focused)
-	case focusDiff:
-		view = m.diff.view(m.st, focused)
-	default:
-		return ""
-	}
-	p := m.selectableFor(f)
-	if p == nil {
-		return view
-	}
-	return paintSelection(view, m.mouse.selectionIn(f), p)
-}
-
-// viewZoomed draws the focused pane across the whole window.
-func (m Model) viewZoomed() string {
-	if !m.zoom {
-		return ""
-	}
-	if m.focus == focusCommit {
-		return m.viewCommitArea(m.width)
-	}
-	return m.viewPane(m.focus)
-}
-
-// viewCommitArea draws the message buffer under the diff: a title saying which
-// kind of commit this will be, and the field itself. git-gui puts a column of
-// buttons beside it — Rescan, Stage Changed, Sign Off, Commit, Push — but each
-// was only a label for a key that already exists, so the field takes the whole
-// width instead.
-func (m Model) viewCommitArea(width int) string {
-	label := "Commit Message"
-	switch {
-	case m.amend && !m.hasHEAD:
-		label = "Amended Initial Commit Message"
-	case m.amend && m.merging:
-		label = "Amended Merge Commit Message"
-	case m.amend:
-		label = "Amend Last Commit"
-	case m.merging:
-		label = "Merge Commit Message"
-	case !m.hasHEAD:
-		label = "Initial Commit Message"
-	}
-	style := m.st.titleCommit
-	if m.focus != focusCommit {
-		style = m.st.titleDim
-	}
-	right := plural(len(m.index.files), "file", "files") + " staged"
-	if m.amend && len(m.index.files) == 0 {
-		right = "amending"
-	}
-	header := renderTitle(style, label, right, width)
-	// The field is inset one column so the text starts under its own title
-	// rather than against the separator.
-	field := lipgloss.NewStyle().PaddingLeft(1).Render(m.commit.View())
-	return lipgloss.JoinVertical(lipgloss.Left, header, field)
-}
-
-func (m Model) viewBranchBar() string {
-	repo := m.repo.Name()
-	left := m.st.branchLabel.Render("Current Branch: ") + m.st.branchBar.Render(m.branch)
-	if m.amend {
-		left += "  " + m.st.statusWA.Render("[amending]")
-	}
-	right := m.st.dimText.Render(repo + "  ·  F1 help  ·  Ctrl-Q quit")
-
-	// The base is the first thing dropped when the bar will not hold all
-	// three: the branch is where you are and the right hand side is the way
-	// out, where the base is context you can do without.
-	if base := m.viewBase(); base != "" {
-		if full := left + base; m.width-lipgloss.Width(full)-lipgloss.Width(right) >= 1 {
-			left = full
-		}
-	}
-
-	gapW := m.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gapW < 1 {
-		return truncateANSI(left, m.width)
-	}
-	return left + strings.Repeat(" ", gapW) + right
-}
-
-// viewBase is the merge base segment of the branch bar: the remote branch this
-// one is measured against, the commit they last had in common, and how far
-// each has moved since. Behind is called out in the warning colour when there
-// is anything to catch up on, since that is the half you can act on.
-func (m Model) viewBase() string {
-	b := m.base
-	if b.Ref == "" {
-		return ""
-	}
-	s := m.st.dimText.Render("  ·  ") + m.st.branchLabel.Render("base: ") + b.Ref
-	if b.Commit != "" {
-		s += m.st.dimText.Render(" " + b.Commit)
-	}
-	s += " " + m.st.dimText.Render("↑"+itoa(b.Ahead))
-	behind := "↓" + itoa(b.Behind)
-	if b.Behind > 0 {
-		return s + " " + m.st.statusWA.Render(behind)
-	}
-	return s + " " + m.st.dimText.Render(behind)
-}
-
-func (m Model) viewStatusBar() string {
-	var left string
-	switch {
-	case m.statusEr:
-		left = m.st.statusER.Render("✗ " + m.status)
-	case m.status != "":
-		left = m.st.statusOK.Render(m.status)
-	default:
-		left = m.st.dimText.Render(m.hints())
-	}
-	right := m.st.dimText.Render(fmt.Sprintf("U:%d  S:%d  ctx:%d",
-		len(m.workdir.files), len(m.index.files), m.context))
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		return truncateANSI(left, m.width)
-	}
-	return left + strings.Repeat(" ", gap) + right
-}
-
-// visualHint is the status line while a file selection is open, matching the
-// one the diff pane shows for a line selection.
-func visualHint(n int, verb string) string {
-	return fmt.Sprintf("VISUAL  %s · ↑/↓ extend · Space %s · V or Esc cancel",
-		plural(n, "file", "files"), verb)
-}
-
-func (m Model) hints() string {
-	switch m.focus {
-	case focusCommits:
-		if _, ok := m.commits.selected(); ok {
-			return "↑/↓ pick a commit · → its files · U pop it and everything after · ? keys"
-		}
-		return "↑/↓ pick a commit to look at · → the diff · ? keys"
-	case focusHistory:
-		c, _ := m.commits.selected()
-		return "Looking at " + c.Short + " · → the diff · U pop it off · Alt-5 back to the working tree"
-	case focusWorkdir:
-		if m.workdir.visual() {
-			return visualHint(m.workdir.selected(), "stage")
-		}
-		return "Space stage · s stage · v revert · V select · e edit · A amend · Ctrl-Enter commit · ? keys"
-	case focusIndex:
-		if m.index.visual() {
-			return visualHint(m.index.selected(), "unstage")
-		}
-		return "Space unstage · u unstage · V select · e edit · A amend · Ctrl-Enter commit · ? keys"
-	case focusDiff:
-		if m.diff.visual() {
-			n := 1 + max(m.diff.cursor, m.diff.anchor) - min(m.diff.cursor, m.diff.anchor)
-			return fmt.Sprintf("VISUAL LINE  %s · ↑/↓ extend · Space stage · V or Esc cancel",
-				plural(n, "line", "lines"))
-		}
-		hint := "Space stage hunk · V select lines · L stage line · r revert · n/p hunk · -/= context"
-		if c, ok := m.commits.selected(); ok {
-			// None of the staging keys do anything against history.
-			hint = "Looking at " + c.Short + " · n/p hunk · -/= context · Alt-5 back to the working tree"
-		}
-		// Left and right belong to the code while a line runs past the right
-		// margin, so where they are offered says so.
-		switch scrolls := m.diff.maxHOffset() > 0; {
-		case m.leftCollapsed() && scrolls:
-			// The lists are off screen entirely, so what brings them back goes
-			// first, where a narrow window will not truncate it away.
-			hint = "←/→ scroll · ← again for the lists · " + hint
-		case m.leftCollapsed():
-			hint = "← lists · " + hint
-		case scrolls:
-			hint = "←/→ scroll · " + hint
-		}
-		return hint
-	default:
-		// Every letter is text here, so ? and q are not offered.
-		return "Ctrl-Enter commits · Esc closes · Tab leaves it open · F1 keys"
-	}
-}
-
-func helpText() string {
-	return strings.Join([]string{
-		"Every command is one letter, pressed in a file list or the diff.",
-		"",
-		"    s  stage              u  unstage",
-		"    v  revert changes     A  amend last commit",
-		"    o  sign off",
-		"    e  edit the file in $EDITOR",
-		"    m  read a markdown file, rendered, full screen",
-		"    R  rescan (also F5)   U  pop commits off this branch",
-		"    -  /  =              less / more diff context",
-		"    P  push               M  local merge / abort merge",
-		"    N  new branch         K  checkout branch",
-		"",
-		"    z  zoom the pane to the whole window (Alt-Z anywhere)",
-		"",
-		"    Ctrl-Enter            write a commit message",
-		"    Ctrl-C or q           quit",
-		"    F1 or ?               these keys",
-		"",
-		"───────────────────────────────────────────────────────────────",
-		"Committing",
-		"",
-		"  Ctrl-Enter escalates one step per press, from any pane:",
-		"",
-		"    1st   brings the message up and puts the cursor in it",
-		"    2nd   asks \"Commit N staged files to <branch>?\"",
-		"    y     makes the commit",
-		"",
-		"  Nothing else puts the message on screen: not staging, not an",
-		"  amend, not a merge. Until you ask for it the diff has the",
-		"  whole right column.",
-		"",
-		"  If the cursor has wandered off the message, Ctrl-Enter only",
-		"  brings it back — so the press that asks is always made from",
-		"  the message, with what you wrote in front of you.",
-		"",
-		"  Esc puts it away and keeps what you typed; Tab only moves the",
-		"  cursor off it. Alt-4 goes to the message, bringing it up first",
-		"  if it is not already there.",
-		"",
-		"  It is a full text field, so every readline key works: Ctrl-A,",
-		"  Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W and the rest — and every letter",
-		"  is text, so the command letters are not reachable until you",
-		"  leave.",
-		"",
-		"  With nothing written it says so in the status bar rather than",
-		"  in a box, and the cursor is already where the fix is typed. It",
-		"  will not commit with nothing staged, or with a file still",
-		"  unmerged, and says which in the same place.",
-		"",
-		"  Sign off with o and amend with A: both change what the buffer",
-		"  holds. Whatever is typed survives quitting difftui.",
-		"",
-		"───────────────────────────────────────────────────────────────",
-		"Panes",
-		"",
-		"  Tab / Shift-Tab  cycle",
-		"  Alt-1 unstaged   Alt-2 staged   Alt-3 diff",
-		"  Alt-4 message    Alt-5 this branch",
-		"",
-		"  Arrows or h/j/k/l move. Moving off the edge of a pane enters",
-		"  the next:",
-		"",
-		"      Unstaged    │ Diff",
-		"      Staged      │",
-		"      ────────────┼─────────",
-		"      This Branch │ Message",
-		"",
-		"  Right from either list opens the diff; left comes back to",
-		"  whichever list the diff is showing, still on the same file.",
-		"",
-		"  In the diff, a line running past the right margin scrolls:",
-		"  right slides the code over, left slides it back, and only",
-		"  with the code against the left margin does left leave for",
-		"  the list. The title says which column the pane starts at",
-		"  while it is scrolled.",
-		"",
-		"  A scrollbar appears down the right edge of a pane, and",
-		"  along the foot of the diff, only while there is something",
-		"  to scroll: a bar that could never move says nothing and",
-		"  costs a column. In the left column it is the thumb alone,",
-		"  sliding along the pane separator.",
-		"",
-		"  Under 100 columns there is not room for both, so moving right",
-		"  gives the diff the whole window and the left column folds",
-		"  away. Left brings it back. Wider than that, nothing moves.",
-		"  Down from the diff reaches the message, and up leaves it again",
-		"  — but only from the first line, so the arrows stay typable.",
-		"",
-		"  z gives the focused pane the whole window and z again hands it",
-		"  back; Alt-Z does the same from inside the message, where z is",
-		"  text. Double clicking a pane title bar zooms it too.",
-		"",
-		"───────────────────────────────────────────────────────────────",
-		"The mouse",
-		"",
-		"  Click a row to go to it: the pane takes the focus and the",
-		"  cursor lands on what you clicked. The wheel scrolls whatever",
-		"  is under the pointer without moving the focus, so you can read",
-		"  ahead in the diff from the file list.",
-		"",
-		"  Drag to select text, and let go to copy it:",
-		"",
-		"    wheel          scroll what is under the pointer, sideways",
-		"                   wheels slide the diff across",
-		"    drag           select, character by character",
-		"    double click   select a word — a path, a URL, a --flag",
-		"    triple click   select the whole line",
-		"    Alt-drag       select a rectangle",
-		"    right click    copy what is selected, and drop it",
-		"    Esc            drop it without copying",
-		"",
-		"  A drag past the top or bottom edge scrolls and keeps going, so",
-		"  a selection can run well past what is on screen.",
-		"",
-		"  What you get is the content, not the furniture: the diff comes",
-		"  with its +/- column but without the line numbers, and a file",
-		"  list gives you paths without the status icons. Alt-drag when",
-		"  you want exact columns instead.",
-		"",
-		"  Copying uses OSC 52, so the text lands on the clipboard of the",
-		"  machine you are sitting at even over ssh or inside tmux.",
-		"",
-		"  While difftui has the mouse your terminal does not, so its own",
-		"  selection is gone — except that most terminals hand it back",
-		"  while Shift is held. Shift-drag to select across panes, or to",
-		"  copy out of the message buffer.",
-		"",
-		"───────────────────────────────────────────────────────────────",
-		"This Branch",
-		"",
-		"  When the branch is ahead of its base, a third pane lists the",
-		"  commits it adds, newest first, under a row for the working",
-		"  tree. That row is where everything above normally lives.",
-		"",
-		"  Pick a commit and the two file lists give way to what it",
-		"  changed; the diff beside them is that commit's own change to",
-		"  the file, against its parent. Pick the working tree again and",
-		"  the lists come back.",
-		"",
-		"  Right walks down the chain: this branch, then the commit's",
-		"  files, then the diff. It is the way in, since going up past",
-		"  the top row means dropping the commit.",
-		"",
-		"  U pops the selected commit, and everything committed after",
-		"  it, back off the branch. Their changes stay staged and the",
-		"  working tree is not touched, so committing two things and",
-		"  wanting both back is: select the older one, press U. It asks",
-		"  first, and nothing is lost either way — the commits are still",
-		"  in the reflog.",
-		"",
-		"  Otherwise history is read only. Nothing that would change the",
-		"  tree or the index — s, u, v, D, L, r, Space — does",
-		"  anything while an earlier commit is on screen; each says so",
-		"  rather than acting. Reading is still allowed: e opens the",
-		"  commit's version of the file as a read-only copy, and m reads",
-		"  it in the markdown reader.",
-		"",
-		"───────────────────────────────────────────────────────────────",
-		"On a file, beyond the commands above",
-		"",
-		"  e       open it in $EDITOR, or vi. The whole terminal goes to",
-		"          the editor until it exits, and difftui rescans after,",
-		"          since the file may have changed. From a commit the",
-		"          editor gets that commit's version as a read-only copy,",
-		"          so history can be read there but never rewritten.",
-		"",
-		"  m       read a markdown file, rendered, filling the screen —",
-		"          the working tree's copy, or the selected commit's.",
-		"          Arrows and PgUp/PgDn scroll; Esc, q or m again closes.",
-		"          When the file has changes, the touched blocks carry a",
-		"          ▍ marker in the margin and n/p hop between them, landing",
-		"          a few lines above so the lead-in shows; the one you are",
-		"          on is picked out in a brighter ▌.",
-		"",
-		"  Space   stage, or unstage from the staged list. The cursor",
-		"          holds its row rather than following the file, so the",
-		"          row becomes the next file down and Space three times",
-		"          stages the next three.",
-		"  V       select files, like vim: up/down extend, Space stages",
-		"          the lot, V or Esc cancels",
-		"  D       delete untracked files",
-		"",
-		"  s, u, v and D all take the selection when there is one, and",
-		"  the file under the cursor when there is not.",
-		"",
-		"───────────────────────────────────────────────────────────────",
-		"In the diff, beyond the commands above",
-		"",
-		"  Space   stage the hunk under the cursor",
-		"  V       select whole lines, the same gesture as in the lists:",
-		"          up/down extend, Space stages them, V or Esc cancels",
-		"  L       stage just the line under the cursor",
-		"  r       revert the hunk        n / p  next / previous hunk",
-		"",
-		"  On the staged side each of these unstages instead.",
-		"",
-		"───────────────────────────────────────────────────────────────",
-		"Why letters, and not git gui's Ctrl keys",
-		"",
-		"  A terminal cannot deliver most of them. Ctrl-I is Tab, Ctrl-M is",
-		"  Enter, and Ctrl-Enter arrives as Ctrl-J. The rest — Ctrl-A, -E,",
-		"  -K, -U, -W, -D, -B, -F, -N, -P, -T — all edit text, so a Ctrl",
-		"  command layer would break the composer.",
-		"",
-		"  Letters need no modifier at all, which also avoids macOS, where",
-		"  Option is not Meta unless the terminal is set up for it. Only",
-		"  Alt-1 to Alt-3 use it, and Tab does the same thing.",
-		"",
-		"  Press Esc to close.",
-	}, "\n")
 }

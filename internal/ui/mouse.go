@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/discobox-ai/x/selection"
 )
 
@@ -176,14 +176,13 @@ func (ms *mouseState) titleDouble(f focusArea) bool {
 // a pane that has none — the message buffer is a text field, and the terminal's
 // own Shift-drag remains the way to copy out of it.
 func (m *Model) hit(x, y int) (focusArea, rect, selectable, bool) {
-	// The reader owns the whole screen while it is up, the way it owns the
-	// keys.
-	if m.md != nil {
+	// A reader owns the whole screen while it is up, the way it owns the keys.
+	if p := m.readerSel(); p != nil {
 		r := rect{0, 0, m.width, m.height}
 		if !r.contains(x, y) {
 			return 0, rect{}, nil, false
 		}
-		return focusReader, r, mdSel{m.md}, true
+		return focusReader, r, p, true
 	}
 	for f := focusArea(0); f < focusCount; f++ {
 		if m.rects[f].contains(x, y) {
@@ -209,34 +208,25 @@ func (m *Model) rectOf(f focusArea) rect {
 // selectableFor is a pane's content, or nil when it has none to select.
 func (m *Model) selectableFor(f focusArea) selectable {
 	switch f {
-	case focusWorkdir:
-		return listSel{m.workdir}
-	case focusIndex:
-		return listSel{m.index}
+	case focusFiles:
+		return listSel{m.files}
 	case focusHistory:
-		return listSel{m.history}
-	case focusCommits:
-		return commitsSel{m.commits}
-	case focusDiff:
-		return diffSel{m.diff, m.st}
+		return commitsSel{m.history}
+	case focusReview:
+		return reviewSel{m.view, m.st}
 	case focusReader:
-		if m.md == nil {
-			return nil
-		}
-		return mdSel{m.md}
+		return m.readerSel()
 	}
 	return nil
 }
 
-// listFor is the file list an area names, or nil for an area that is not one.
-func (m *Model) listFor(f focusArea) *fileList {
-	switch f {
-	case focusWorkdir:
-		return m.workdir
-	case focusIndex:
-		return m.index
-	case focusHistory:
-		return m.history
+// readerSel is whichever full screen reader is up, or nil for neither.
+func (m *Model) readerSel() selectable {
+	switch {
+	case m.md != nil:
+		return mdSel{m.md}
+	case m.file != nil:
+		return fileSel{m.file, m.st}
 	}
 	return nil
 }
@@ -245,17 +235,18 @@ func (m *Model) listFor(f focusArea) *fileList {
 func (m *Model) scrollPane(f focusArea, delta int) {
 	switch f {
 	case focusReader:
-		if m.md != nil {
+		switch {
+		case m.md != nil:
 			m.md.move(delta)
+		case m.file != nil:
+			m.file.scroll(delta)
 		}
-	case focusWorkdir, focusIndex, focusHistory:
-		if l := m.listFor(f); l != nil {
-			l.scroll(delta)
-		}
-	case focusCommits:
-		m.commits.scroll(delta)
-	case focusDiff:
-		m.diff.scroll(delta)
+	case focusFiles:
+		m.files.scroll(delta)
+	case focusHistory:
+		m.history.scroll(delta)
+	case focusReview:
+		m.view.scroll(delta)
 	}
 }
 
@@ -272,57 +263,83 @@ func (m Model) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.dialog != nil {
 		return m, nil
 	}
-	switch {
-	case tea.MouseEvent(msg).IsWheel():
-		return m.mouseWheel(msg)
-	case msg.Action == tea.MouseActionMotion:
-		return m.mouseDrag(msg)
-	case msg.Action == tea.MouseActionRelease:
+	// Each gesture is its own message now, rather than one message with an
+	// action on it.
+	switch msg := msg.(type) {
+	case tea.MouseWheelMsg:
+		return m.mouseWheel(msg.X, msg.Y, msg.Button)
+	case tea.MouseMotionMsg:
+		if m.dragBar(msg.X, msg.Y) {
+			return m, nil
+		}
+		return m.mouseDrag(msg.X, msg.Y)
+	case tea.MouseReleaseMsg:
+		if m.bar != nil {
+			m.bar = nil
+			return m, nil
+		}
 		return m.mouseRelease()
-	case msg.Action != tea.MouseActionPress:
-		return m, nil
-	case msg.Button == tea.MouseButtonRight:
-		// The Windows-terminal gesture: right clicking a showing selection
-		// copies it. With nothing selected it does nothing, since the other
-		// half of that gesture is paste and there is nothing here to paste
-		// into.
-		return m.copySelection()
-	case msg.Button == tea.MouseButtonLeft:
-		return m.mousePress(msg)
+	case tea.MouseClickMsg:
+		switch msg.Button {
+		case tea.MouseRight:
+			// The Windows-terminal gesture: right clicking a showing selection
+			// copies it. With nothing selected it does nothing, since the
+			// other half of that gesture is paste and there is nothing here to
+			// paste into.
+			return m.copySelection()
+		case tea.MouseLeft:
+			return m.mousePress(msg.X, msg.Y, msg.Mod&tea.ModAlt != 0)
+		}
 	}
 	return m, nil
 }
 
 // mouseWheel scrolls whatever is under the pointer, without moving the focus
 // to it. Reading ahead in a pane is not the same as going to work in it.
-func (m Model) mouseWheel(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	f, _, _, ok := m.hit(msg.X, msg.Y)
+func (m Model) mouseWheel(x, y int, button tea.MouseButton) (tea.Model, tea.Cmd) {
+	f, _, _, ok := m.hit(x, y)
 	if !ok {
 		return m, nil
 	}
-	switch msg.Button {
-	case tea.MouseButtonWheelUp:
+	switch button {
+	case tea.MouseWheelUp:
 		m.scrollPane(f, -wheelLines)
-	case tea.MouseButtonWheelDown:
+	case tea.MouseWheelDown:
 		m.scrollPane(f, wheelLines)
-	case tea.MouseButtonWheelLeft:
+	case tea.MouseWheelLeft:
 		m.scrollPaneH(f, -hWheelStep)
-	case tea.MouseButtonWheelRight:
+	case tea.MouseWheelRight:
 		m.scrollPaneH(f, hWheelStep)
 	}
 	return m, nil
 }
 
-// scrollPaneH slides a pane sideways. Only the diff has anywhere to go: it is
-// the one pane that draws lines too long for it rather than wrapping them.
+// scrollPaneH slides a pane sideways. Only the review has anywhere to go: it
+// is the one pane that draws lines too long for it rather than wrapping them.
 func (m *Model) scrollPaneH(f focusArea, delta int) {
-	if f == focusDiff {
-		m.diff.scrollH(delta)
+	switch {
+	case f == focusReview:
+		m.view.scrollH(delta)
+	case f == focusReader && m.file != nil:
+		m.file.scrollH(delta)
 	}
 }
 
-func (m Model) mousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	f, r, p, ok := m.hit(msg.X, msg.Y)
+func (m Model) mousePress(x, y int, block bool) (tea.Model, tea.Cmd) {
+	// The top bar is above every pane, and names two choices rather than
+	// holding any content.
+	if y == 0 {
+		m.mouse.clear()
+		return m.clickTopBar(x)
+	}
+	// A scrollbar is taken hold of before anything else looks at the press: it
+	// is drawn over the pane's own right edge and foot, so whatever is behind
+	// it must not answer for it.
+	if m.grabBar(x, y) {
+		m.mouse.clear()
+		return m, nil
+	}
+	f, r, p, ok := m.hit(x, y)
 	if !ok {
 		m.mouse.clear()
 		return m, nil
@@ -330,7 +347,7 @@ func (m Model) mousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	// The title bar is chrome: clicking it takes the focus, and clicking it
 	// twice zooms the pane, the gesture every tiling window manager taught.
-	if msg.Y == r.y && f != focusReader {
+	if y == r.y && f != focusReader {
 		m.mouse.clear()
 		if m.mouse.titleDouble(f) {
 			return m.toggleZoom(f)
@@ -346,12 +363,12 @@ func (m Model) mousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.setFocus(f)
 	}
 
-	row := msg.Y - r.y - 1
+	row := y - r.y - 1
 	if row < 0 || row >= p.contentRows() {
 		return m, nil
 	}
 	line := p.contentOffset() + row
-	col := msg.X - r.x - p.contentX()
+	col := x - r.x - p.contentX()
 
 	if first, count := p.contentLines(); line >= first+count {
 		// Empty space below the last row. Take the focus, but leave the cursor
@@ -365,17 +382,27 @@ func (m Model) mousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Clicking a row is how you get to it: the focus moves to the pane and the
-	// cursor to the row, which is what a click does in git-gui too. It is also
-	// where a drag starts, and the two do not fight — a selection is not a
-	// selection until it has moved off the cell it began on, so a plain click
-	// leaves nothing highlighted behind it.
+	// cursor to the row. It is also where a drag starts, and the two do not
+	// fight — a selection is not a selection until it has moved off the cell
+	// it began on, so a plain click leaves nothing highlighted behind it.
 	mdl, cmd := m.clickRow(f, line)
 	m = mdl
+
+	// The ▾ in front of a file's name is a disclosure marker, so clicking it
+	// discloses. Only the marker: the rest of the heading is the file's name,
+	// which is text somebody may well want to drag over and copy.
+	if f == focusReview && col >= 0 && col < foldHit {
+		if row, is := m.view.row(); is && row.kind == rowFile {
+			m.mouse.clear()
+			mdl, fold := m.doFold()
+			return mdl, tea.Batch(cmd, fold)
+		}
+	}
 
 	m.mouse.clear()
 	sel := m.mouse.bind(f, p)
 	m.mouse.pane, m.mouse.live = f, true
-	sel.MouseDown(line, col, msg.Alt)
+	sel.MouseDown(line, col, block)
 	return m, cmd
 }
 
@@ -386,34 +413,39 @@ func (m Model) clickRow(f focusArea, line int) (Model, tea.Cmd) {
 	case focusReader:
 		// The reader has no cursor; a click there only starts a selection.
 		return m, nil
-	case focusWorkdir, focusIndex, focusHistory:
-		if l := m.listFor(f); l != nil {
-			l.moveTo(line)
+	case focusFiles:
+		m.files.moveTo(line)
+	case focusHistory:
+		m.history.moveTo(line)
+	case focusReview:
+		// Clicking inside the box being written is not asking to go somewhere
+		// else: the keyboard stays in it and the cursor stays on it.
+		if line >= 0 && line < len(m.view.rows) && m.view.rows[line].kind == rowDraft {
+			return m, nil
 		}
-	case focusCommits:
-		m.commits.moveTo(line)
-	case focusDiff:
-		m.diff.moveTo(line)
+		m.view.moveTo(line)
 	}
 
 	mdl, cmd := m.setFocus(f)
 	m = mdl.(Model)
 	switch f {
+	case focusFiles:
+		// Clicking a file is asking to see it, the same as moving the cursor
+		// onto it with the keyboard.
+		m.view.jumpToFile(m.files.currentPath())
 	case focusHistory:
-		// setFocus reloads the diff for the working lists but not for the
-		// commit's files, which the keyboard path refreshes itself.
-		cmd = tea.Batch(cmd, m.refreshDiffCmd())
-	case focusCommits:
-		// Moving this cursor is what changes which version of the branch the
-		// whole left column is looking at.
-		cmd = tea.Batch(cmd, m.onCommitSelected())
+		// Moving this cursor is what changes whether the review pane holds
+		// the whole change or one commit of it.
+		cmd = tea.Batch(cmd, m.selectedCommitCmd())
+	case focusReview:
+		m = m.follow()
 	}
 	return m, cmd
 }
 
 // mouseDrag extends the gesture, scrolling the pane when the drag runs past
 // its top or bottom edge so a selection can reach past what is on screen.
-func (m Model) mouseDrag(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+func (m Model) mouseDrag(x, y int) (tea.Model, tea.Cmd) {
 	sel, f, ok := m.mouse.dragging()
 	if !ok {
 		return m, nil
@@ -423,7 +455,7 @@ func (m Model) mouseDrag(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	r := m.rectOf(f)
-	row, rows := msg.Y-r.y-1, p.contentRows()
+	row, rows := y-r.y-1, p.contentRows()
 	switch {
 	case row < 0:
 		m.scrollPane(f, row)
@@ -432,7 +464,7 @@ func (m Model) mouseDrag(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.scrollPane(f, row-rows+1)
 		row = rows - 1
 	}
-	sel.MouseDrag(p.contentOffset()+row, msg.X-r.x-p.contentX())
+	sel.MouseDrag(p.contentOffset()+row, x-r.x-p.contentX())
 	return m, nil
 }
 

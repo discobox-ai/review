@@ -3,9 +3,9 @@ package ui
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -52,7 +52,7 @@ func inputDialog(title, body, placeholder string, action func(string) tea.Cmd) *
 	ti.Placeholder = placeholder
 	ti.Focus()
 	ti.CharLimit = 200
-	ti.Width = 40
+	ti.SetWidth(40)
 	return &dialog{kind: dlgInput, title: title, body: body, input: ti, action: action}
 }
 
@@ -62,7 +62,7 @@ func textDialog(title, body string) *dialog {
 
 // update handles a key press. It returns a command and whether the dialog
 // should close.
-func (d *dialog) update(msg tea.KeyMsg) (tea.Cmd, bool) {
+func (d *dialog) update(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	switch msg.String() {
 	case "esc", "ctrl+q":
 		return nil, true

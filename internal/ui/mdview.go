@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/glamour"
-	glamourstyles "github.com/charmbracelet/glamour/styles"
+	"charm.land/glamour/v2"
+	glamourstyles "charm.land/glamour/v2/styles"
 )
 
 // mdView is the full screen markdown reader that m opens. It holds the source
@@ -102,7 +102,16 @@ func mdBlocks(src string) []mdBlock {
 // outright rather than auto-detected: detection asks the terminal, and the
 // terminal belongs to bubbletea while the program runs.
 func (v *mdView) resize(width, height int) {
+	// Rendering is a function of the width alone, and it is the expensive
+	// thing this reader does. A window that only got shorter is drawing the
+	// same lines it already had.
+	same := v.lines != nil && width == v.width
 	v.width, v.height = width, height
+	if same {
+		v.clamp()
+		return
+	}
+
 	room := width - 2
 	if len(v.changedSrc) > 0 {
 		room -= mdGutter
@@ -113,24 +122,11 @@ func (v *mdView) resize(width, height int) {
 		glamour.WithWordWrap(wrap),
 	)
 
-	blocks := mdBlocks(v.raw)
 	v.lines, v.block, v.jumps = nil, nil, nil
-	for i, b := range blocks {
-		// A blank line between blocks belongs to neither; for marking, each
-		// block reaches to the start of the next, so a change landing in the
-		// gap — a deleted paragraph's seam — still gets pointed at.
-		reach := 1 << 30
-		if i+1 < len(blocks) {
-			reach = blocks[i+1].start - 1
-		}
-		hit := false
-		for l := b.start; l <= reach && !hit; l++ {
-			hit = v.changedSrc[l]
-		}
-
-		out := b.text
+	for i, seg := range v.segments() {
+		out := seg.text
 		if err == nil {
-			if rendered, rerr := r.Render(b.text); rerr == nil {
+			if rendered, rerr := r.Render(seg.text); rerr == nil {
 				out = strings.Trim(rendered, "\n")
 			}
 		}
@@ -139,7 +135,7 @@ func (v *mdView) resize(width, height int) {
 			v.block = append(v.block, -1)
 		}
 		id := -1
-		if hit {
+		if seg.hit {
 			id = len(v.jumps)
 			v.jumps = append(v.jumps, len(v.lines))
 		}
@@ -157,6 +153,63 @@ func (v *mdView) resize(width, height int) {
 		v.cur = len(v.jumps) - 1
 	}
 	v.clamp()
+}
+
+// mdSegment is a stretch of the document rendered in one go.
+type mdSegment struct {
+	text string
+	hit  bool // the diff touched it, so it is one of the marked blocks
+}
+
+// segments cuts the document into as few pieces as the markers allow.
+//
+// The reader renders a piece at a time because it has to know which rendered
+// lines came from which source lines, and rendering is the only thing that
+// knows. But that is only true of the blocks a change actually touched: those
+// have to be rendered alone, since each is a place n and p can land. Every
+// block between them can go through in one piece.
+//
+// The difference is not small. Rendering costs about the same however little
+// is being rendered, so a document of two hundred blocks used to cost two
+// hundred renders — seconds of them — where a change touching three of those
+// blocks now costs seven. It is also more faithful: a list rendered whole is a
+// list, where the same list rendered an item at a time is a row of stubs.
+func (v *mdView) segments() []mdSegment {
+	blocks := mdBlocks(v.raw)
+
+	// The last block reaches to the end of the document, and no further: a
+	// reach past it would be a walk through however many line numbers the
+	// bound happened to name.
+	last := strings.Count(v.raw, "\n") + 1
+
+	hits := make([]bool, len(blocks))
+	for i, b := range blocks {
+		// A blank line between blocks belongs to neither; for marking, each
+		// block reaches to the start of the next, so a change landing in the
+		// gap — a deleted paragraph's seam — still gets pointed at.
+		reach := last
+		if i+1 < len(blocks) {
+			reach = blocks[i+1].start - 1
+		}
+		for l := b.start; l <= reach && !hits[i]; l++ {
+			hits[i] = v.changedSrc[l]
+		}
+	}
+
+	var segs []mdSegment
+	for i := 0; i < len(blocks); {
+		if hits[i] {
+			segs = append(segs, mdSegment{text: blocks[i].text, hit: true})
+			i++
+			continue
+		}
+		var run []string
+		for ; i < len(blocks) && !hits[i]; i++ {
+			run = append(run, blocks[i].text)
+		}
+		segs = append(segs, mdSegment{text: strings.Join(run, "\n\n")})
+	}
+	return segs
 }
 
 // body is the rows left for text once the title and the hint line are taken.

@@ -1,65 +1,72 @@
 package ui
 
-import "github.com/charmbracelet/bubbles/key"
+import "charm.land/bubbles/v2/key"
 
 // keyMap follows one rule:
 //
-//	a letter   runs a command, in the file lists and the diff.
+//	a letter   runs a command, in the panes.
 //	Ctrl       edits text, and is never a command.
 //
-// Ctrl-Enter opens the commit composer, and inside it Ctrl-Enter asks to
-// commit. A terminal sends Ctrl-Enter as 0x0A, byte-identical to Ctrl-J, so
-// both are bound. Inside the composer a letter is text; Esc closes it, keeping
-// what was typed.
+// The letters are the review's own verbs — approve, comment, reply, resolve —
+// and each one means the same thing wherever it is pressed. Where a command has
+// an "all of them" form it is the same letter in upper case: a and A approve,
+// Space and F fold.
 //
-// Alt is used only to jump straight to a pane (Alt-1 to Alt-4); Tab does the
-// same thing without it, which matters on macOS where Option is not Meta
-// unless the terminal is configured for it.
+// A key may reach a different object depending on where the cursor is: Space
+// opens a file in the list, folds one in the review, and unfolds a closed
+// comment. That is one verb reaching different objects, which is not the same
+// as a letter meaning two unrelated things; TestNoTwoCommandsShareAKey keeps
+// the difference.
 //
-// git-gui's own accelerators are mostly Ctrl and a terminal cannot honour
-// them: Ctrl-I is Tab, Ctrl-M is Enter, Ctrl-Enter is Ctrl-J, and Ctrl-A,
-// Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W, Ctrl-D, Ctrl-B, Ctrl-F, Ctrl-N, Ctrl-P and
-// Ctrl-T all edit text in the message buffer.
+// Inside the comment composer every letter is text, so none of the commands
+// are reachable from it: Ctrl-Enter posts what was written, Esc throws it away.
+//
+// Alt is used only to jump straight to a pane, and Tab does the same thing
+// without it — which matters on macOS, where Option is not Meta unless the
+// terminal has been configured for it.
 type keyMap struct {
-	// Live everywhere, including the commit message.
+	// Live everywhere, the composer included.
 	Quit   key.Binding
 	Help   key.Binding
-	Commit key.Binding
+	Post   key.Binding
 	Rescan key.Binding
 
-	FocusWorkdir key.Binding
-	FocusIndex   key.Binding
-	FocusDiff    key.Binding
-	FocusCommit  key.Binding
-	FocusCommits key.Binding
+	FocusFiles   key.Binding
+	FocusHistory key.Binding
+	FocusReview  key.Binding
 	NextPane     key.Binding
 	PrevPane     key.Binding
 	Zoom         key.Binding
 
-	// Commands. A letter each, live in the file lists and the diff.
-	StageKey       key.Binding
-	UnstageKey     key.Binding
-	RevertKey      key.Binding
-	SignOffKey     key.Binding
-	AmendKey       key.Binding
-	EditKey        key.Binding
-	MarkdownKey    key.Binding
-	PushKey        key.Binding
-	MergeKey       key.Binding
-	BranchKey      key.Binding
-	CheckoutKey    key.Binding
-	RescanKey      key.Binding
-	HelpKey        key.Binding
-	QuitKey        key.Binding
-	Toggle         key.Binding
-	Visual         key.Binding
-	ZoomKey        key.Binding
-	StageLine      key.Binding
-	Delete         key.Binding
-	RevertHunk     key.Binding
-	PopKey         key.Binding
+	// Commands. A letter each, live in every pane but the composer.
+	ApproveKey  key.Binding
+	ApproveAll  key.Binding
+	FoldAll     key.Binding
+	HideDone    key.Binding
+	SplitKey    key.Binding
+	CommentKey  key.Binding
+	ReplyKey    key.Binding
+	ResolveKey  key.Binding
+	DeleteKey   key.Binding
+	BaseKey     key.Binding
+	EditKey     key.Binding
+	ViewKey     key.Binding
+	ViewOldKey  key.Binding
+	MarkdownKey key.Binding
+	CheckoutKey key.Binding
+	RescanKey   key.Binding
+	HelpKey     key.Binding
+	QuitKey     key.Binding
+	Toggle      key.Binding
+	Visual      key.Binding
+	ZoomKey     key.Binding
+
 	NextHunk       key.Binding
 	PrevHunk       key.Binding
+	NextThread     key.Binding
+	PrevThread     key.Binding
+	NextFile       key.Binding
+	PrevFile       key.Binding
 	LessContextKey key.Binding
 	MoreContextKey key.Binding
 
@@ -80,47 +87,75 @@ func newKeyMap() keyMap {
 	return keyMap{
 		Quit: key.NewBinding(key.WithKeys("ctrl+c", "ctrl+q"), key.WithHelp("Ctrl-C", "quit")),
 		Help: key.NewBinding(key.WithKeys("f1"), key.WithHelp("F1", "help")),
-		// Ctrl-J is what a terminal sends for Ctrl-Enter. This is the only
-		// command reachable from inside the message buffer, and the only one
-		// worth reaching from there.
-		Commit: key.NewBinding(key.WithKeys("ctrl+j", "ctrl+enter"), key.WithHelp("Ctrl-Enter", "write a commit")),
+		// Posting a comment, which is the only command reachable from inside
+		// the box and the only one worth reaching from there.
+		//
+		// Ctrl-S is the one that always arrives. Ctrl-Enter is what a hand
+		// trained on the web will try first, and it works wherever the
+		// terminal encodes it as a line feed — but plenty of terminals send a
+		// carriage return for it, which is byte-identical to Enter and has to
+		// stay a newline inside a text field. So the box names Ctrl-S, and
+		// Ctrl-Enter is there for the terminals that can tell the two apart.
+		//
+		// ("ctrl+enter" is not a key bubbletea v1 reports at all; it is bound
+		// against the day it is, and costs nothing until then.)
+		Post: key.NewBinding(
+			key.WithKeys("ctrl+s", "ctrl+j", "ctrl+enter", "alt+enter"),
+			key.WithHelp("Ctrl-S", "post the comment")),
 		Rescan: key.NewBinding(key.WithKeys("f5"), key.WithHelp("F5", "rescan")),
 
-		FocusWorkdir: key.NewBinding(key.WithKeys("alt+1"), key.WithHelp("Alt-1", "unstaged")),
-		FocusIndex:   key.NewBinding(key.WithKeys("alt+2"), key.WithHelp("Alt-2", "staged")),
-		FocusDiff:    key.NewBinding(key.WithKeys("alt+3"), key.WithHelp("Alt-3", "diff")),
-		FocusCommit:  key.NewBinding(key.WithKeys("alt+4"), key.WithHelp("Alt-4", "message")),
-		FocusCommits: key.NewBinding(key.WithKeys("alt+5"), key.WithHelp("Alt-5", "this branch")),
+		FocusFiles:   key.NewBinding(key.WithKeys("alt+1"), key.WithHelp("Alt-1", "files")),
+		FocusReview:  key.NewBinding(key.WithKeys("alt+2"), key.WithHelp("Alt-2", "review")),
+		FocusHistory: key.NewBinding(key.WithKeys("alt+3"), key.WithHelp("Alt-3", "history")),
 		NextPane:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "next pane")),
 		PrevPane:     key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("Shift-Tab", "prev pane")),
-		// Alt-Z reaches zoom from inside the message buffer, where z is text.
+		// Alt-Z reaches zoom from inside the composer, where z is text.
 		// Everywhere else the letter does it, as z does in tmux.
 		Zoom: key.NewBinding(key.WithKeys("alt+z"), key.WithHelp("Alt-Z", "zoom the pane")),
 
-		StageKey:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stage")),
-		UnstageKey:  key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "unstage")),
-		RevertKey:   key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "revert changes")),
-		SignOffKey:  key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "sign off")),
-		AmendKey:    key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "amend last commit")),
-		EditKey:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit the file")),
+		ApproveKey: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "approve this file")),
+		ApproveAll: key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "approve every file")),
+		// Space folds the file the cursor is in; F is the same verb reaching
+		// every file at once, the way A is to a. Lowercase f is left alone,
+		// since finding something in a long review is what will want it.
+		FoldAll: key.NewBinding(key.WithKeys("F"), key.WithHelp("F", "fold or open every file")),
+		// f and F are a pair: one takes the finished files off the screen, the
+		// other folds what is left. Lower case is the bigger hammer, which is
+		// the wrong way round — but f is the letter a filter wants, and F was
+		// already the fold's.
+		HideDone: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "hide the files that are done with")),
+		// s stands the two sides of a change beside each other. Neither view
+		// is right for everything, so it is a key rather than a setting.
+		SplitKey:   key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "split the diff, or unify it")),
+		CommentKey: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "comment on this line")),
+		ReplyKey:   key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reply")),
+		ResolveKey: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "resolve / reopen")),
+		DeleteKey:  key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "delete a comment")),
+		BaseKey:    key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "choose the base")),
+		EditKey:    key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit the file")),
+		// v reads the file as it now stands and o as it stood before, which
+		// is the same pair the diff itself is made of.
+		ViewKey:     key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "read the whole file")),
+		ViewOldKey:  key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "read it as the base has it")),
 		MarkdownKey: key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "read markdown")),
-		PushKey:     key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "push")),
-		MergeKey:    key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "local merge")),
-		BranchKey:   key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "new branch")),
-		CheckoutKey: key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "checkout branch")),
+		CheckoutKey: key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "check out a branch")),
 		RescanKey:   key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rescan")),
 
-		HelpKey:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		QuitKey:        key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
-		Toggle:         key.NewBinding(key.WithKeys(" ", "enter"), key.WithHelp("Space", "stage / unstage")),
-		Visual:         key.NewBinding(key.WithKeys("V"), key.WithHelp("V", "visual select")),
-		ZoomKey:        key.NewBinding(key.WithKeys("z"), key.WithHelp("z", "zoom the pane")),
-		StageLine:      key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "stage this line")),
-		Delete:         key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete untracked")),
-		RevertHunk:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "revert hunk")),
-		PopKey:         key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "pop commits off")),
+		HelpKey: key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		QuitKey: key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		// The space bar is named rather than spelled: a key reports the text
+		// it produced, and a bare space would be indistinguishable from one
+		// typed into a field.
+		Toggle:  key.NewBinding(key.WithKeys("space", "enter"), key.WithHelp("Space", "open / fold")),
+		Visual:  key.NewBinding(key.WithKeys("V"), key.WithHelp("V", "visual select")),
+		ZoomKey: key.NewBinding(key.WithKeys("z"), key.WithHelp("z", "zoom the pane")),
+
 		NextHunk:       key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next hunk")),
 		PrevHunk:       key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "previous hunk")),
+		NextThread:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "next open comment")),
+		PrevThread:     key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "previous open comment")),
+		NextFile:       key.NewBinding(key.WithKeys("]"), key.WithHelp("]", "next file")),
+		PrevFile:       key.NewBinding(key.WithKeys("["), key.WithHelp("[", "previous file")),
 		LessContextKey: key.NewBinding(key.WithKeys("-"), key.WithHelp("-", "less context")),
 		MoreContextKey: key.NewBinding(key.WithKeys("=", "+"), key.WithHelp("=", "more context")),
 

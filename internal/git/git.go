@@ -1,8 +1,12 @@
-// Package git wraps the git plumbing/porcelain commands that git-gui drives.
+// Package git wraps the git commands difftui drives.
+//
+// difftui reads a repository and never writes one: everything here either
+// asks git a question or opens a file for reading. The one exception is
+// checking out a branch, which is choosing what to review rather than
+// changing what is under review.
 package git
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -53,19 +57,30 @@ func (r *Repo) run(args ...string) (string, error) {
 	return r.sys.Git(r.Dir, nil, args...)
 }
 
-// Git runs an arbitrary git command in the work tree and returns its output.
-func (r *Repo) Git(args ...string) (string, error) { return r.run(args...) }
-
-// Name is the repository name shown in the window title, as git-gui does it.
+// Name is the repository name shown in the window title.
 func (r *Repo) Name() string { return filepath.Base(r.Dir) }
+
+// DefaultContext is how many lines of context a diff is taken with unless
+// something says otherwise. It is git's own default of three widened a little:
+// a review is read to be understood rather than applied, and the two lines
+// either side are usually the ones that say what the change means.
+const DefaultContext = 5
+
+// EmptyTree is the well known hash of git's empty tree object. It stands in
+// for the state of a repository with no commits in it.
+const EmptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 // ---------------------------------------------------------------------------
 // File states
 // ---------------------------------------------------------------------------
 
-// State is git-gui's two character file state: the first character describes
-// the index (HEAD vs index) and the second the working directory (index vs
-// file). '_' means "no difference", 'O' means untracked and 'U' unmerged.
+// State is a two character file state: the first character describes the index
+// (HEAD vs index) and the second the working directory (index vs file). '_'
+// means "no difference", 'O' means untracked and 'U' unmerged.
+//
+// The review does not care which side of the index a change is on — it reads
+// the working tree as one thing — but it does care whether a change has been
+// committed, and this is what answers that.
 type State string
 
 // Index returns the HEAD-vs-index status character.
@@ -87,147 +102,175 @@ func (s State) Work() byte {
 // Unmerged reports whether the path is in a conflicted state.
 func (s State) Unmerged() bool { return s.Index() == 'U' || s.Work() == 'U' }
 
-// Staged reports whether the path shows up in the "Staged Changes" list.
-// This mirrors git-gui's display_all_files: anything whose index character is
-// neither '_' nor 'U'.
+// Untracked reports whether git has never been told about the path.
+func (s State) Untracked() bool { return s.Work() == 'O' }
+
+// Committed reports whether the working tree agrees with HEAD about the path,
+// which is the state the whole review is trying to reach.
+func (s State) Committed() bool { return s.Index() == '_' && s.Work() == '_' }
+
+// Staged reports whether the change is in the index but not yet in a commit.
 func (s State) Staged() bool {
 	c := s.Index()
 	return c != '_' && c != 'U'
 }
 
-// Unstaged reports whether the path shows up in the "Unstaged Changes" list.
-func (s State) Unstaged() bool {
-	if s.Index() == 'U' {
-		return true
-	}
-	return s.Work() != '_'
-}
-
-// File is one entry of the scan.
+// File is one entry of the working tree scan.
 type File struct {
 	Path  string
 	From  string // original path for renames/copies
 	State State
 }
 
-// stateDescriptions is git-gui's all_descs table.
-var stateDescriptions = map[State]string{
-	"__": "Unmodified",
-
-	"_M": "Modified, not staged",
-	"M_": "Staged for commit",
-	"MM": "Portions staged for commit",
-	"MD": "Staged for commit, missing",
-
-	"_T": "File type changed, not staged",
-	"MT": "File type changed, old type staged for commit",
-	"AT": "File type changed, old type staged for commit",
-	"T_": "File type changed, staged",
-	"TM": "File type change staged, modification not staged",
-	"TD": "File type change staged, file missing",
-
-	"_O": "Untracked, not staged",
-	"A_": "Staged for commit",
-	"AM": "Portions staged for commit",
-	"AD": "Staged for commit, missing",
-
-	"_D": "Missing",
-	"D_": "Staged for removal",
-	"DO": "Staged for removal, still present",
-
-	"_U": "Requires merge resolution",
-	"U_": "Requires merge resolution",
-	"UU": "Requires merge resolution",
-	"UM": "Requires merge resolution",
-	"UD": "Requires merge resolution",
-	"UT": "Requires merge resolution",
-
-	"R_": "Staged for commit",
-	"RM": "Portions staged for commit",
-	"RD": "Staged for commit, missing",
-	"C_": "Staged for commit",
-	"CM": "Portions staged for commit",
-}
-
-// changeDescriptions names the raw status characters diff-tree reports for a
-// commit, which mean something different from the staging states above.
-var changeDescriptions = map[byte]string{
-	'M': "Modified", 'A': "Added", 'D': "Deleted",
-	'R': "Renamed", 'C': "Copied", 'T': "File type changed",
-}
-
-// DescribeChange names the change a commit made, for a State whose index
-// character came from diff-tree rather than from a working tree scan.
-func (s State) DescribeChange() string {
-	if d, ok := changeDescriptions[s.Index()]; ok {
-		return d
+// Pending names, in one word, what still stands between a path and a clean
+// tree. It is empty for a path that is already committed.
+func (s State) Pending() string {
+	switch {
+	case s.Unmerged():
+		return "unmerged"
+	case s.Untracked():
+		return "untracked"
+	case s.Work() == 'D':
+		return "deleted"
+	case s.Work() != '_' && s.Staged():
+		return "part staged"
+	case s.Staged():
+		return "staged"
+	case s.Work() != '_':
+		return "uncommitted"
 	}
-	return "Changed"
+	return ""
 }
 
-// Describe returns the human readable status shown in the diff header.
-func (s State) Describe() string {
-	if d, ok := stateDescriptions[s]; ok {
-		return d
-	}
-	return "Unknown state " + string(s)
-}
+// ---------------------------------------------------------------------------
+// The scan
+// ---------------------------------------------------------------------------
 
-// Scan is everything one rescan learns about the repository: the file states
-// and the facts the display needs alongside them.
-//
-// Parent is the revision the scan was taken against, and the one every diff
-// from it has to be taken against too. Handing it back means the caller keeps
-// it for the diffs that follow rather than asking git again for each.
+// Scan is everything one pass over the repository learns: where the branch
+// stands, what it has committed since the base, what the working tree looks
+// like, and the two diffs the review is drawn from.
 type Scan struct {
-	Files   []File
 	Branch  string
-	Parent  string
-	Base    Base     // empty Ref when there is no remote to measure against
-	Commits []Commit // the branch's own commits, newest first
 	HasHEAD bool
 	Merging bool
-	Merge   string // the prepared merge message, when a merge is in progress
+
+	// Base is what the review is measured from. Ref is the name the user
+	// chose or difftui worked out, and SHA the merge base itself — the commit
+	// the branch and that ref last had in common, which is where this branch's
+	// work begins.
+	Base Base
+
+	// Commits are the branch's own commits, newest first: everything on HEAD
+	// that the merge base does not have.
+	Commits []Commit
+
+	// Files is the working tree status of every path git has anything to say
+	// about, which is where the "not committed yet" marks come from.
+	Files []File
+
+	// Diff is the review itself: every change from the merge base to the
+	// working tree, staged and unstaged alike, untracked files included.
+	Diff string
+
+	// Pending is the same tree measured from HEAD instead, so the lines in
+	// Diff that have not been committed yet can be picked out of it.
+	Pending string
 }
 
-// Rescan collects the whole scan in one go, running each git command once.
-// amend picks the parent, as in Status.
-func (r *Repo) Rescan(amend bool) (Scan, error) {
+// Rescan collects the whole scan in one go.
+//
+// baseRef is the ref the review is measured against, or empty to let difftui
+// work one out. context is how many lines of context every diff is taken with,
+// so that changing it re-reads the review rather than re-rendering a stale one.
+func (r *Repo) Rescan(baseRef string, context int) (Scan, error) {
 	s := Scan{HasHEAD: r.HasHEAD()}
-	s.Parent = r.statusParent(s.HasHEAD, amend)
 	s.Branch = r.CurrentBranch()
-	if s.HasHEAD {
-		s.Base, _ = r.MergeBase()
-		if s.Base.Ahead > 0 {
-			s.Commits, _ = r.Commits(s.Base.Ref)
-		}
-	}
 	s.Merging = r.IsMerging()
-	if s.Merging {
-		s.Merge = r.MergeMessage()
+	s.Base = r.ResolveBase(baseRef, s.HasHEAD)
+	if s.HasHEAD && s.Base.SHA != "" && s.Base.SHA != EmptyTree {
+		s.Commits, _ = r.Commits(s.Base.SHA)
 	}
-	files, err := r.Status(s.Parent)
+
+	files, err := r.Status()
 	if err != nil {
 		return s, err
 	}
 	s.Files = files
+
+	untracked := make([]string, 0, len(files))
+	for _, f := range files {
+		if f.State.Untracked() {
+			untracked = append(untracked, f.Path)
+		}
+	}
+
+	s.Diff, err = r.treeDiff(s.Base.SHA, context, untracked)
+	if err != nil {
+		return s, err
+	}
+	head := "HEAD"
+	if !s.HasHEAD {
+		head = EmptyTree
+	}
+	s.Pending, _ = r.treeDiff(head, context, untracked)
 	return s, nil
 }
 
-// Status scans the working tree, comparing the index against parent.
+// treeDiff is the whole working tree measured against a revision, with the
+// untracked files git would otherwise leave out added on the end.
 //
-// This is git-gui's rescan, and parent is its PARENT: the commit the index is
-// measured against. Normally that is HEAD, but while amending it is HEAD's own
-// parent, so the staged list shows everything the amended commit will contain
-// rather than only what was added on top of it. Use AmendParent to pick it.
+// One command covers every tracked path, staged and unstaged together, because
+// a diff against a commit reads straight through the index. Untracked files
+// have to be asked for one at a time — there is no revision they belong to —
+// but they are the rare case, and leaving them out would mean a review that
+// silently omits every new file.
+func (r *Repo) treeDiff(rev string, context int, untracked []string) (string, error) {
+	if rev == "" {
+		rev = EmptyTree
+	}
+	out, err := r.run("diff", "--no-color", "--no-ext-diff",
+		fmt.Sprintf("-U%d", context), "-M", rev)
+	if err != nil && strings.TrimSpace(out) == "" {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString(out)
+	for _, path := range untracked {
+		add, err := r.untrackedDiff(path, fmt.Sprintf("-U%d", context))
+		if err != nil || add == "" {
+			continue
+		}
+		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString(add)
+	}
+	return b.String(), nil
+}
+
+// untrackedDiff shows a file git has never been told about as one long
+// addition, which is what it is.
+func (r *Repo) untrackedDiff(path, ctx string) (string, error) {
+	info, err := r.sys.Stat(filepath.Join(r.Dir, path))
+	if err != nil || info.IsDir {
+		return "", err
+	}
+	// --no-index exits 1 when the files differ, which is the normal case here.
+	out, _ := r.run("diff", "--no-color", "--no-ext-diff", ctx,
+		"--no-index", "--", r.sys.DevNull(), path)
+	return out, nil
+}
+
+// Status scans the working tree against HEAD.
 //
-// The scan is assembled the way git-gui assembles it, from three commands: the
-// index side, the working directory side, and the untracked files. A single
-// "git status" cannot express it, because status always measures the index
-// against HEAD.
-func (r *Repo) Status(parent string) ([]File, error) {
-	if parent == "" {
-		parent = "HEAD"
+// It is assembled from three commands: the index side, the working directory
+// side, and the untracked files. A single "git status" cannot express it,
+// because status collapses the two sides into one letter each and difftui
+// wants both.
+func (r *Repo) Status() ([]File, error) {
+	parent := "HEAD"
+	if !r.HasHEAD() {
+		parent = EmptyTree
 	}
 	states := map[string]*[2]byte{}
 	froms := map[string]string{}
@@ -240,7 +283,7 @@ func (r *Repo) Status(parent string) ([]File, error) {
 		return s
 	}
 
-	// The index side: HEAD (or the amend parent) versus the index.
+	// The index side: HEAD versus the index.
 	out, err := r.run("diff-index", "--cached", "-M",
 		"--ignore-submodules=dirty", "-z", parent)
 	if err != nil {
@@ -253,8 +296,7 @@ func (r *Repo) Status(parent string) ([]File, error) {
 		}
 	})
 
-	// The working directory side: the index versus the files on disk. This is
-	// the same whether or not we are amending.
+	// The working directory side: the index versus the files on disk.
 	out, err = r.run("diff-files", "--ignore-submodules=dirty", "-z")
 	if err != nil {
 		return nil, err
@@ -341,42 +383,7 @@ func parseRawDiff(out string, fn func(status byte, path, from string)) {
 	}
 }
 
-// StatusParent returns the revision Status should compare the index against:
-// HEAD normally, HEAD's own parent while amending, and the empty tree when
-// there is no commit yet.
-func (r *Repo) StatusParent(amend bool) string {
-	return r.statusParent(r.HasHEAD(), amend)
-}
-
-// statusParent is StatusParent with the HEAD check already made, so a rescan
-// that has to know about HEAD anyway does not run rev-parse for it twice.
-func (r *Repo) statusParent(hasHEAD, amend bool) string {
-	switch {
-	case !hasHEAD:
-		return EmptyTree
-	case amend:
-		return r.AmendParent()
-	default:
-		return "HEAD"
-	}
-}
-
-// AmendParent returns the revision the index should be compared against while
-// amending: HEAD's first parent, or the empty tree when HEAD is the initial
-// commit and there is nothing before it.
-func (r *Repo) AmendParent() string {
-	out, err := r.run("rev-list", "--parents", "-n", "1", "HEAD")
-	if err != nil {
-		return EmptyTree
-	}
-	fields := strings.Fields(strings.TrimSpace(out))
-	if len(fields) < 2 {
-		return EmptyTree
-	}
-	return fields[1]
-}
-
-// mapState converts porcelain XY codes into git-gui's state characters.
+// mapState converts raw status characters into difftui's state characters.
 func mapState(x, y byte) State {
 	if x == '?' && y == '?' {
 		return "_O"
@@ -386,7 +393,7 @@ func mapState(x, y byte) State {
 		return "UU"
 	}
 	conv := func(c byte) byte {
-		if c == ' ' {
+		if c == ' ' || c == 0 {
 			return '_'
 		}
 		return c
@@ -395,65 +402,87 @@ func mapState(x, y byte) State {
 }
 
 // ---------------------------------------------------------------------------
-// Branch / HEAD information
+// Branch and base
 // ---------------------------------------------------------------------------
 
-// CurrentBranch returns the checked out branch, or a detached HEAD label.
+// CurrentBranch names the checked out branch, or the detached head.
 func (r *Repo) CurrentBranch() string {
-	if out, err := r.run("symbolic-ref", "--short", "HEAD"); err == nil {
-		return strings.TrimSpace(out)
+	out, err := r.run("symbolic-ref", "--short", "HEAD")
+	if err == nil {
+		if name := strings.TrimSpace(out); name != "" {
+			return name
+		}
 	}
-	if out, err := r.run("rev-parse", "--short", "HEAD"); err == nil {
-		return "(detached " + strings.TrimSpace(out) + ")"
+	out, err = r.run("rev-parse", "--short", "HEAD")
+	if err != nil {
+		return "(no branch)"
 	}
-	return "(unknown)"
+	return "(detached " + strings.TrimSpace(out) + ")"
 }
 
-// HasHEAD reports whether any commit exists yet.
+// HasHEAD reports whether the repository has any commit yet.
 func (r *Repo) HasHEAD() bool {
-	_, err := r.run("rev-parse", "--verify", "HEAD")
+	_, err := r.run("rev-parse", "--verify", "--quiet", "HEAD")
 	return err == nil
 }
 
-// IsMerging reports whether a merge is in progress (MERGE_HEAD present).
-func (r *Repo) IsMerging() bool {
-	_, err := r.sys.Stat(filepath.Join(r.GitDir, "MERGE_HEAD"))
-	return err == nil
-}
+// IsMerging reports whether a merge is in progress.
+func (r *Repo) IsMerging() bool { return r.StateFileExists("MERGE_HEAD") }
 
-// MergeMessage returns the prepared merge commit message, if any.
-func (r *Repo) MergeMessage() string {
-	msg, _ := r.ReadStateFile("MERGE_MSG")
-	return msg
-}
-
-// Base is where the current branch stands against the ref it is built on: the
-// commit the two last had in common, and how far each has moved since.
+// Base is what the review is measured from: a ref, the commit it and this
+// branch last had in common, and how far each has moved since.
 type Base struct {
-	Ref    string // the branch measured against, "origin/main"
-	Commit string // abbreviated hash of the merge base
+	Ref    string // the ref chosen or worked out, "origin/main"
+	SHA    string // the merge base itself, in full
+	Commit string // the same, abbreviated for the bar
 	Ahead  int    // commits on HEAD since the merge base
 	Behind int    // commits on Ref since the merge base
+	Auto   bool   // true when difftui picked the ref rather than the user
+	Err    string // why a ref the user named could not be used
 }
 
-// MergeBase measures HEAD against the ref it is built on. It reports false
-// when there is nothing to measure against, or no commit yet — both ordinary
-// states rather than errors.
-func (r *Repo) MergeBase() (Base, bool) {
-	ref, ok := r.baseRef()
-	if !ok {
-		return Base{}, false
+// ResolveBase settles what the review is measured from.
+//
+// A ref named by the user wins, and is reported back with its error rather
+// than silently ignored — a review measured from somewhere other than where
+// you asked is worse than one that says it could not do as it was told.
+// Otherwise the branch's own upstream or the remote's default branch is used,
+// and failing both the review falls back to HEAD, which turns difftui into a
+// reader of uncommitted work rather than leaving it with nothing to show.
+func (r *Repo) ResolveBase(ref string, hasHEAD bool) Base {
+	if !hasHEAD {
+		return Base{Ref: "the empty tree", SHA: EmptyTree, Commit: abbrev(EmptyTree), Auto: true}
 	}
+	auto := ref == ""
+	var failed string
+	if ref != "" {
+		if _, err := r.run("rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+			failed, ref = "no such ref: "+ref, ""
+		}
+	}
+	if ref == "" {
+		ref, _ = r.baseRef()
+	}
+	if ref == "" {
+		// Nothing to measure against: review what is not committed.
+		sha, _ := r.run("rev-parse", "HEAD")
+		sha = strings.TrimSpace(sha)
+		return Base{Ref: "HEAD", SHA: sha, Commit: abbrev(sha), Auto: true, Err: failed}
+	}
+
+	b := Base{Ref: ref, Auto: auto, Err: failed}
 	out, err := r.run("merge-base", "HEAD", ref)
 	if err != nil {
-		// Unrelated histories have no merge base at all.
-		return Base{}, false
+		// Unrelated histories have no merge base; measure from the ref itself.
+		out, err = r.run("rev-parse", ref+"^{commit}")
+		if err != nil {
+			sha, _ := r.run("rev-parse", "HEAD")
+			sha = strings.TrimSpace(sha)
+			return Base{Ref: "HEAD", SHA: sha, Commit: abbrev(sha), Auto: true, Err: failed}
+		}
 	}
-	sha := strings.TrimSpace(out)
-	if sha == "" {
-		return Base{}, false
-	}
-	b := Base{Ref: ref, Commit: abbrev(sha)}
+	b.SHA = strings.TrimSpace(out)
+	b.Commit = abbrev(b.SHA)
 	// --left-right counts both sides of the fork in one pass: commits reachable
 	// only from HEAD, then only from ref.
 	if out, err := r.run("rev-list", "--left-right", "--count", "HEAD..."+ref); err == nil {
@@ -462,7 +491,7 @@ func (r *Repo) MergeBase() (Base, bool) {
 			b.Behind, _ = strconv.Atoi(fields[1])
 		}
 	}
-	return b, true
+	return b
 }
 
 // abbrevLen is how much of a hash is shown, matching git's own default.
@@ -475,15 +504,13 @@ func abbrev(sha string) string {
 	return sha
 }
 
-// baseRef is the ref the branch is measured against: what it tracks, when it
-// tracks anything, and otherwise the remote's default branch.
+// baseRef is the ref the branch is measured against when nobody has said: what
+// it tracks, and otherwise the remote's default branch.
 //
-// Tracking comes first because it is what the branch was told to build on,
-// rather than a guess at where it probably started, and because it is what
-// the rest of git already reports — git status, git branch -vv, and the
-// target of a bare push or pull all name the same ref. A tool that disagreed
-// with those about where the branch stands would be worse than one that said
-// nothing, since you would have to remember which to believe.
+// Tracking comes first because it is what the branch was told to build on
+// rather than a guess at where it probably started, and because it is what the
+// rest of git already reports — git status, git branch -vv, and the target of
+// a bare push or pull all name the same ref.
 func (r *Repo) baseRef() (string, bool) {
 	if ref, ok := r.upstreamRef(); ok {
 		return ref, true
@@ -492,8 +519,8 @@ func (r *Repo) baseRef() (string, bool) {
 }
 
 // upstreamRef is the branch this one is configured to build on: git's
-// @{upstream}, from branch.<name>.remote and branch.<name>.merge. git treats a
-// branch that tracks nothing as an error rather than an empty answer.
+// @{upstream}. git treats a branch that tracks nothing as an error rather than
+// an empty answer.
 func (r *Repo) upstreamRef() (string, bool) {
 	out, err := r.run("rev-parse", "--abbrev-ref", "@{upstream}")
 	if err != nil {
@@ -507,8 +534,6 @@ func (r *Repo) upstreamRef() (string, bool) {
 // repositories. git records it only when the clone set it up, so a remote
 // without one is tried for the usual names instead.
 func (r *Repo) defaultRemoteBranch() (string, bool) {
-	// origin is much the commonest case, and asking for its HEAD straight off
-	// saves listing the remotes at all.
 	if ref, ok := r.remoteHEAD("origin"); ok {
 		return ref, true
 	}
@@ -546,21 +571,84 @@ func (r *Repo) remoteHEAD(remote string) (string, bool) {
 	return ref, ref != ""
 }
 
+// Refs lists what the base could reasonably be set to: every remote-tracking
+// branch and every local branch but the one checked out, since a branch
+// measured against itself has nothing to review.
+func (r *Repo) Refs() []string {
+	current := r.CurrentBranch()
+	var out []string
+	seen := map[string]bool{}
+	add := func(ref string) {
+		if ref == "" || ref == current || seen[ref] {
+			return
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	if ref, ok := r.upstreamRef(); ok {
+		add(ref)
+	}
+	if ref, ok := r.defaultRemoteBranch(); ok {
+		add(ref)
+	}
+	for _, spec := range []string{"refs/remotes", "refs/heads"} {
+		text, err := r.run("for-each-ref", "--sort=-committerdate",
+			"--format=%(refname:short)", spec)
+		if err != nil {
+			continue
+		}
+		for _, l := range strings.Split(strings.TrimSpace(text), "\n") {
+			l = strings.TrimSpace(l)
+			if l == "" || strings.HasSuffix(l, "/HEAD") {
+				continue
+			}
+			add(l)
+		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
 // Commit is one entry of the branch's own history: a commit made since the
 // merge base, and so one of the commits this branch is adding.
 type Commit struct {
 	Hash    string
 	Short   string
 	Subject string
+	Author  string
+	When    string
 }
 
 // Commits lists the commits on HEAD that base does not have, newest first.
-// This is the same set rev-list counts as "ahead".
 func (r *Repo) Commits(base string) ([]Commit, error) {
 	if base == "" {
 		return nil, nil
 	}
-	out, err := r.run("log", "--format=%H %s", base+"..HEAD")
+	return r.log(base + "..HEAD")
+}
+
+// Recent lists the last n commits on HEAD, newest first.
+//
+// It is what the base picker offers when no ref is the right answer: measuring
+// from one of your own commits is how you say "review what I did after this
+// point", and the branch's history is the only place that point has a name.
+func (r *Repo) Recent(n int) ([]Commit, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	return r.log("-n", strconv.Itoa(n), "HEAD")
+}
+
+// log reads commits in difftui's own format. The fields are separated by a
+// unit separator rather than a space, so that a subject may hold anything —
+// including runs of spaces, which is what makes them worth keeping.
+func (r *Repo) log(args ...string) ([]Commit, error) {
+	const sep = "\x1f"
+	out, err := r.run(append([]string{"log",
+		"--format=%H" + sep + "%an" + sep + "%ar" + sep + "%s"}, args...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -569,81 +657,44 @@ func (r *Repo) Commits(base string) ([]Commit, error) {
 		if line == "" {
 			continue
 		}
-		hash, subject, _ := strings.Cut(line, " ")
-		if hash == "" {
+		parts := strings.SplitN(line, sep, 4)
+		if len(parts) != 4 || parts[0] == "" {
 			continue
 		}
 		commits = append(commits, Commit{
-			Hash: hash, Short: abbrev(hash), Subject: subject,
+			Hash: parts[0], Short: abbrev(parts[0]),
+			Author: parts[1], When: parts[2], Subject: parts[3],
 		})
 	}
 	return commits, nil
 }
 
-// CommitFiles lists what a commit changed, against its parent. The status
-// character lands on the index side of the state, so "M_" reads as "this
-// commit modified it"; DescribeChange names them.
-//
-// --root makes the very first commit on a branch list its files rather than
-// nothing, having no parent to be compared against.
-func (r *Repo) CommitFiles(hash string) ([]File, error) {
-	out, err := r.run("diff-tree", "--no-commit-id", "--root", "-M",
-		"--ignore-submodules=dirty", "-r", "-z", hash)
-	if err != nil {
-		return nil, err
-	}
-	var files []File
-	froms := map[string]string{}
-	parseRawDiff(out, func(status byte, path, from string) {
-		if from != "" {
-			froms[path] = from
-		}
-		files = append(files, File{
-			Path: path, From: from, State: State([]byte{status, '_'}),
-		})
-	})
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	return files, nil
-}
-
-// CommitDiff is the change one commit made to one file, against its parent.
-func (r *Repo) CommitDiff(hash string, f File, context int) (string, error) {
+// CommitDiff is everything one commit changed, as one patch.
+func (r *Repo) CommitDiff(hash string, context int) (string, error) {
 	out, err := r.run("show", "--no-color", "--no-ext-diff", "--format=",
-		fmt.Sprintf("-U%d", context), "-M", hash, "--", f.Path)
+		fmt.Sprintf("-U%d", context), "-M", hash)
 	if err != nil && strings.TrimSpace(out) == "" {
 		return "", err
-	}
-	if strings.TrimSpace(out) == "" {
-		return "* No differences detected.\n", nil
 	}
 	return out, nil
 }
 
-// Parent returns a commit's first parent, and false when it has none — which
-// only the root commit of a repository does.
-func (r *Repo) Parent(hash string) (string, bool) {
-	out, err := r.run("rev-parse", "--verify", "--quiet", hash+"^")
-	if err != nil {
-		return "", false
-	}
-	parent := strings.TrimSpace(out)
-	return parent, parent != ""
+// CarryDiff is the diff of one path between a revision and the working tree,
+// taken with no context at all because nothing but the line numbers is wanted.
+//
+// It is what carries a comment written against a commit onto the working tree
+// and back again: see [Patch.MapOldToNew].
+func (r *Repo) CarryDiff(rev, path string) (string, error) {
+	return r.run("diff", "--no-color", "--no-ext-diff", "-U0", rev, "--", path)
 }
 
-// ResetSoft moves the current branch to rev and touches nothing else: the
-// index and the working tree are left exactly as they were.
-//
-// This is how commits are popped off a branch without losing the work in them.
-// Everything the popped commits contained is still in the index afterwards,
-// because the index never moved — it is the branch that came back to meet it.
-func (r *Repo) ResetSoft(rev string) error {
-	_, err := r.run("reset", "--soft", rev)
-	return err
-}
+// ---------------------------------------------------------------------------
+// Reading files
+// ---------------------------------------------------------------------------
 
 // Edit opens a file from the working tree in the user's editor. It refuses a
-// path that is not on disk — a file staged for deletion, say — since opening
-// that would create it rather than edit it.
+// path that is not on disk — a file deleted but not yet committed, say — since
+// opening that would create it rather than edit it.
 func (r *Repo) Edit(path string) (Editor, error) {
 	full := filepath.Join(r.Dir, path)
 	if _, err := r.sys.Stat(full); err != nil {
@@ -668,12 +719,11 @@ func (r *Repo) FileContent(commit, path string) (string, error) {
 // EditAt opens a file as it stands in a commit, or in the working tree when
 // commit is empty, where it defers to Edit.
 //
-// History cannot be edited, but the editor is still the most familiar place
-// to read a file in, so the commit's version is copied to a read-only
-// temporary file and the editor opened on that. The copy keeps the file's own
-// name, in a directory of its own, so the editor still recognises what it is.
-// The returned path is that copy — empty for the working tree — and the
-// caller hands it back to RemoveTempCopy once the editor exits.
+// History cannot be edited, but the editor is still the most familiar place to
+// read a file in, so the commit's version is copied to a read-only temporary
+// file and the editor opened on that. The returned path is that copy — empty
+// for the working tree — and the caller hands it back to RemoveTempCopy once
+// the editor exits.
 func (r *Repo) EditAt(commit, path string) (Editor, string, error) {
 	if commit == "" {
 		ed, err := r.Edit(path)
@@ -729,18 +779,28 @@ func (r *Repo) Remotes() ([]string, error) {
 	return names, nil
 }
 
-// ---------------------------------------------------------------------------
-// Persisted commit buffer
-// ---------------------------------------------------------------------------
+// Checkout switches branches. It is the one thing difftui changes about a
+// repository, because choosing what to review is not reviewing.
+func (r *Repo) Checkout(branch string) (string, error) {
+	return r.run("checkout", branch)
+}
 
-// git-gui stashes the commit message buffer in the git directory so it
-// survives quitting: MsgFile is written on a clean exit, BackupFile is a
-// periodic crash backup. difftui reuses the same names, so a message typed in
-// one tool is picked up by the other.
-const (
-	MsgFile    = "GITGUI_MSG"
-	BackupFile = "GITGUI_BCK"
-)
+// UserName is who a comment is from: git's own committer name, since that is
+// the name every other record of this work already carries.
+func (r *Repo) UserName() string {
+	out, err := r.run("config", "user.name")
+	if err != nil {
+		return "you"
+	}
+	if name := strings.TrimSpace(out); name != "" {
+		return name
+	}
+	return "you"
+}
+
+// ---------------------------------------------------------------------------
+// Files in the git directory
+// ---------------------------------------------------------------------------
 
 // ReadStateFile reads a file from the git directory.
 func (r *Repo) ReadStateFile(name string) (string, bool) {
@@ -751,9 +811,16 @@ func (r *Repo) ReadStateFile(name string) (string, bool) {
 	return string(b), true
 }
 
-// WriteStateFile writes a file into the git directory.
+// WriteStateFile writes a file into the git directory, through a temporary
+// file of its own so that a reader never catches a half written one. An agent
+// polling the review has no way to lock it, so the write has to be the thing
+// that is indivisible.
 func (r *Repo) WriteStateFile(name, content string) error {
-	return r.sys.WriteFile(filepath.Join(r.GitDir, name), []byte(content))
+	tmp := filepath.Join(r.GitDir, name+".tmp")
+	if err := r.sys.WriteFile(tmp, []byte(content)); err != nil {
+		return err
+	}
+	return r.sys.Rename(tmp, filepath.Join(r.GitDir, name))
 }
 
 // RemoveStateFile deletes a file from the git directory, ignoring a missing
@@ -767,271 +834,29 @@ func (r *Repo) RenameStateFile(from, to string) error {
 	return r.sys.Rename(filepath.Join(r.GitDir, from), filepath.Join(r.GitDir, to))
 }
 
-// StateFileNewer reports whether a is strictly newer than b. It is false when
-// either file is missing.
-func (r *Repo) StateFileNewer(a, b string) bool {
-	sa, err := r.sys.Stat(filepath.Join(r.GitDir, a))
-	if err != nil {
-		return false
-	}
-	sb, err := r.sys.Stat(filepath.Join(r.GitDir, b))
-	if err != nil {
-		return false
-	}
-	return sa.ModTime.After(sb.ModTime)
-}
-
 // StateFileExists reports whether a git directory file is present.
 func (r *Repo) StateFileExists(name string) bool {
 	_, err := r.sys.Stat(filepath.Join(r.GitDir, name))
 	return err == nil
 }
 
-// SquashMessage returns .git/SQUASH_MSG, used after a squash merge.
-func (r *Repo) SquashMessage() string {
-	msg, _ := r.ReadStateFile("SQUASH_MSG")
-	return msg
+// Stamp is enough of a file to tell whether it has changed since it was last
+// read: when it was written and how long it was. The size is there because a
+// filesystem's modification times can be too coarse to separate two writes in
+// the same second, which is exactly the interval an agent editing the review
+// works on.
+type Stamp struct {
+	ModTime int64
+	Size    int64
 }
 
-// CommitTemplate returns the contents of commit.template, if one is set.
-func (r *Repo) CommitTemplate() string {
-	out, err := r.run("config", "commit.template")
+// StateFileStamp reports a git directory file's stamp. A missing file has the
+// zero stamp, which is a state like any other: it is how "the review has been
+// deleted" arrives.
+func (r *Repo) StateFileStamp(name string) Stamp {
+	info, err := r.sys.Stat(filepath.Join(r.GitDir, name))
 	if err != nil {
-		return ""
+		return Stamp{}
 	}
-	path := strings.TrimSpace(out)
-	if path == "" {
-		return ""
-	}
-	if strings.HasPrefix(path, "~/") {
-		if home, err := r.sys.HomeDir(); err == nil {
-			path = filepath.Join(home, path[2:])
-		}
-	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(r.Dir, path)
-	}
-	b, err := r.sys.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return string(b)
-}
-
-// ---------------------------------------------------------------------------
-// Diffs
-// ---------------------------------------------------------------------------
-
-// Side identifies which of the two file lists a diff was requested from.
-type Side int
-
-const (
-	// SideWorkdir is the "Unstaged Changes" list.
-	SideWorkdir Side = iota
-	// SideIndex is the "Staged Changes (Will Commit)" list.
-	SideIndex
-	// SideCommit is a file as one of the branch's own commits changed it,
-	// which is history rather than anything stageable.
-	SideCommit
-)
-
-// Diff produces the unified diff git-gui shows for a file, with the given
-// number of context lines.
-//
-// parent is the revision the index is measured against, as in Status: the
-// staged diff of a file while amending has to be taken against HEAD's parent,
-// or it shows only what was staged on top of the commit being amended.
-func (r *Repo) Diff(f File, side Side, context int, parent string) (string, error) {
-	ctx := fmt.Sprintf("-U%d", context)
-
-	if f.State == "_O" {
-		// Untracked: git-gui shows the whole file as an addition.
-		return r.untrackedDiff(f.Path, ctx)
-	}
-	if parent == "" {
-		parent = r.StatusParent(false)
-	}
-
-	args := []string{"diff", "--no-color", "--no-ext-diff", ctx}
-	if side == SideIndex {
-		args = append(args, "--cached", parent, "--", f.Path)
-	} else {
-		args = append(args, "--", f.Path)
-	}
-	out, err := r.run(args...)
-	if err != nil && strings.TrimSpace(out) == "" {
-		return "", err
-	}
-	if strings.TrimSpace(out) == "" {
-		return "* No differences detected.\n", nil
-	}
-	return out, nil
-}
-
-// EmptyTree is the well known hash of git's empty tree object. It stands in
-// for the parent of an initial commit.
-const EmptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-
-func (r *Repo) untrackedDiff(path, ctx string) (string, error) {
-	info, err := r.sys.Stat(filepath.Join(r.Dir, path))
-	if err != nil {
-		return "", err
-	}
-	if info.IsDir {
-		return "* " + path + " is a directory.\n", nil
-	}
-	// --no-index exits 1 when files differ, which is the normal case here.
-	out, _ := r.run("diff", "--no-color", "--no-ext-diff", ctx,
-		"--no-index", "--", r.sys.DevNull(), path)
-	if strings.TrimSpace(out) == "" {
-		return "* " + path + " is empty.\n", nil
-	}
-	return out, nil
-}
-
-// ---------------------------------------------------------------------------
-// Index manipulation
-// ---------------------------------------------------------------------------
-
-// Stage adds paths to the index ("Stage To Commit").
-func (r *Repo) Stage(paths []string) error {
-	if len(paths) == 0 {
-		return nil
-	}
-	args := append([]string{"add", "--"}, paths...)
-	_, err := r.run(args...)
-	return err
-}
-
-// Unstage removes paths from the index ("Unstage From Commit"), restoring
-// their entries from parent.
-//
-// While amending, parent is HEAD's parent, so unstaging a file drops it out of
-// the amended commit entirely rather than resetting it to the very commit
-// being rewritten. git-gui does this by feeding update-index the PARENT entry
-// it recorded during the scan; resetting the paths to that revision is the
-// same thing.
-func (r *Repo) Unstage(paths []string, parent string) error {
-	if len(paths) == 0 {
-		return nil
-	}
-	if parent == "" {
-		parent = r.StatusParent(false)
-	}
-	if !r.HasHEAD() {
-		args := append([]string{"rm", "--cached", "-r", "-q", "--"}, paths...)
-		_, err := r.run(args...)
-		return err
-	}
-	args := append([]string{"reset", "-q", parent, "--"}, paths...)
-	_, err := r.run(args...)
-	return err
-}
-
-// Revert throws away working directory changes ("Revert Changes").
-func (r *Repo) Revert(paths []string) error {
-	if len(paths) == 0 {
-		return nil
-	}
-	args := append([]string{"checkout", "-f", "--"}, paths...)
-	_, err := r.run(args...)
-	return err
-}
-
-// Delete removes untracked files from disk.
-func (r *Repo) Delete(paths []string) error {
-	for _, p := range paths {
-		if err := r.sys.RemoveAll(filepath.Join(r.Dir, p)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ApplyPatch feeds a patch to git apply. When cached is true the patch is
-// applied to the index only; reverse applies it backwards.
-func (r *Repo) ApplyPatch(patch string, cached, reverse bool) error {
-	args := []string{"apply", "--whitespace=nowarn"}
-	if cached {
-		args = append(args, "--cached")
-	}
-	if reverse {
-		args = append(args, "--reverse")
-	}
-	args = append(args, "-")
-	_, err := r.sys.Git(r.Dir, []byte(patch), args...)
-	return err
-}
-
-// ---------------------------------------------------------------------------
-// Committing
-// ---------------------------------------------------------------------------
-
-// Commit creates a commit from the current index.
-func (r *Repo) Commit(message string, amend bool) (string, error) {
-	args := []string{"commit", "--cleanup=strip", "-F", "-"}
-	if amend {
-		args = append(args, "--amend")
-	}
-	out, err := r.sys.Git(r.Dir, []byte(message), args...)
-	return out, err
-}
-
-// LastCommitMessage returns HEAD's message, used when switching to amend mode.
-func (r *Repo) LastCommitMessage() string {
-	out, err := r.run("log", "-1", "--pretty=format:%B")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimRight(out, "\n")
-}
-
-// SignOff returns the "Signed-off-by" trailer for the current committer.
-func (r *Repo) SignOff() (string, error) {
-	name, err := r.run("config", "user.name")
-	if err != nil {
-		return "", errors.New("user.name is not set")
-	}
-	email, err := r.run("config", "user.email")
-	if err != nil {
-		return "", errors.New("user.email is not set")
-	}
-	return fmt.Sprintf("Signed-off-by: %s <%s>", strings.TrimSpace(name), strings.TrimSpace(email)), nil
-}
-
-// ---------------------------------------------------------------------------
-// Transport / merge
-// ---------------------------------------------------------------------------
-
-// Push pushes a branch to a remote.
-func (r *Repo) Push(remote, branch string, force, thin bool) (string, error) {
-	args := []string{"push", "-v"}
-	if force {
-		args = append(args, "--force")
-	}
-	if thin {
-		args = append(args, "--thin")
-	}
-	args = append(args, remote, branch)
-	return r.run(args...)
-}
-
-// Merge merges a revision into the current branch.
-func (r *Repo) Merge(rev string) (string, error) {
-	return r.run("merge", "--no-ff", rev)
-}
-
-// AbortMerge resets a merge in progress.
-func (r *Repo) AbortMerge() (string, error) {
-	return r.run("merge", "--abort")
-}
-
-// Checkout switches branches.
-func (r *Repo) Checkout(branch string) (string, error) {
-	return r.run("checkout", branch)
-}
-
-// CreateBranch creates and checks out a new branch.
-func (r *Repo) CreateBranch(name string) (string, error) {
-	return r.run("checkout", "-b", name)
+	return Stamp{ModTime: info.ModTime.UnixNano(), Size: info.Size}
 }

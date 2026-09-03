@@ -209,7 +209,11 @@ func (f *fakeSystem) Stat(path string) (FileInfo, error) {
 	if _, ok := f.files[path]; !ok && !f.dirs[path] {
 		return FileInfo{}, fs.ErrNotExist
 	}
-	return FileInfo{ModTime: f.times[path], IsDir: f.dirs[path]}, nil
+	return FileInfo{
+		ModTime: f.times[path],
+		Size:    int64(len(f.files[path])),
+		IsDir:   f.dirs[path],
+	}, nil
 }
 
 // fakeEditor stands in for a program that takes the terminal: it records that
@@ -236,14 +240,14 @@ func TestRepoRunsOnAFakeSystem(t *testing.T) {
 		git: map[string]string{
 			"rev-parse --show-toplevel":                                "/work/repo\n",
 			"rev-parse --git-dir":                                      "/work/repo/.git\n",
-			"rev-parse --verify HEAD":                                  "abc123\n",
+			"rev-parse --verify --quiet HEAD":                          "abc123\n",
 			"diff-index --cached -M --ignore-submodules=dirty -z HEAD": ":100644 100644 aaa bbb M\x00staged.txt\x00",
 			"diff-files --ignore-submodules=dirty -z":                  ":100644 100644 aaa bbb M\x00worktree.txt\x00",
 			"ls-files --others --exclude-standard -z":                  "brand-new.txt\x00",
 			"ls-files --unmerged -z":                                   "",
 			"symbolic-ref --short HEAD":                                "main\n",
 		},
-		files: map[string]string{"/work/repo/.git/GITGUI_MSG": "a remembered message"},
+		files: map[string]string{"/work/repo/.git/difftui-review.json": `{"version":1,"branch":"main"}`},
 	}
 
 	repo, err := OpenWith(fake, "/work/repo")
@@ -254,7 +258,7 @@ func TestRepoRunsOnAFakeSystem(t *testing.T) {
 		t.Fatalf("repo = %+v", repo)
 	}
 
-	files, err := repo.Status("HEAD")
+	files, err := repo.Status()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,8 +279,9 @@ func TestRepoRunsOnAFakeSystem(t *testing.T) {
 	if repo.CurrentBranch() != "main" {
 		t.Errorf("branch = %q", repo.CurrentBranch())
 	}
-	if msg, ok := repo.ReadStateFile(MsgFile); !ok || msg != "a remembered message" {
-		t.Errorf("saved message = %q (present=%v)", msg, ok)
+	if body, ok := repo.ReadStateFile("difftui-review.json"); !ok ||
+		!strings.Contains(body, `"branch":"main"`) {
+		t.Errorf("saved review = %q (present=%v)", body, ok)
 	}
 
 	// And it really did go through the fake rather than the machine.

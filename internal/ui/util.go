@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 )
@@ -36,6 +36,21 @@ func truncateANSI(s string, w int) string {
 		return s
 	}
 	return ansi.Truncate(s, w, "…")
+}
+
+// fitANSI makes a string that already carries styling exactly w cells wide,
+// truncating or padding as it has to.
+func fitANSI(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	switch got := lipgloss.Width(s); {
+	case got > w:
+		return ansi.Truncate(s, w, "…")
+	case got < w:
+		return s + strings.Repeat(" ", w-got)
+	}
+	return s
 }
 
 // width reports the display width of plain text.

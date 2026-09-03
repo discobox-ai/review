@@ -1,61 +1,59 @@
 package ui
 
 // The panes' side of the mouse selection: what each one calls content, and
-// where on screen that content starts. See [selectable] for what the two
-// coordinate spaces are and why they differ.
+// where on screen it starts. See [selectable] for what the two coordinate
+// spaces are and why they differ.
 
-// listIndent is the chrome a file list draws before a path: two spaces of
-// indent, the one column status icon, and the space after it.
+// listIndent is the chrome the file list draws before a path: a space, the
+// "not committed" column, the verdict glyph, and the space after it.
 const listIndent = 4
 
-// commitIndent is the branch history's indent. The hash is content — it is
-// most of the reason to copy a line out of that pane — so only the two spaces
-// in front of it are chrome.
+// commitIndent is the history's indent. The hash is content — it is most of
+// the reason to copy a line out of that pane — so only the two spaces in front
+// of it are chrome.
 const commitIndent = 2
 
-// diffSel is the diff pane's content: the +/- marker and the code, with the
-// cursor bar and the line numbers left behind as chrome.
-type diffSel struct {
-	d  *diffView
+// reviewSel is the review pane's content.
+//
+// Every row of that pane draws the same chrome, whether it is a line of code,
+// a file's heading or a comment, so one offset describes the whole pane: the
+// cursor bar, the uncommitted margin and the line numbers are left behind, and
+// everything from the +/- marker rightwards is taken. Dragging down a review
+// therefore yields the diff and the remarks made on it, in the order they were
+// read, which is a thing worth pasting somewhere.
+type reviewSel struct {
+	v  *reviewView
 	st *styles
 }
 
-func (s diffSel) contentX() int {
-	if len(s.d.lines) == 0 {
-		// A message stands in for the patch and is drawn across the full
-		// width, with no bar and no numbers in front of it.
-		return 0
-	}
-	return min(diffChromeWidth(s.d.numW, s.d.rowW()), max(s.d.rowW(), 0))
+func (s reviewSel) contentX() int {
+	return min(s.v.chromeW(), max(s.v.rowW(), 0))
 }
 
 // The width is the row's, not the pane's: the vertical scrollbar has already
 // taken its column, and a bar is furniture rather than something to select.
-func (s diffSel) contentWidth() int        { return max(s.d.rowW()-s.contentX(), 0) }
-func (s diffSel) contentLines() (int, int) { return 0, s.d.rowCount() }
-func (s diffSel) contentOffset() int       { return s.d.offset }
+func (s reviewSel) contentWidth() int        { return max(s.v.rowW()-s.contentX(), 0) }
+func (s reviewSel) contentLines() (int, int) { return 0, len(s.v.rows) }
+func (s reviewSel) contentOffset() int       { return s.v.offset }
 
 // bodyRows rather than height, so the horizontal scrollbar along the foot is
-// not mistaken for a row of diff.
-func (s diffSel) contentRows() int { return s.d.bodyRows() }
+// not mistaken for a row of review.
+func (s reviewSel) contentRows() int { return s.v.bodyRows() }
 
-func (s diffSel) contentRow(line int) string {
-	if len(s.d.lines) == 0 {
-		msg := s.d.messageLines()
-		if line < 0 || line >= len(msg) {
-			return ""
-		}
-		return s.d.messageRow(s.st, msg[line])
-	}
-	if line < 0 || line >= len(s.d.lines) {
+func (s reviewSel) contentRow(line int) string {
+	if line < 0 || line >= len(s.v.rows) {
 		return ""
 	}
-	return renderDiffContent(s.d.rowFor(line, s.st, false, false), s.contentWidth())
+	if r := s.v.rows[line]; r.kind == rowDiff {
+		return renderDiffContent(
+			s.v.diffRowFor(r, s.st, s.v.rowW(), false, false), s.contentWidth())
+	}
+	return s.v.content(line, s.st, s.contentWidth())
 }
 
-// listSel is a file list's content: the path, without the indent or the
-// status icon in front of it, so that dragging down a list yields a list of
-// paths rather than a column of glyphs.
+// listSel is the file list's content: the path and its tally, without the
+// verdict glyph in front of them, so that dragging down the list yields paths
+// rather than a column of ticks.
 type listSel struct{ l *fileList }
 
 // rowW is how wide a row is drawn, once the scrollbar has taken its column.
@@ -68,18 +66,19 @@ func (s listSel) rowW() int {
 
 func (s listSel) contentX() int            { return min(listIndent, max(s.rowW(), 0)) }
 func (s listSel) contentWidth() int        { return max(s.rowW()-s.contentX(), 0) }
-func (s listSel) contentLines() (int, int) { return 0, len(s.l.files) }
+func (s listSel) contentLines() (int, int) { return 0, len(s.l.entries) }
 func (s listSel) contentOffset() int       { return s.l.offset }
 func (s listSel) contentRows() int         { return s.l.height }
 
 func (s listSel) contentRow(line int) string {
-	if line < 0 || line >= len(s.l.files) {
+	if line < 0 || line >= len(s.l.entries) {
 		return ""
 	}
-	return pad(s.l.name(line), s.contentWidth())
+	_, body := s.l.row(line, s.rowW())
+	return pad(body, s.contentWidth())
 }
 
-// commitsSel is the branch history's content: the hash and the subject.
+// commitsSel is the history's content: the hash and the subject.
 type commitsSel struct{ c *commitList }
 
 // rowW is how wide a row is drawn, once the scrollbar has taken its column.
@@ -101,6 +100,30 @@ func (s commitsSel) contentRow(line int) string {
 		return ""
 	}
 	return pad(s.c.rowBody(line), s.contentWidth())
+}
+
+// fileSel is the file reader's content: the code, with the cursor bar, the
+// changed-line margin and the line numbers left behind as the chrome they are
+// — the same split the review makes, in the same columns.
+type fileSel struct {
+	v  *fileView
+	st *styles
+}
+
+func (s fileSel) contentX() int {
+	return min(diffChromeWidth(s.v.numW, s.v.width), max(s.v.width, 0))
+}
+
+func (s fileSel) contentWidth() int        { return max(s.v.width-s.contentX(), 0) }
+func (s fileSel) contentLines() (int, int) { return 0, len(s.v.lines) }
+func (s fileSel) contentOffset() int       { return s.v.offset }
+func (s fileSel) contentRows() int         { return s.v.body() }
+
+func (s fileSel) contentRow(line int) string {
+	if line < 0 || line >= len(s.v.lines) {
+		return ""
+	}
+	return renderDiffContent(s.v.rowFor(line, s.st, false), s.contentWidth())
 }
 
 // mdSel is the markdown reader's content: the rendered prose, without the

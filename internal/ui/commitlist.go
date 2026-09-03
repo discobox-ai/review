@@ -3,21 +3,22 @@ package ui
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/discobox-ai/difftui/internal/git"
 )
 
-// commitList is the third pane on the left: the commits this branch adds on
-// top of its base, newest first, under a first row standing for the working
-// tree itself.
+// commitList is the pane at the bottom left: the commits this branch has made
+// since the base, newest first, under a first row standing for the review as a
+// whole.
 //
 // That first row is what makes the pane a place to be rather than a menu. The
-// working tree is where you start and where staging happens; the commits below
-// it are the same branch at earlier points. Moving between them changes what
-// the pane above shows, so the whole left column reads as one question: which
-// version of this branch am I looking at.
+// whole review — every change from the base to the working tree, committed or
+// not — is what you normally want in front of you; the commits below it are
+// the same work cut into the steps it was made in. Picking one narrows the
+// review to that step without losing anything said about the rest.
 type commitList struct {
 	commits []git.Commit
+	base    string // the ref the review is measured from, for the title
 	cursor  int
 	offset  int
 	width   int
@@ -26,12 +27,12 @@ type commitList struct {
 
 func newCommitList() *commitList { return &commitList{} }
 
-// workingRow is the index of the row standing for the working tree.
+// workingRow is the index of the row standing for the review as a whole.
 const workingRow = 0
 
 // setCommits replaces the history, keeping the cursor on the same commit when
 // it is still there. A commit that has gone — amended, rebased away — drops
-// the cursor back to the working tree, which always exists.
+// the cursor back to the whole review, which always exists.
 func (l *commitList) setCommits(commits []git.Commit) {
 	prev, wasBrowsing := l.selected()
 	l.commits = commits
@@ -115,7 +116,7 @@ func (l *commitList) rowText(i int) string { return "  " + l.rowBody(i) }
 // name the working tree goes by.
 func (l *commitList) rowBody(i int) string {
 	if i == workingRow {
-		return "● working tree"
+		return "● everything from the base"
 	}
 	if i < 1 || i > len(l.commits) {
 		return ""
@@ -133,7 +134,11 @@ func (l *commitList) view(st *styles, focused bool) string {
 	if n := len(l.commits); n > 0 {
 		count = plural(n, "commit", "commits")
 	}
-	title := renderTitle(titleStyle, "This Branch", count, l.width)
+	name := "History"
+	if l.base != "" {
+		name = "History from " + l.base
+	}
+	title := renderTitle(titleStyle, name, count, l.width)
 
 	// The bar takes its column out of the rows, never out of the title, so the
 	// pane keeps its width and the subjects give up the room.
@@ -152,7 +157,7 @@ func (l *commitList) view(st *styles, focused bool) string {
 		case i == l.cursor:
 			rows = append(rows, st.selInactive.Render(line))
 		case i == workingRow:
-			// The working tree keeps its weight even unselected: it is where
+			// The whole review keeps its weight even unselected: it is where
 			// the rest of the window normally lives.
 			rows = append(rows, st.commitHead.Render(line))
 		default:

@@ -1,7 +1,6 @@
 package git
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -35,131 +34,301 @@ func TestParsePatch(t *testing.T) {
 	if len(p.Hunks[0].Lines) != 5 {
 		t.Errorf("hunk 0 has %d lines, want 5", len(p.Hunks[0].Lines))
 	}
+	if p.Path != "foo.txt" || p.From != "" {
+		t.Errorf("paths = %q / %q, want foo.txt and no rename", p.Path, p.From)
+	}
 }
 
-func TestHunkPatch(t *testing.T) {
-	p := ParsePatch(sample)
-	got, ok := p.HunkPatch(1)
-	if !ok {
-		t.Fatal("HunkPatch(1) not ok")
-	}
-	if strings.Contains(got, "TWO") {
-		t.Error("hunk 1 patch leaked lines from hunk 0")
-	}
-	for _, want := range []string{"--- a/foo.txt", "+++ b/foo.txt", "@@ -10,2 +11,2 @@", "+ELEVEN"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("patch missing %q:\n%s", want, got)
-		}
+func TestPatchStat(t *testing.T) {
+	adds, dels := ParsePatch(sample).Stat()
+	if adds != 3 || dels != 2 {
+		t.Errorf("Stat() = +%d −%d, want +3 −2", adds, dels)
 	}
 }
 
 func TestRenderMetadata(t *testing.T) {
-	p := ParsePatch(sample)
-	lines := p.Render()
-	// The "diff --git"/"index"/"---"/"+++" preamble is hidden, as git-gui does.
+	lines := ParsePatch(sample).Render()
+	// The "diff --git"/"index"/"---"/"+++" preamble is hidden: the paths are
+	// already in the section heading and the blob hashes say nothing.
 	if lines[0].Kind != '@' {
-		t.Fatalf("first rendered line is %q (kind %c), want a hunk header", lines[0].Text, lines[0].Kind)
+		t.Fatalf("first rendered line is %q (kind %c), want the hunk header",
+			lines[0].Text, lines[0].Kind)
 	}
-	var adds, dels, hunks int
+}
+
+// A file with no hunks — a mode change, a binary file — still renders its
+// header, so that its section is not blank.
+func TestRenderKeepsAHeaderWithNoHunks(t *testing.T) {
+	p := ParsePatch("diff --git a/x b/x\nold mode 100644\nnew mode 100755\n")
+	lines := p.Render()
+	if len(lines) == 0 {
+		t.Fatal("a patch with no hunks rendered nothing")
+	}
+	found := false
 	for _, l := range lines {
-		switch l.Kind {
-		case '+':
-			adds++
-		case '-':
-			dels++
-		case '@':
-			hunks++
+		if l.Kind == 'h' && l.Text == "new mode 100755" {
+			found = true
 		}
 	}
-	if adds != 3 || dels != 2 || hunks != 2 {
-		t.Errorf("adds=%d dels=%d hunks=%d, want 3/2/2", adds, dels, hunks)
+	if !found {
+		t.Errorf("mode change not rendered: %+v", lines)
+	}
+	if p.Path != "x" {
+		t.Errorf("path = %q, want x", p.Path)
 	}
 }
 
-func TestLinePatchForward(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Splitting one diff into many files
+// ---------------------------------------------------------------------------
+
+const multi = `diff --git a/a.txt b/a.txt
+index 111..222 100644
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-alpha
++ALPHA
+diff --git a/b/nested.go b/b/nested.go
+new file mode 100644
+--- /dev/null
++++ b/b/nested.go
+@@ -0,0 +1,2 @@
++package b
++
+diff --git a/old name.txt b/new name.txt
+similarity index 90%
+rename from old name.txt
+rename to new name.txt
+--- a/old name.txt
++++ b/new name.txt
+@@ -1 +1 @@
+-x
++y
+diff --git a/gone.txt b/gone.txt
+deleted file mode 100644
+--- a/gone.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-bye
+`
+
+func TestParseMultiSplitsByFile(t *testing.T) {
+	patches := ParseMulti(multi)
+	if len(patches) != 4 {
+		t.Fatalf("got %d patches, want 4", len(patches))
+	}
+	want := []struct{ path, from string }{
+		{"a.txt", ""},
+		{"b/nested.go", ""},
+		{"new name.txt", "old name.txt"},
+		{"gone.txt", ""},
+	}
+	for i, w := range want {
+		if patches[i].Path != w.path || patches[i].From != w.from {
+			t.Errorf("patch %d = %q / %q, want %q / %q",
+				i, patches[i].Path, patches[i].From, w.path, w.from)
+		}
+	}
+	// Each patch keeps only its own hunks.
+	if got, _ := patches[0].Stat(); got != 1 {
+		t.Errorf("a.txt adds = %d, want 1", got)
+	}
+	if got, _ := patches[1].Stat(); got != 2 {
+		t.Errorf("nested.go adds = %d, want 2", got)
+	}
+}
+
+func TestParseMultiOnNothing(t *testing.T) {
+	if got := ParseMulti(""); got != nil {
+		t.Errorf("ParseMulti(\"\") = %v, want nil", got)
+	}
+	if got := ParseMulti("   \n"); got != nil {
+		t.Errorf("ParseMulti(blank) = %v, want nil", got)
+	}
+}
+
+// A path git had to quote — one with a space or a byte outside ASCII — comes
+// back as the name it really is rather than with the quotes still on it.
+func TestParseMultiUnquotesPaths(t *testing.T) {
+	text := "diff --git \"a/dir/a b.txt\" \"b/dir/a b.txt\"\n" +
+		"--- \"a/dir/a b.txt\"\n+++ \"b/dir/a b.txt\"\n" +
+		"@@ -1 +1 @@\n-x\n+y\n"
+	p := ParseMulti(text)
+	if len(p) != 1 || p[0].Path != "dir/a b.txt" {
+		t.Fatalf("path = %q, want dir/a b.txt", p[0].Path)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Line numbers, and the seam a deletion leaves
+// ---------------------------------------------------------------------------
+
+func TestRenderLineNumbers(t *testing.T) {
+	lines := ParsePatch(sample).Render()
+	type want struct {
+		text          string
+		old, new, sea int
+	}
+	// The sample's first hunk starts at 1/1, the second at 10/11.
+	expect := []want{
+		{" one", 1, 1, 1},
+		{"-two", 2, 0, 2},
+		{"+TWO", 0, 2, 2},
+		{"+two and a half", 0, 3, 3},
+		{" three", 3, 4, 4},
+		{" ten", 10, 11, 11},
+		{"-eleven", 11, 0, 12},
+		{"+ELEVEN", 0, 12, 12},
+	}
+	var got []want
+	for _, l := range lines {
+		if l.Kind == '@' || l.Kind == 'h' {
+			continue
+		}
+		got = append(got, want{l.Text, l.Old, l.New, l.Seam})
+	}
+	if len(got) != len(expect) {
+		t.Fatalf("got %d code lines, want %d: %v", len(got), len(expect), got)
+	}
+	for i, w := range expect {
+		if got[i] != w {
+			t.Errorf("line %d = %+v, want %+v", i, got[i], w)
+		}
+	}
+}
+
+// A deletion at the very end of a file has no line after it, so its seam
+// clamps to the last line there is rather than running off the end.
+func TestSeamAtTheEndOfAFile(t *testing.T) {
+	p := ParsePatch("--- a/x\n+++ b/x\n@@ -1,2 +1,0 @@\n-one\n-two\n")
+	for _, l := range p.Render() {
+		if l.Kind == '-' && l.Seam < 1 {
+			t.Errorf("seam of %q = %d, want at least 1", l.Text, l.Seam)
+		}
+	}
+}
+
+// ChangedNewLines names the new-side lines the diff touched: additions mark
+// themselves, and a deletion marks the seam it left behind.
+func TestChangedNewLines(t *testing.T) {
+	got := ParsePatch(sample).ChangedNewLines()
+	// "two" was deleted where new line 2 now stands, "TWO" and "two and a
+	// half" are new lines 2 and 3, "eleven" deleted at the seam of 12, and
+	// "ELEVEN" added as 12.
+	want := map[int]bool{2: true, 3: true, 12: true}
+	if len(got) != len(want) {
+		t.Fatalf("ChangedNewLines = %v, want %v", got, want)
+	}
+	for k := range want {
+		if !got[k] {
+			t.Errorf("line %d not marked; got %v", k, got)
+		}
+	}
+	if len(ParsePatch("* No differences detected.\n").ChangedNewLines()) != 0 {
+		t.Error("a diff with no hunks marked something")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Carrying a line number across a diff
+// ---------------------------------------------------------------------------
+
+func TestMapOldToNew(t *testing.T) {
 	p := ParsePatch(sample)
-	// Stage only "+TWO" (body index 1 is "-two", 2 is "+TWO").
-	got, ok := p.LinePatch(0, map[int]bool{2: true}, false)
-	if !ok {
-		t.Fatal("LinePatch not ok")
-	}
-	want := strings.Join([]string{
-		"@@ -1,3 +1,4 @@",
-		" one",
-		" two",
-		"+TWO",
-		" three",
-	}, "\n")
-	if !strings.Contains(got, want) {
-		t.Errorf("got:\n%s\nwant it to contain:\n%s", got, want)
-	}
-}
-
-func TestLinePatchForwardDeletion(t *testing.T) {
-	p := ParsePatch(sample)
-	// Stage only the "-two" deletion: the additions are dropped.
-	got, ok := p.LinePatch(0, map[int]bool{1: true}, false)
-	if !ok {
-		t.Fatal("LinePatch not ok")
-	}
-	want := strings.Join([]string{
-		"@@ -1,3 +1,2 @@",
-		" one",
-		"-two",
-		" three",
-	}, "\n")
-	if !strings.Contains(got, want) {
-		t.Errorf("got:\n%s\nwant it to contain:\n%s", got, want)
-	}
-}
-
-func TestLinePatchReverse(t *testing.T) {
-	p := ParsePatch(sample)
-	// Unstaging "+TWO": unselected '-' lines are dropped, unselected '+'
-	// lines become context so they stay in the index.
-	got, ok := p.LinePatch(0, map[int]bool{2: true}, true)
-	if !ok {
-		t.Fatal("LinePatch not ok")
-	}
-	want := strings.Join([]string{
-		"@@ -1,3 +1,4 @@",
-		" one",
-		"+TWO",
-		" two and a half",
-		" three",
-	}, "\n")
-	if !strings.Contains(got, want) {
-		t.Errorf("got:\n%s\nwant it to contain:\n%s", got, want)
-	}
-}
-
-func TestLinePatchNothingSelected(t *testing.T) {
-	p := ParsePatch(sample)
-	if _, ok := p.LinePatch(0, map[int]bool{0: true}, false); ok {
-		t.Error("selecting only a context line should not produce a patch")
-	}
-}
-
-func TestStateRouting(t *testing.T) {
 	cases := []struct {
-		state            State
-		staged, unstaged bool
+		old, new int
+		ok       bool
 	}{
-		{"_O", false, true},
-		{"M_", true, false},
-		{"MM", true, true},
-		{"_M", false, true},
-		{"A_", true, false},
-		{"UU", false, true},
-		{"D_", true, false},
-		{"_D", false, true},
+		{1, 1, true},   // context before the first change
+		{2, 0, false},  // "two" was removed: nothing on the new side
+		{3, 4, true},   // context after one deletion and two additions
+		{9, 10, true},  // between the hunks, moved by the running offset
+		{10, 11, true}, // context in the second hunk
+		{11, 0, false}, // "eleven" was removed
+		{12, 13, true}, // past the last hunk
+		{0, 0, false},  // there is no line zero
 	}
 	for _, c := range cases {
-		if got := c.state.Staged(); got != c.staged {
-			t.Errorf("%s.Staged() = %v, want %v", c.state, got, c.staged)
+		got, ok := p.MapOldToNew(c.old)
+		if got != c.new || ok != c.ok {
+			t.Errorf("MapOldToNew(%d) = %d, %v; want %d, %v", c.old, got, ok, c.new, c.ok)
 		}
-		if got := c.state.Unstaged(); got != c.unstaged {
-			t.Errorf("%s.Unstaged() = %v, want %v", c.state, got, c.unstaged)
+	}
+}
+
+func TestMapNewToOld(t *testing.T) {
+	p := ParsePatch(sample)
+	cases := []struct {
+		new, old int
+		ok       bool
+	}{
+		{1, 1, true},
+		{2, 0, false}, // "TWO" was added: it has no old side
+		{3, 0, false}, // and neither has "two and a half"
+		{4, 3, true},
+		{11, 10, true},
+		{12, 0, false}, // "ELEVEN" was added
+		{13, 12, true},
+	}
+	for _, c := range cases {
+		got, ok := p.MapNewToOld(c.new)
+		if got != c.old || ok != c.ok {
+			t.Errorf("MapNewToOld(%d) = %d, %v; want %d, %v", c.new, got, ok, c.old, c.ok)
+		}
+	}
+}
+
+// A line number carried out and back again is the line it started as, for
+// every line that survives the diff at all.
+func TestCarryingIsReversible(t *testing.T) {
+	p := ParsePatch(sample)
+	for old := 1; old <= 15; old++ {
+		mid, ok := p.MapOldToNew(old)
+		if !ok {
+			continue
+		}
+		back, ok := p.MapNewToOld(mid)
+		if !ok || back != old {
+			t.Errorf("old %d → new %d → old %d (ok=%v)", old, mid, back, ok)
+		}
+	}
+}
+
+// An empty diff carries every line straight through: nothing moved.
+func TestMappingThroughAnEmptyDiff(t *testing.T) {
+	p := ParsePatch("")
+	for _, n := range []int{1, 7, 1000} {
+		if got, ok := p.MapOldToNew(n); !ok || got != n {
+			t.Errorf("MapOldToNew(%d) = %d, %v; want %d, true", n, got, ok, n)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// File states
+// ---------------------------------------------------------------------------
+
+func TestStateReadsWhatIsLeftToDo(t *testing.T) {
+	cases := []struct {
+		state     State
+		committed bool
+		pending   string
+	}{
+		{"__", true, ""},
+		{"_O", false, "untracked"},
+		{"M_", false, "staged"},
+		{"MM", false, "part staged"},
+		{"_M", false, "uncommitted"},
+		{"_D", false, "deleted"},
+		{"UU", false, "unmerged"},
+	}
+	for _, c := range cases {
+		if got := c.state.Committed(); got != c.committed {
+			t.Errorf("%s.Committed() = %v, want %v", c.state, got, c.committed)
+		}
+		if got := c.state.Pending(); got != c.pending {
+			t.Errorf("%s.Pending() = %q, want %q", c.state, got, c.pending)
 		}
 	}
 }
@@ -183,60 +352,5 @@ func TestMapState(t *testing.T) {
 		if got := mapState(c.x, c.y); got != c.want {
 			t.Errorf("mapState(%c,%c) = %s, want %s", c.x, c.y, got, c.want)
 		}
-	}
-}
-
-func TestRenderLineNumbers(t *testing.T) {
-	lines := ParsePatch(sample).Render()
-	type want struct {
-		text     string
-		old, new int
-	}
-	// The sample's first hunk starts at 1/1, the second at 10/11.
-	expect := []want{
-		{" one", 1, 1},
-		{"-two", 2, 0},
-		{"+TWO", 0, 2},
-		{"+two and a half", 0, 3},
-		{" three", 3, 4},
-		{" ten", 10, 11},
-		{"-eleven", 11, 0},
-		{"+ELEVEN", 0, 12},
-	}
-	var got []want
-	for _, l := range lines {
-		if l.Kind == '@' || l.Kind == 'h' {
-			continue
-		}
-		got = append(got, want{l.Text, l.Old, l.New})
-	}
-	if len(got) != len(expect) {
-		t.Fatalf("got %d code lines, want %d: %v", len(got), len(expect), got)
-	}
-	for i, w := range expect {
-		if got[i] != w {
-			t.Errorf("line %d = %+v, want %+v", i, got[i], w)
-		}
-	}
-}
-
-// ChangedNewLines names the new-side lines the diff touched: additions mark
-// themselves, and a deletion marks the seam it left behind.
-func TestChangedNewLines(t *testing.T) {
-	got := ParsePatch(sample).ChangedNewLines()
-	// "two" was deleted where new line 2 now stands, "TWO" and "two and a
-	// half" are new lines 2 and 3, "eleven" deleted at the seam of 12, and
-	// "ELEVEN" added as 12.
-	want := map[int]bool{2: true, 3: true, 12: true}
-	if len(got) != len(want) {
-		t.Fatalf("ChangedNewLines = %v, want %v", got, want)
-	}
-	for k := range want {
-		if !got[k] {
-			t.Errorf("line %d not marked; got %v", k, got)
-		}
-	}
-	if len(ParsePatch("* No differences detected.\n").ChangedNewLines()) != 0 {
-		t.Error("a diff with no hunks marked something")
 	}
 }

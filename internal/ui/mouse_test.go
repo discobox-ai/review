@@ -9,26 +9,31 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/discobox-ai/difftui/internal/git"
 )
 
-// bigDiff fills the diff pane with more lines than fit, so that the scrolling
-// tests actually scroll. The test repository's own diffs are a few lines long
-// and used to make these tests skip, which is the same as not having them.
-func bigDiff(t *testing.T, m *Model, lines int) {
+// bigReview fills the review pane with more rows than fit, so that the
+// scrolling tests actually scroll. The fixture's own diffs are a few lines
+// long and used to make these tests skip, which is the same as not having
+// them.
+func bigReview(t *testing.T, m *Model, lines int) {
 	t.Helper()
 	var b strings.Builder
 	fmt.Fprintf(&b, "diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1,%d +1,%d @@\n", lines, lines)
 	for i := range lines {
 		fmt.Fprintf(&b, "+added line %d\n", i)
 	}
-	m.diff.setPatch(git.File{Path: "big.txt"}, diffID{path: "big.txt"}, b.String())
-	m.layout()
-	if len(m.diff.lines) <= m.diff.bodyRows() {
-		t.Fatalf("%d diff lines is not more than the %d rows on screen",
-			len(m.diff.lines), m.diff.bodyRows())
+	m.work = buildFiles(b.String(), "", nil)
+	m.workBy = map[string]*reviewFile{}
+	for _, f := range m.work {
+		m.workBy[f.path] = f
+	}
+	m.commit = ""
+	m.rebuild()
+	if len(m.view.rows) <= m.view.bodyRows() {
+		t.Fatalf("%d rows is not more than the %d on screen",
+			len(m.view.rows), m.view.bodyRows())
 	}
 }
 
@@ -44,31 +49,36 @@ func hasReverseVideo(row string) bool {
 	return false
 }
 
-func pressAt(x, y int) tea.MouseMsg {
-	return tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+func pressAt(x, y int) tea.MouseClickMsg {
+	return tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
 }
 
-func rightPressAt(x, y int) tea.MouseMsg {
-	return tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonRight}
+// blockPressAt is a press with Alt held, which selects a rectangle.
+func blockPressAt(x, y int) tea.MouseClickMsg {
+	return tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft, Mod: tea.ModAlt}
 }
 
-func dragTo(x, y int) tea.MouseMsg {
-	return tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft}
+func rightPressAt(x, y int) tea.MouseClickMsg {
+	return tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight}
+}
+
+func dragTo(x, y int) tea.MouseMotionMsg {
+	return tea.MouseMotionMsg{X: x, Y: y, Button: tea.MouseLeft}
 }
 
 // releaseAt reports no button, the way a terminal using the original X10
 // encoding does: which button came up is exactly what that encoding cannot
 // say, so nothing may depend on it.
-func releaseAt(x, y int) tea.MouseMsg {
-	return tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonNone}
+func releaseAt(x, y int) tea.MouseReleaseMsg {
+	return tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseNone}
 }
 
-func wheelAt(x, y int, up bool) tea.MouseMsg {
-	button := tea.MouseButtonWheelDown
+func wheelAt(x, y int, up bool) tea.MouseWheelMsg {
+	button := tea.MouseWheelDown
 	if up {
-		button = tea.MouseButtonWheelUp
+		button = tea.MouseWheelUp
 	}
-	return tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: button}
+	return tea.MouseWheelMsg{X: x, Y: y, Button: button}
 }
 
 // captureClipboard redirects copies so a test can read them back.
@@ -115,17 +125,37 @@ func contentPoint(t *testing.T, m Model, f focusArea, row, col int) (int, int) {
 	return r.x + p.contentX() + col, r.y + 1 + row
 }
 
+// firstDiffRow is the screen row of the first line of diff on show, which is
+// where a test drags from when it wants text rather than a file's heading.
+func firstDiffRow(t *testing.T, m Model) int {
+	t.Helper()
+	for i := m.view.offset; i < len(m.view.rows) && i < m.view.offset+m.view.bodyRows(); i++ {
+		if m.view.rows[i].kind == rowDiff {
+			return i - m.view.offset
+		}
+	}
+	t.Fatal("no line of diff on screen")
+	return 0
+}
+
+// listRowText is what a row of the file list holds once the chrome in front of
+// it is taken off, which is what dragging over it copies.
+func listRowText(m Model, i int) string {
+	_, body := m.files.row(i, listSel{m.files}.rowW())
+	return strings.TrimRight(body, " ")
+}
+
 // Where a pane is drawn and where it is clicked come out of the same
 // arithmetic, so the two cannot drift apart: every pane's recorded rectangle
 // must start on the row its own title is drawn on, at its own left edge.
 func TestPaneRectsMatchWhereThePanesAreDrawn(t *testing.T) {
 	m := newTestModel(t)
-	rows := strings.Split(m.View(), "\n")
+	rows := strings.Split(m.frame(), "\n")
 
 	seen := 0
 	for f := focusArea(0); f < focusCount; f++ {
 		r := m.rects[f]
-		if r.w == 0 || f == focusCommit {
+		if r.w == 0 || f == focusCompose {
 			continue // not on screen in this layout
 		}
 		seen++
@@ -155,23 +185,27 @@ func TestPaneRectsMatchWhereThePanesAreDrawn(t *testing.T) {
 // lands on the row that was clicked.
 func TestClickFocusesThePaneAndTheRow(t *testing.T) {
 	m := newTestModel(t)
-	if len(m.workdir.files) < 2 {
-		t.Fatalf("need two unstaged files, got %v", m.workdir.files)
+	if len(m.files.entries) < 2 {
+		t.Fatalf("need two files, got %v", pathsOf(m))
 	}
 	// Start somewhere else, so the click has to move the focus.
-	m = drive(t, m, altKey("3"))
-	if m.focus != focusDiff {
-		t.Fatalf("focus = %v, want the diff", m.focus)
+	m = drive(t, m, altKey("2"))
+	if m.focus != focusReview {
+		t.Fatalf("focus = %v, want the review", m.focus)
 	}
 
-	x, y := contentPoint(t, m, focusWorkdir, 1, 0)
+	x, y := contentPoint(t, m, focusFiles, 1, 0)
 	m = drive(t, m, pressAt(x, y))
 
-	if m.focus != focusWorkdir {
-		t.Errorf("focus = %v, want the unstaged list", m.focus)
+	if m.focus != focusFiles {
+		t.Errorf("focus = %v, want the file list", m.focus)
 	}
-	if m.workdir.cursor != 1 {
-		t.Errorf("cursor = %d, want the row that was clicked (1)", m.workdir.cursor)
+	if m.files.cursor != 1 {
+		t.Errorf("cursor = %d, want the row that was clicked (1)", m.files.cursor)
+	}
+	// And clicking a file is asking to see it.
+	if got := m.view.pathAt(); got != m.files.currentPath() {
+		t.Errorf("the review is showing %q, want %q", got, m.files.currentPath())
 	}
 }
 
@@ -180,34 +214,39 @@ func TestClickFocusesThePaneAndTheRow(t *testing.T) {
 func TestAPlainClickSelectsNothing(t *testing.T) {
 	captureClipboard(t)
 	m := newTestModel(t)
-	x, y := contentPoint(t, m, focusWorkdir, 0, 0)
+	x, y := contentPoint(t, m, focusFiles, 0, 0)
 	m = drive(t, m, pressAt(x, y), releaseAt(x, y))
 	if m.mouse.hasSelection() {
 		t.Error("a click with no drag left a selection behind")
 	}
 }
 
-// Dragging over the diff copies the diff: the +/- marker and the code, with
-// the cursor bar and the line numbers left behind as the chrome they are.
-func TestDragOverTheDiffCopiesCodeWithoutLineNumbers(t *testing.T) {
+// Dragging over the review copies the diff: the +/- marker and the code, with
+// the cursor bar, the uncommitted margin and the line numbers left behind as
+// the chrome they are.
+func TestDragOverTheReviewCopiesCodeWithoutLineNumbers(t *testing.T) {
 	m := newTestModel(t)
 	clip := captureClipboard(t)
 
-	// Find a changed line to drag over.
-	row := -1
-	for i := m.diff.offset; i < len(m.diff.lines) && i < m.diff.offset+m.diff.height; i++ {
-		if m.diff.lines[i].Kind == '+' {
-			row = i - m.diff.offset
+	// Find an added line on screen to drag over.
+	row, want := -1, ""
+	for i := m.view.offset; i < len(m.view.rows) && i < m.view.offset+m.view.bodyRows(); i++ {
+		r := m.view.rows[i]
+		if r.kind != rowDiff || r.file < 0 {
+			continue
+		}
+		f := m.view.files[r.file]
+		if f.lines[r.line].Kind == '+' {
+			row, want = i-m.view.offset, "+ "+f.texts[r.line]
 			break
 		}
 	}
 	if row < 0 {
-		t.Fatalf("no added line on screen in:\n%s", m.diff.view(m.st, true))
+		t.Fatalf("no added line on screen in:\n%s", plain(m))
 	}
-	want := "+ " + m.diff.texts[m.diff.offset+row]
 
-	x, y := contentPoint(t, m, focusDiff, row, 0)
-	end, _ := contentPoint(t, m, focusDiff, row, len([]rune(want))-1)
+	x, y := contentPoint(t, m, focusReview, row, 0)
+	end, _ := contentPoint(t, m, focusReview, row, len([]rune(want))-1)
 	m = drive(t, m, pressAt(x, y), dragTo(end, y), releaseAt(end, y))
 
 	if !m.mouse.hasSelection() {
@@ -217,27 +256,28 @@ func TestDragOverTheDiffCopiesCodeWithoutLineNumbers(t *testing.T) {
 	if got != want {
 		t.Errorf("copied %q, want %q", got, want)
 	}
-	if strings.ContainsAny(got, "0123456789") && !strings.ContainsAny(want, "0123456789") {
-		t.Errorf("the copy picked up the line number column: %q", got)
-	}
 }
 
-// Dragging down a file list copies paths, not the indent and status icon
-// drawn in front of them.
-func TestDragOverAFileListCopiesPaths(t *testing.T) {
+// Dragging down the file list copies paths, not the verdict glyph and the
+// uncommitted margin drawn in front of them.
+func TestDragOverTheFileListCopiesPaths(t *testing.T) {
 	m := newTestModel(t)
 	clip := captureClipboard(t)
-	if len(m.workdir.files) < 2 {
-		t.Fatalf("need two unstaged files, got %v", m.workdir.files)
+	if len(m.files.entries) < 2 {
+		t.Fatalf("need two files, got %v", pathsOf(m))
 	}
 
-	x, y := contentPoint(t, m, focusWorkdir, 0, 0)
-	endX, endY := contentPoint(t, m, focusWorkdir, 1, m.workdir.width)
+	x, y := contentPoint(t, m, focusFiles, 0, 0)
+	endX, endY := contentPoint(t, m, focusFiles, 1, m.files.width)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, endY), releaseAt(endX, endY))
 
-	want := m.workdir.name(0) + "\n" + m.workdir.name(1)
-	if got := copied(t, clip.String()); got != want {
+	want := listRowText(m, 0) + "\n" + listRowText(m, 1)
+	got := copied(t, clip.String())
+	if got != want {
 		t.Errorf("copied %q, want %q", got, want)
+	}
+	if strings.ContainsAny(got, "✔○◆✻") {
+		t.Errorf("the copy picked up the verdict column: %q", got)
 	}
 }
 
@@ -247,12 +287,11 @@ func TestDoubleClickSelectsAWord(t *testing.T) {
 	m := newTestModel(t)
 	clip := captureClipboard(t)
 
-	// The first file's path, clicked in the middle of its name.
-	name := m.workdir.name(0)
+	name := m.files.entries[0].path
 	if len(name) < 3 {
 		t.Fatalf("path %q is too short to click into", name)
 	}
-	x, y := contentPoint(t, m, focusWorkdir, 0, 1)
+	x, y := contentPoint(t, m, focusFiles, 0, 1)
 	m = drive(t, m, pressAt(x, y), releaseAt(x, y), pressAt(x, y), releaseAt(x, y))
 
 	if !m.mouse.hasSelection() {
@@ -269,14 +308,14 @@ func TestTripleClickSelectsALine(t *testing.T) {
 	m := newTestModel(t)
 	clip := captureClipboard(t)
 
-	x, y := contentPoint(t, m, focusWorkdir, 0, 1)
+	x, y := contentPoint(t, m, focusFiles, 0, 1)
 	m = drive(t, m,
 		pressAt(x, y), releaseAt(x, y),
 		pressAt(x, y), releaseAt(x, y),
 		pressAt(x, y), releaseAt(x, y),
 	)
-	if got := copied(t, clip.String()); got != m.workdir.name(0) {
-		t.Errorf("copied %q, want the whole line %q", got, m.workdir.name(0))
+	if got, want := copied(t, clip.String()), listRowText(m, 0); got != want {
+		t.Errorf("copied %q, want the whole line %q", got, want)
 	}
 }
 
@@ -285,12 +324,12 @@ func TestTripleClickSelectsALine(t *testing.T) {
 func TestSelectionIsPaintedWithoutChangingTheLayout(t *testing.T) {
 	captureClipboard(t)
 	m := newTestModel(t)
-	before := m.View()
+	before := m.frame()
 
-	x, y := contentPoint(t, m, focusWorkdir, 0, 0)
-	endX, _ := contentPoint(t, m, focusWorkdir, 0, 5)
+	x, y := contentPoint(t, m, focusFiles, 0, 0)
+	endX, _ := contentPoint(t, m, focusFiles, 0, 5)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y))
-	after := m.View()
+	after := m.frame()
 
 	beforeRows, afterRows := strings.Split(before, "\n"), strings.Split(after, "\n")
 	if len(beforeRows) != len(afterRows) {
@@ -314,23 +353,23 @@ func TestSelectionIsPaintedWithoutChangingTheLayout(t *testing.T) {
 func TestWheelScrollsWithoutMovingTheFocus(t *testing.T) {
 	m := newTestModel(t)
 	m = drive(t, m, altKey("1"))
-	if m.focus != focusWorkdir {
-		t.Fatalf("focus = %v, want the unstaged list", m.focus)
+	if m.focus != focusFiles {
+		t.Fatalf("focus = %v, want the file list", m.focus)
 	}
-	bigDiff(t, &m, 200)
+	bigReview(t, &m, 200)
 
-	r := m.rects[focusDiff]
-	before := m.diff.offset
+	r := m.rects[focusReview]
+	before, cursor := m.view.offset, m.view.cursor
 	m = drive(t, m, wheelAt(r.x+2, r.y+3, false))
 
-	if m.diff.offset != before+wheelLines {
-		t.Errorf("diff offset = %d, want %d", m.diff.offset, before+wheelLines)
+	if m.view.offset != before+wheelLines {
+		t.Errorf("review offset = %d, want %d", m.view.offset, before+wheelLines)
 	}
-	if m.focus != focusWorkdir {
+	if m.focus != focusFiles {
 		t.Errorf("the wheel moved the focus to %v", m.focus)
 	}
-	if m.diff.cursor != 0 {
-		t.Errorf("the wheel moved the cursor to %d", m.diff.cursor)
+	if m.view.cursor != cursor {
+		t.Errorf("the wheel moved the cursor to %d", m.view.cursor)
 	}
 }
 
@@ -339,14 +378,16 @@ func TestWheelScrollsWithoutMovingTheFocus(t *testing.T) {
 func TestDragPastTheBottomScrolls(t *testing.T) {
 	captureClipboard(t)
 	m := newTestModel(t)
-	bigDiff(t, &m, 200)
-	r := m.rects[focusDiff]
-	x, y := contentPoint(t, m, focusDiff, 0, 0)
-	before := m.diff.offset
+	bigReview(t, &m, 200)
+	r := m.rects[focusReview]
+	// From a line of diff, not the file's heading: column 0 of a heading is
+	// the disclosure marker, which folds rather than selects.
+	x, y := contentPoint(t, m, focusReview, firstDiffRow(t, m), 0)
+	before := m.view.offset
 
 	m = drive(t, m, pressAt(x, y), dragTo(x, r.y+r.h+4))
-	if m.diff.offset <= before {
-		t.Errorf("offset = %d, want the drag to have scrolled past %d", m.diff.offset, before)
+	if m.view.offset <= before {
+		t.Errorf("offset = %d, want the drag to have scrolled past %d", m.view.offset, before)
 	}
 	if !m.mouse.hasSelection() {
 		t.Error("the drag past the edge stopped selecting")
@@ -359,8 +400,8 @@ func TestRightClickCopiesTheSelection(t *testing.T) {
 	m := newTestModel(t)
 	clip := captureClipboard(t)
 
-	x, y := contentPoint(t, m, focusWorkdir, 0, 0)
-	endX, _ := contentPoint(t, m, focusWorkdir, 0, 4)
+	x, y := contentPoint(t, m, focusFiles, 0, 0)
+	endX, _ := contentPoint(t, m, focusFiles, 0, 4)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y), releaseAt(endX, y))
 	clip.Reset()
 
@@ -378,13 +419,13 @@ func TestRightClickCopiesTheSelection(t *testing.T) {
 func TestEscapeDropsTheSelection(t *testing.T) {
 	captureClipboard(t)
 	m := newTestModel(t)
-	x, y := contentPoint(t, m, focusWorkdir, 0, 0)
-	endX, _ := contentPoint(t, m, focusWorkdir, 0, 4)
+	x, y := contentPoint(t, m, focusFiles, 0, 0)
+	endX, _ := contentPoint(t, m, focusFiles, 0, 4)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y), releaseAt(endX, y))
 	if !m.mouse.hasSelection() {
 		t.Fatal("the drag left no selection")
 	}
-	m = drive(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = drive(t, m, namedKey(tea.KeyEscape))
 	if m.mouse.hasSelection() {
 		t.Error("Esc left the selection on screen")
 	}
@@ -395,8 +436,8 @@ func TestEscapeDropsTheSelection(t *testing.T) {
 func TestRescanDropsTheSelection(t *testing.T) {
 	captureClipboard(t)
 	m := newTestModel(t)
-	x, y := contentPoint(t, m, focusWorkdir, 0, 0)
-	endX, _ := contentPoint(t, m, focusWorkdir, 0, 4)
+	x, y := contentPoint(t, m, focusFiles, 0, 0)
+	endX, _ := contentPoint(t, m, focusFiles, 0, 4)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y), releaseAt(endX, y))
 	if !m.mouse.hasSelection() {
 		t.Fatal("the drag left no selection")
@@ -412,8 +453,8 @@ func TestRescanDropsTheSelection(t *testing.T) {
 func TestResizeDropsTheSelection(t *testing.T) {
 	captureClipboard(t)
 	m := newTestModel(t)
-	x, y := contentPoint(t, m, focusWorkdir, 0, 0)
-	endX, _ := contentPoint(t, m, focusWorkdir, 0, 4)
+	x, y := contentPoint(t, m, focusFiles, 0, 0)
+	endX, _ := contentPoint(t, m, focusFiles, 0, 4)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y), releaseAt(endX, y))
 	if !m.mouse.hasSelection() {
 		t.Fatal("the drag left no selection")
@@ -478,28 +519,23 @@ func TestWheelScrollsTheReader(t *testing.T) {
 	}
 }
 
-// A sideways wheel slides the diff, which is the one pane with anywhere to go.
-func TestHorizontalWheelScrollsTheDiff(t *testing.T) {
+// A sideways wheel slides the review, which is the one pane with anywhere to
+// go: it draws lines too long for it rather than wrapping them.
+func TestHorizontalWheelScrollsTheReview(t *testing.T) {
 	m := newTestModel(t)
-	m.diff.long = m.diff.codeWidth() + 200 // a line far past the right margin
-	if m.diff.maxHOffset() <= 0 {
-		t.Fatal("the diff has nothing to scroll sideways")
+	m.view.long = m.view.codeWidth() + 200 // a line far past the right margin
+	if m.view.maxHOffset() <= 0 {
+		t.Fatal("the review has nothing to scroll sideways")
 	}
-	r := m.rects[focusDiff]
+	r := m.rects[focusReview]
 
-	m = drive(t, m, tea.MouseMsg{
-		X: r.x + 2, Y: r.y + 2,
-		Action: tea.MouseActionPress, Button: tea.MouseButtonWheelRight,
-	})
-	if m.diff.hoffset != hWheelStep {
-		t.Errorf("hoffset = %d, want %d", m.diff.hoffset, hWheelStep)
+	m = drive(t, m, tea.MouseWheelMsg{X: r.x + 2, Y: r.y + 2, Button: tea.MouseWheelRight})
+	if m.view.hoffset != hWheelStep {
+		t.Errorf("hoffset = %d, want %d", m.view.hoffset, hWheelStep)
 	}
-	m = drive(t, m, tea.MouseMsg{
-		X: r.x + 2, Y: r.y + 2,
-		Action: tea.MouseActionPress, Button: tea.MouseButtonWheelLeft,
-	})
-	if m.diff.hoffset != 0 {
-		t.Errorf("hoffset = %d, want back to 0", m.diff.hoffset)
+	m = drive(t, m, tea.MouseWheelMsg{X: r.x + 2, Y: r.y + 2, Button: tea.MouseWheelLeft})
+	if m.view.hoffset != 0 {
+		t.Errorf("hoffset = %d, want back to 0", m.view.hoffset)
 	}
 }
 
@@ -510,56 +546,364 @@ func TestTheScrollbarIsNotSelectable(t *testing.T) {
 	m := newTestModel(t)
 
 	// A list long enough to want a bar.
-	files := make([]git.File, 60)
-	for i := range files {
-		files[i] = git.File{Path: fmt.Sprintf("file%02d.txt", i), State: m.workdir.files[0].State}
+	entries := make([]fileEntry, 60)
+	for i := range entries {
+		entries[i] = fileEntry{path: fmt.Sprintf("file%02d.txt", i), adds: 1}
 	}
-	m.workdir.setFiles(files)
+	m.files.setEntries(entries)
 	m.layout()
-	if !m.workdir.scrolls() {
+	if !m.files.scrolls() {
 		t.Fatal("the list should want a scrollbar")
 	}
 
-	p := listSel{m.workdir}
-	if got, want := p.rowW(), m.workdir.width-1; got != want {
+	p := listSel{m.files}
+	if got, want := p.rowW(), m.files.width-1; got != want {
 		t.Errorf("row width = %d, want %d with a bar", got, want)
 	}
-	if p.contentX()+p.contentWidth() > m.workdir.width-1 {
+	if p.contentX()+p.contentWidth() > m.files.width-1 {
 		t.Errorf("content runs to column %d, into the bar at %d",
-			p.contentX()+p.contentWidth(), m.workdir.width-1)
+			p.contentX()+p.contentWidth(), m.files.width-1)
 	}
 
 	// Drag the whole first row and check the bar survives the highlight.
-	x, y := contentPoint(t, m, focusWorkdir, 0, 0)
-	endX, _ := contentPoint(t, m, focusWorkdir, 0, p.contentWidth()+10)
+	x, y := contentPoint(t, m, focusFiles, 0, 0)
+	endX, _ := contentPoint(t, m, focusFiles, 0, p.contentWidth()+10)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y), releaseAt(endX, y))
 
 	if got := copied(t, clip.String()); strings.ContainsAny(got, "█│") {
 		t.Errorf("the copy picked up the scrollbar: %q", got)
 	}
-	rows := strings.Split(m.viewPane(focusWorkdir), "\n")
-	if w, want := ansi.StringWidth(rows[1]), m.workdir.width; w != want {
+	rows := strings.Split(m.viewPane(focusFiles), "\n")
+	if w, want := ansi.StringWidth(rows[1]), m.files.width; w != want {
 		t.Errorf("highlighted row is %d columns, want %d — the bar was truncated", w, want)
-	}
-	if !strings.ContainsAny(ansi.Strip(rows[1]), "█ ") {
-		t.Errorf("the bar column is gone: %q", ansi.Strip(rows[1]))
 	}
 }
 
-// The horizontal scrollbar along the diff's foot is not a row of diff.
-func TestTheDiffFootBarIsNotARow(t *testing.T) {
+// The horizontal scrollbar along the review's foot is not a row of review.
+func TestTheReviewFootBarIsNotARow(t *testing.T) {
 	m := newTestModel(t)
-	m.diff.long = m.diff.codeWidth() + 200
+	m.view.long = m.view.codeWidth() + 200
 	m.layout()
-	if _, horz := m.diff.bars(); !horz {
-		t.Skip("the diff does not want a horizontal bar here")
+	if _, horz := m.view.bars(); !horz {
+		t.Skip("the review does not want a horizontal bar here")
 	}
-	p := diffSel{m.diff, m.st}
-	if p.contentRows() != m.diff.bodyRows() {
-		t.Errorf("contentRows = %d, want bodyRows %d", p.contentRows(), m.diff.bodyRows())
+	p := reviewSel{m.view, m.st}
+	if p.contentRows() != m.view.bodyRows() {
+		t.Errorf("contentRows = %d, want bodyRows %d", p.contentRows(), m.view.bodyRows())
 	}
-	if p.contentRows() >= m.diff.height {
+	if p.contentRows() >= m.view.height {
 		t.Errorf("contentRows = %d, should be short of height %d by the bar row",
-			p.contentRows(), m.diff.height)
+			p.contentRows(), m.view.height)
+	}
+}
+
+// Every row of the review starts its content in the same column, whatever kind
+// of row it is, so a selection dragged down the pane takes the code and the
+// comments about it and nothing else.
+func TestEveryReviewRowStartsItsContentInTheSameColumn(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "one remark")
+
+	want := m.view.chromeW()
+	kinds := map[rowKind]bool{}
+	for i, r := range m.view.rows {
+		kinds[r.kind] = true
+		row := m.view.render(i, m.st, m.view.rowW(), false, false)
+		content := m.view.content(i, m.st, m.view.contentWidth())
+		if r.kind == rowDiff {
+			continue // drawn by the diff row renderer, measured below
+		}
+		if got := ansi.StringWidth(row) - ansi.StringWidth(content); got != want {
+			t.Errorf("row %d (kind %v) has %d columns of chrome, want %d", i, r.kind, got, want)
+		}
+	}
+	for _, k := range []rowKind{rowFile, rowDiff, rowThread} {
+		if !kinds[k] {
+			t.Errorf("no row of kind %v was drawn, so nothing was checked", k)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The scrollbars, and the disclosure marker
+// ---------------------------------------------------------------------------
+
+// The ▾ in front of a file's name is a disclosure marker, so clicking it
+// discloses.
+func TestClickingTheFoldMarkerFolds(t *testing.T) {
+	m := newTestModel(t)
+	row := -1
+	for i := m.view.offset; i < len(m.view.rows) && i < m.view.offset+m.view.bodyRows(); i++ {
+		if m.view.rows[i].kind == rowFile {
+			row = i - m.view.offset
+			break
+		}
+	}
+	if row < 0 {
+		t.Fatal("no file heading on screen")
+	}
+	path := m.view.files[m.view.rows[m.view.offset+row].file].path
+
+	x, y := contentPoint(t, m, focusReview, row, 0)
+	m = drive(t, m, pressAt(x, y))
+	if !fileIn(t, m, path).folded {
+		t.Errorf("clicking the marker on %s did not fold it", path)
+	}
+	m = drive(t, m, pressAt(x, y))
+	if fileIn(t, m, path).folded {
+		t.Errorf("clicking it again did not open %s", path)
+	}
+}
+
+// The rest of the heading is the file's name, which is text somebody may well
+// want to drag over and copy — so it is not a fold button.
+func TestClickingTheFileNameDoesNotFold(t *testing.T) {
+	m := newTestModel(t)
+	row := -1
+	for i := m.view.offset; i < len(m.view.rows) && i < m.view.offset+m.view.bodyRows(); i++ {
+		if m.view.rows[i].kind == rowFile {
+			row = i - m.view.offset
+			break
+		}
+	}
+	if row < 0 {
+		t.Fatal("no file heading on screen")
+	}
+	path := m.view.files[m.view.rows[m.view.offset+row].file].path
+	before := fileIn(t, m, path).folded
+
+	x, y := contentPoint(t, m, focusReview, row, foldHit+1)
+	m = drive(t, m, pressAt(x, y))
+	if fileIn(t, m, path).folded != before {
+		t.Error("clicking the file's name folded it")
+	}
+}
+
+// A bar you can only look at is half a bar. Pressing one scrolls the pane to
+// where you pointed, and dragging follows the pointer.
+func TestDraggingTheVerticalBarScrolls(t *testing.T) {
+	m := newTestModel(t)
+	bigReview(t, &m, 400)
+	b, ok := m.vbar(focusReview)
+	if !ok {
+		t.Fatal("the review is not wearing a vertical bar")
+	}
+	if m.view.offset != 0 {
+		t.Fatalf("offset starts at %d", m.view.offset)
+	}
+	cursor := m.view.cursor
+
+	// Press near the foot of the track: the thumb goes there and the pane
+	// with it.
+	m = drive(t, m, pressAt(b.pos, b.lo+b.length-1))
+	if m.view.offset != m.view.maxOffset() {
+		t.Errorf("offset = %d after pressing the end of the track, want %d",
+			m.view.offset, m.view.maxOffset())
+	}
+	// Dragging a bar is reading ahead, the same gesture the wheel makes: the
+	// cursor stays where it was.
+	if m.view.cursor != cursor {
+		t.Errorf("dragging the bar moved the cursor to %d", m.view.cursor)
+	}
+	if m.mouse.hasSelection() {
+		t.Error("grabbing the bar started a text selection")
+	}
+
+	// And back up to the top by dragging.
+	m = drive(t, m, dragTo(b.pos, b.lo))
+	if m.view.offset != 0 {
+		t.Errorf("offset = %d after dragging to the top, want 0", m.view.offset)
+	}
+
+	m = drive(t, m, releaseAt(b.pos, b.lo))
+	if m.bar != nil {
+		t.Error("letting go did not release the bar")
+	}
+	// The pane is not left scrolling with every later motion.
+	m = drive(t, m, dragTo(b.pos, b.lo+b.length-1))
+	if m.view.offset != 0 {
+		t.Errorf("the bar kept following the pointer after release: offset %d", m.view.offset)
+	}
+}
+
+// Grabbing the thumb itself must not make it jump: the pane only moves once
+// the hand does.
+func TestGrabbingTheThumbDoesNotJump(t *testing.T) {
+	m := newTestModel(t)
+	bigReview(t, &m, 400)
+	m.view.scroll(120)
+	before := m.view.offset
+
+	b, ok := m.vbar(focusReview)
+	if !ok {
+		t.Fatal("no vertical bar")
+	}
+	lo, size := thumbSpan(b.length, b.total, b.window, b.offset, b.max)
+	if size < 2 {
+		t.Skip("the thumb is too small to grab off-centre")
+	}
+	m = drive(t, m, pressAt(b.pos, b.lo+lo))
+	if m.view.offset != before {
+		t.Errorf("grabbing the thumb moved the pane from %d to %d", before, m.view.offset)
+	}
+}
+
+// The list panes wear one too.
+func TestDraggingTheFileListBar(t *testing.T) {
+	m := newTestModel(t)
+	entries := make([]fileEntry, 200)
+	for i := range entries {
+		entries[i] = fileEntry{path: fmt.Sprintf("file%03d.txt", i), adds: 1}
+	}
+	m.files.setEntries(entries)
+	m.layout()
+
+	b, ok := m.vbar(focusFiles)
+	if !ok {
+		t.Fatal("the file list is not wearing a bar")
+	}
+	m = drive(t, m, pressAt(b.pos, b.lo+b.length-1))
+	if m.files.offset != m.files.maxOffset() {
+		t.Errorf("offset = %d, want %d", m.files.offset, m.files.maxOffset())
+	}
+	if m.files.cursor != 0 {
+		t.Errorf("dragging the bar moved the cursor to %d", m.files.cursor)
+	}
+}
+
+// So does the review's foot, which is the one bar that runs the other way.
+func TestDraggingTheHorizontalBarScrolls(t *testing.T) {
+	m := newTestModel(t)
+	m.view.long = m.view.codeWidth() + 400
+	m.layout()
+	b, ok := m.hbar(focusReview)
+	if !ok {
+		t.Skip("the review does not want a horizontal bar here")
+	}
+	m = drive(t, m, pressAt(b.lo+b.length-1, b.pos))
+	if m.view.hoffset != m.view.maxHOffset() {
+		t.Errorf("hoffset = %d after pressing the end of the track, want %d",
+			m.view.hoffset, m.view.maxHOffset())
+	}
+	m = drive(t, m, dragTo(b.lo, b.pos), releaseAt(b.lo, b.pos))
+	if m.view.hoffset != 0 {
+		t.Errorf("hoffset = %d after dragging back, want 0", m.view.hoffset)
+	}
+}
+
+// A pane with nothing to scroll wears no bar, so there is nothing to grab and
+// a press there is an ordinary press.
+func TestNoBarNothingToGrab(t *testing.T) {
+	m := newTestModel(t)
+	if m.files.scrolls() {
+		t.Skip("the fixture's file list is long enough to want a bar")
+	}
+	if _, ok := m.vbar(focusFiles); ok {
+		t.Error("a list with nothing to scroll reports a bar")
+	}
+	r := m.rects[focusFiles]
+	m = drive(t, m, pressAt(r.x+r.w-1, r.y+2))
+	if m.bar != nil {
+		t.Error("a press where no bar is drawn grabbed one")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The top bar
+// ---------------------------------------------------------------------------
+
+// barSpanFor is where one of the top bar's clickable parts is drawn.
+func barSpanFor(t *testing.T, m Model, what barTarget) barSpan {
+	t.Helper()
+	_, spans := m.branchBar()
+	for _, s := range spans {
+		if s.what == what {
+			return s
+		}
+	}
+	t.Fatalf("the top bar has no clickable %v in %q", what, plain(m))
+	return barSpan{}
+}
+
+// The branch name and the base are the two things on the top bar that name a
+// choice, so clicking them offers to change it.
+func TestClickingTheTopBarOffersTheChoice(t *testing.T) {
+	m := newTestModel(t)
+
+	// The branch name asks which branch to review.
+	s := barSpanFor(t, m, barBranch)
+	m = drive(t, m, pressAt(s.x, 0))
+	if m.dialog == nil {
+		t.Fatal("clicking the branch name offered nothing")
+	}
+	if !strings.Contains(m.dialog.title, "branch") {
+		t.Errorf("dialog = %q, want the branch chooser", m.dialog.title)
+	}
+	m.dialog = nil
+
+	// The base asks where to measure from.
+	s = barSpanFor(t, m, barBase)
+	m = drive(t, m, pressAt(s.x+s.w-1, 0))
+	if m.dialog == nil {
+		t.Fatal("clicking the base offered nothing")
+	}
+	if !strings.Contains(m.dialog.title, "base") {
+		t.Errorf("dialog = %q, want the base chooser", m.dialog.title)
+	}
+}
+
+// The bar is drawn where it says it is: every clickable span has to land on
+// the text it claims.
+func TestTheTopBarSpansMatchWhatIsDrawn(t *testing.T) {
+	m := newTestModel(t)
+	bar, spans := m.branchBar()
+	row := []rune(ansi.Strip(bar))
+	if len(spans) != 2 {
+		t.Fatalf("%d clickable spans, want the branch and the base", len(spans))
+	}
+	for _, s := range spans {
+		if s.x < 0 || s.x+s.w > len(row) {
+			t.Fatalf("span %v runs to column %d, bar is %d wide", s.what, s.x+s.w, len(row))
+		}
+		got := string(row[s.x : s.x+s.w])
+		switch s.what {
+		case barBranch:
+			if got != m.branch {
+				t.Errorf("the branch span covers %q, want %q", got, m.branch)
+			}
+		case barBase:
+			if !strings.Contains(got, m.base.Ref) {
+				t.Errorf("the base span covers %q, want it to hold %q", got, m.base.Ref)
+			}
+		}
+	}
+}
+
+// Elsewhere on the bar nothing happens: it is a bar, not a row of buttons.
+func TestClickingTheRestOfTheTopBarDoesNothing(t *testing.T) {
+	m := newTestModel(t)
+	m = drive(t, m, pressAt(1, 0)) // inside "Reviewing: "
+	if m.dialog != nil {
+		t.Errorf("clicking the label opened %q", m.dialog.title)
+	}
+	m = drive(t, m, pressAt(m.width-4, 0)) // the repo name and the way out
+	if m.dialog != nil {
+		t.Errorf("clicking the right hand end opened %q", m.dialog.title)
+	}
+}
+
+// A window too narrow to hold the base does not offer to change one that is
+// not on screen.
+func TestANarrowBarOffersOnlyWhatItShows(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 34, Height: 30})
+	bar, spans := m.branchBar()
+	for _, s := range spans {
+		if s.x+s.w > ansi.StringWidth(bar) {
+			t.Errorf("span %v runs past the end of a %d column bar", s.what, ansi.StringWidth(bar))
+		}
+		if s.what == barBase {
+			t.Error("a bar with no room for the base still offers to change it")
+		}
 	}
 }

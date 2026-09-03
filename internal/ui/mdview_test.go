@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -65,7 +67,7 @@ func TestMdViewMarksAndJumps(t *testing.T) {
 	if v.cur != -1 || v.offset != 0 {
 		t.Fatalf("reader starts at cur %d offset %d", v.cur, v.offset)
 	}
-	if strings.Contains(v.view(newStyles()), "▌") {
+	if strings.Contains(v.view(newStyles(true)), "▌") {
 		t.Error("a block is picked out before n or p was pressed")
 	}
 
@@ -75,7 +77,7 @@ func TestMdViewMarksAndJumps(t *testing.T) {
 	if v.cur != 0 || v.offset != max(v.jumps[0]-mdLead, 0) {
 		t.Errorf("n: cur %d offset %d, want block 0 at %d", v.cur, v.offset, max(v.jumps[0]-mdLead, 0))
 	}
-	view := v.view(newStyles())
+	view := v.view(newStyles(true))
 	if !strings.Contains(view, "▌") || !strings.Contains(view, "change 1 of 3") {
 		t.Errorf("the current block is not picked out:\n%s", ansi.Strip(view))
 	}
@@ -84,7 +86,7 @@ func TestMdViewMarksAndJumps(t *testing.T) {
 		t.Errorf("second n: cur %d offset %d, want block 1 at %d", v.cur, v.offset, v.jumps[1]-mdLead)
 	}
 	// The current block's marker differs from the others' on the same screen.
-	for _, line := range strings.Split(v.view(newStyles()), "\n") {
+	for _, line := range strings.Split(v.view(newStyles(true)), "\n") {
 		plain := ansi.Strip(line)
 		switch {
 		case strings.Contains(plain, "fourth paragraph") && !strings.HasPrefix(plain, "▌"):
@@ -103,12 +105,60 @@ func TestMdViewMarksAndJumps(t *testing.T) {
 		t.Errorf("p: cur %d offset %d, want block 1 at %d", v.cur, v.offset, v.jumps[1]-mdLead)
 	}
 
-	if !strings.Contains(v.view(newStyles()), "n/p changed block") {
+	if !strings.Contains(v.view(newStyles(true)), "n/p changed block") {
 		t.Error("the hint does not offer n/p")
 	}
 
 	clean := newMdView("x.md", raw, nil, 80, 6)
-	if len(clean.jumps) != 0 || strings.ContainsAny(clean.view(newStyles()), "▍▌") {
+	if len(clean.jumps) != 0 || strings.ContainsAny(clean.view(newStyles(true)), "▍▌") {
 		t.Error("an untouched file grew a gutter")
+	}
+}
+
+// A document is rendered in a moment, not in seconds.
+//
+// It used to take three of them. Each block's search for a touched line ran to
+// the start of the next block, and the last block had no next block — so its
+// bound was a number picked to mean "the end", and the search walked to it one
+// line number at a time. A long file spent a billion map lookups deciding that
+// its last paragraph was unchanged.
+func TestReaderRendersQuickly(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 400; i++ {
+		fmt.Fprintf(&b, "## Heading %d\n\nA paragraph of prose about %d.\n\n", i, i)
+	}
+	raw := b.String()
+
+	start := time.Now()
+	v := newMdView("long.md", raw, map[int]bool{5: true}, 100, 40)
+	took := time.Since(start)
+	if len(v.lines) == 0 {
+		t.Fatal("nothing rendered")
+	}
+	if took > 2*time.Second {
+		t.Errorf("rendering %d blocks took %v", 400, took)
+	}
+
+	// And a window that only changed height does not render again at all.
+	start = time.Now()
+	v.resize(100, 20)
+	if again := time.Since(start); again > took/4 {
+		t.Errorf("a height-only resize took %v, against %v to render", again, took)
+	}
+}
+
+// The marker still lands on the block the change touched, wherever it is —
+// including the last one, which is the block the bound was there for.
+func TestReaderMarksTheLastBlock(t *testing.T) {
+	raw := "# One\n\nFirst paragraph.\n\nLast paragraph.\n"
+	// Line 5 is the last paragraph.
+	v := newMdView("x.md", raw, map[int]bool{5: true}, 80, 20)
+	if len(v.jumps) != 1 {
+		t.Fatalf("jumps = %v, want the last block marked", v.jumps)
+	}
+	// And a change past every block still reaches the last one.
+	v = newMdView("x.md", raw, map[int]bool{6: true}, 80, 20)
+	if len(v.jumps) != 1 {
+		t.Errorf("jumps = %v, want the last block to reach the end", v.jumps)
 	}
 }

@@ -1,11 +1,12 @@
 package ui
 
 import (
+	"image/color"
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/discobox-ai/difftui/internal/git"
 )
 
@@ -150,9 +151,10 @@ func isPlainToken(token chroma.TokenType) bool {
 // foreground: colouring every name as well as every keyword, type, literal and
 // comment leaves almost nothing uncoloured, and a line where everything is
 // emphasised emphasises nothing.
-type syntaxPalette map[chroma.TokenType]lipgloss.TerminalColor
+type syntaxPalette map[chroma.TokenType]color.Color
 
-func newSyntaxPalette() syntaxPalette {
+func newSyntaxPalette(dark bool) syntaxPalette {
+	pick := lipgloss.LightDark(dark)
 	adaptive := map[chroma.TokenType][2]string{
 		// token:              {dark, light}
 		chroma.Keyword:          {"141", "90"}, // purple, clear of both bands
@@ -172,7 +174,7 @@ func newSyntaxPalette() syntaxPalette {
 	}
 	palette := make(syntaxPalette, len(adaptive))
 	for token, pair := range adaptive {
-		palette[token] = lipgloss.AdaptiveColor{Dark: pair[0], Light: pair[1]}
+		palette[token] = pick(lipgloss.Color(pair[1]), lipgloss.Color(pair[0]))
 	}
 	return palette
 }
@@ -181,7 +183,7 @@ func newSyntaxPalette() syntaxPalette {
 // that every subtype of a category the palette does not name explicitly —
 // LiteralStringHeredoc under LiteralString, CommentMultiline under Comment —
 // still picks up that category's colour.
-func (p syntaxPalette) color(token chroma.TokenType) (lipgloss.TerminalColor, bool) {
+func (p syntaxPalette) color(token chroma.TokenType) (color.Color, bool) {
 	for _, candidate := range []chroma.TokenType{token, token.SubCategory(), token.Category()} {
 		if value, ok := p[candidate]; ok {
 			return value, true

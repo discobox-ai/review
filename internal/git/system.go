@@ -66,9 +66,13 @@ type Editor interface {
 
 // FileInfo is the part of a stat difftui uses. It is deliberately small: a
 // remote backend should not have to synthesise a full fs.FileInfo to answer
-// "does this exist, and which of these two is newer".
+// "does this exist", "which of these two is newer", and "has this file changed
+// since I last read it" — the last of which wants the size as well, since a
+// filesystem's modification times can be too coarse to catch two writes in the
+// same second.
 type FileInfo struct {
 	ModTime time.Time
+	Size    int64
 	IsDir   bool
 }
 
@@ -151,7 +155,7 @@ func (Local) Stat(path string) (FileInfo, error) {
 	if err != nil {
 		return FileInfo{}, err
 	}
-	return FileInfo{ModTime: info.ModTime(), IsDir: info.IsDir()}, nil
+	return FileInfo{ModTime: info.ModTime(), Size: info.Size(), IsDir: info.IsDir()}, nil
 }
 
 // defaultEditor is what to open a file with when the environment says nothing.

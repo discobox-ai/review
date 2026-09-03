@@ -5,19 +5,16 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 	"github.com/discobox-ai/difftui/internal/git"
 )
 
-// Tests run without a terminal, where lipgloss resolves to no colour at all
-// and every style renders as bare text. Pinning a profile makes the rendering
-// deterministic, and is the only way to assert on the diff's bands.
-func init() {
-	lipgloss.SetColorProfile(termenv.ANSI256)
-	lipgloss.SetHasDarkBackground(true)
-}
+// These tests read the escape sequences a row renders as. Nothing has to be
+// pinned for that any more: a style renders the colour it was given, and it is
+// the writer at the far end that decides what the terminal can take — so the
+// rendering is the same here as it is under a test runner with no terminal at
+// all.
 
 // plainText strips the styling from a rendered row, for assertions about the
 // text itself rather than its colours.
@@ -190,7 +187,7 @@ func TestNoLexerForUnknownExtension(t *testing.T) {
 }
 
 func TestPaletteWalksTheTokenHierarchy(t *testing.T) {
-	p := newSyntaxPalette()
+	p := newSyntaxPalette(true)
 	// A subtype the palette does not name should inherit its category.
 	if _, ok := p.color(chroma.CommentMultiline); !ok {
 		t.Error("CommentMultiline should inherit the Comment colour")
@@ -220,7 +217,7 @@ func TestRenderSyntaxLineKeepsWidth(t *testing.T) {
 			got := renderDiffRow(diffRow{number: lineNumber(l), numW: 3, numSty: base,
 				gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
 				spans: spans[i], base: base, emphSty: base,
-				palette: newSyntaxPalette(), width: width})
+				palette: newSyntaxPalette(true), width: width})
 			if w := lipgloss.Width(got); w != width {
 				t.Errorf("width %d: line %q rendered %d cells", width, l.Text, w)
 			}
@@ -238,7 +235,7 @@ func TestRenderSyntaxLineKeepsTheText(t *testing.T) {
 		got := renderDiffRow(diffRow{number: lineNumber(l), numW: 3, numSty: base,
 			gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
 			spans: spans[i], base: base, emphSty: base,
-			palette: newSyntaxPalette(), width: 200})
+			palette: newSyntaxPalette(true), width: 200})
 		if !strings.Contains(plainText(got), strings.TrimSpace(codeText(l.Text))) {
 			t.Errorf("rendered line dropped its text: %q -> %q", l.Text, got)
 		}
@@ -255,7 +252,7 @@ func TestRenderSyntaxLineWithoutPaletteIsPlain(t *testing.T) {
 		row := diffRow{number: lineNumber(l), numW: 3, numSty: base, gutter: diffGutter(l.Kind),
 			code: expandTabs(codeText(l.Text)), base: base, emphSty: base, width: 60}
 		plain := renderDiffRow(row)
-		row.spans, row.palette = spans[i], newSyntaxPalette()
+		row.spans, row.palette = spans[i], newSyntaxPalette(true)
 		coloured := renderDiffRow(row)
 		if lipgloss.Width(plain) != lipgloss.Width(coloured) {
 			t.Error("highlighting changed the rendered width")
@@ -300,14 +297,14 @@ func TestRenderedGutterLayout(t *testing.T) {
 		seen[l.Kind] = renderDiffRow(diffRow{numW: 0,
 			gutter: diffGutter(l.Kind), code: expandTabs(codeText(l.Text)),
 			spans: spans[i], base: base, emphSty: base,
-			palette: newSyntaxPalette(), width: 200})
+			palette: newSyntaxPalette(true), width: 200})
 	}
-	// Each row opens with the one column cursor/selection bar, blank here,
-	// then the gutter.
+	// Each row opens with the one column cursor/selection bar and the one
+	// column "not committed yet" bar, both blank here, then the gutter.
 	for kind, want := range map[byte]string{
-		'+': " + func shiny",
-		'-': "  -func old",
-		' ': "   package main",
+		'+': "  + func shiny",
+		'-': "   -func old",
+		' ': "    package main",
 	} {
 		got, ok := seen[kind]
 		if !ok {
@@ -364,7 +361,7 @@ func TestChangedCharactersGetAStrongerBand(t *testing.T) {
 +const prefix = "greetings, "
 `
 	lines, spans := parseAndHighlight(t, "x.go", raw)
-	st := newStyles()
+	st := newStyles(true)
 
 	for _, c := range []struct {
 		kind           byte
@@ -439,7 +436,7 @@ func TestChangedCharactersGetAStrongerBand(t *testing.T) {
 // A context line has no band at all, so unchanged code reads as plain text.
 func TestContextLinesHaveNoBand(t *testing.T) {
 	lines, spans := parseAndHighlight(t, "x.go", goDiff)
-	st := newStyles()
+	st := newStyles(true)
 	for i, l := range lines {
 		if l.Kind != ' ' {
 			continue
@@ -470,7 +467,7 @@ func TestScrolledRowKeepsItsGutterAndBands(t *testing.T) {
 `
 	lines, spans := parseAndHighlight(t, "x.go", raw)
 	emph := pairEmphasis(lines, textsOf(lines))
-	st := newStyles()
+	st := newStyles(true)
 	render := func(hscroll int) string {
 		for i, l := range lines {
 			if l.Kind != '+' {
@@ -489,10 +486,10 @@ func TestScrolledRowKeepsItsGutterAndBands(t *testing.T) {
 
 	// The line number and the marker are the same columns however far the
 	// code has moved. The marker keeps the plain band, never the emphasis.
-	const gutterAt = 5
+	const gutterAt = 6
 	for _, hscroll := range []int{0, 8, 28} {
 		text, bg := bgAt(render(hscroll))
-		if got := string(text[:7]); got != "   1 + " {
+		if got := string(text[:8]); got != "    1 + " {
 			t.Errorf("scrolled %d: row starts %q, want the number and marker to stay put", hscroll, got)
 		}
 		if bg[gutterAt] != "22" {

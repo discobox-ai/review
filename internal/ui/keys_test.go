@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	"github.com/charmbracelet/bubbles/key"
+	"charm.land/bubbles/v2/key"
 )
 
 // commandBindings is every binding that runs a command, as opposed to moving
@@ -18,27 +18,33 @@ func commandBindings(m keyMap) []struct {
 		name string
 		key.Binding
 	}{
-		{"stage", m.StageKey},
-		{"unstage", m.UnstageKey},
-		{"revert changes", m.RevertKey},
-		{"sign off", m.SignOffKey},
-		{"amend", m.AmendKey},
+		{"approve", m.ApproveKey},
+		{"approve everything", m.ApproveAll},
+		{"fold everything", m.FoldAll},
+		{"hide the finished files", m.HideDone},
+		{"split the diff", m.SplitKey},
+		{"comment", m.CommentKey},
+		{"reply", m.ReplyKey},
+		{"resolve", m.ResolveKey},
+		{"delete a comment", m.DeleteKey},
+		{"choose the base", m.BaseKey},
 		{"edit", m.EditKey},
-		{"push", m.PushKey},
-		{"merge", m.MergeKey},
-		{"new branch", m.BranchKey},
+		{"read the whole file", m.ViewKey},
+		{"read the version before", m.ViewOldKey},
+		{"read markdown", m.MarkdownKey},
 		{"checkout", m.CheckoutKey},
 		{"rescan", m.RescanKey},
 		{"help", m.HelpKey},
 		{"quit", m.QuitKey},
-		{"stage or unstage", m.Toggle},
+		{"open or fold", m.Toggle},
 		{"visual select", m.Visual},
-		{"stage line", m.StageLine},
-		{"delete untracked", m.Delete},
-		{"revert hunk", m.RevertHunk},
-		{"pop commits", m.PopKey},
+		{"zoom", m.ZoomKey},
 		{"next hunk", m.NextHunk},
 		{"previous hunk", m.PrevHunk},
+		{"next open comment", m.NextThread},
+		{"previous open comment", m.PrevThread},
+		{"next file", m.NextFile},
+		{"previous file", m.PrevFile},
 		{"less context", m.LessContextKey},
 		{"more context", m.MoreContextKey},
 	}
@@ -46,12 +52,12 @@ func commandBindings(m keyMap) []struct {
 
 // No two commands answer to the same key.
 //
-// A key may act on whatever is under the cursor — Space stages a file in a
-// list and a hunk in the diff, V selects in whichever pane you are in — but
-// that is one verb reaching different objects. Two unrelated commands sharing
-// a letter is the thing this rules out, and it is easy to reintroduce by
-// accident: a letter looks free in the pane you are working on while already
-// being spoken for somewhere else.
+// A key may act on whatever is under the cursor — Space opens a file in the
+// list, folds one in the review, and unfolds a closed comment — but that is
+// one verb reaching different objects. Two unrelated commands sharing a letter
+// is the thing this rules out, and it is easy to reintroduce by accident: a
+// letter looks free in the pane you are working on while already being spoken
+// for somewhere else.
 func TestNoTwoCommandsShareAKey(t *testing.T) {
 	seen := map[string]string{}
 	for _, b := range commandBindings(newKeyMap()) {
@@ -90,8 +96,8 @@ func TestCommandsDoNotCollideWithMovement(t *testing.T) {
 	}
 	for _, b := range commandBindings(m) {
 		for _, k := range b.Keys() {
-			// Enter doubles as the stage key, which is deliberate: it is the
-			// same gesture as Space, not a movement.
+			// Enter doubles as Space, which is deliberate: it is the same
+			// gesture, not a movement.
 			if k == "enter" {
 				continue
 			}
