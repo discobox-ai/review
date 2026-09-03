@@ -615,10 +615,17 @@ none of that, which `git apply` will take.
 | `delete <id> [n]` | a conversation, or one remark of it |
 | `approve <path>…` / `unapprove <path>…` | sign off a file, or take it back |
 | `status` | what is left to do, one fact to a line |
+| `help [<command>]` | the list, or one command in full |
 
 `base` saves, because the base is part of the review: the window and every
 later command have to agree about what is under review. `--base REF` is the
 other thing — one diff seen from somewhere else, changing nothing.
+
+**`difftui <command> --help`** prints that one command in full: what it takes,
+what it is for, the flags it accepts and a line showing it used. `difftui help
+<command>` is the same question asked the other way. A flag belongs to the
+commands that take it and is refused by the rest — a command that quietly
+ignored a flag would be a command that did not do what it was told.
 
 `--by NAME` says who a remark is from, and defaults to git's own `user.name` —
 an agent should pass its own. `--side old` anchors to the line the change

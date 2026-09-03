@@ -623,3 +623,122 @@ func TestBaseIsSavedAndShown(t *testing.T) {
 	}
 	fails(t, repo, "base", "one", "two")
 }
+
+// ---------------------------------------------------------------------------
+// Help
+// ---------------------------------------------------------------------------
+
+// Every command answers for itself, and answers the same however it is asked.
+func TestEveryCommandHasItsOwnHelp(t *testing.T) {
+	repo := testRepo(t)
+	for _, c := range Commands {
+		viaFlag := run(t, repo, c.Name, "--help")
+		viaWord := run(t, repo, "help", c.Name)
+		if viaFlag != viaWord {
+			t.Errorf("%s --help and help %s differ:\n%s\n---\n%s",
+				c.Name, c.Name, viaFlag, viaWord)
+		}
+		if short := run(t, repo, c.Name, "-h"); short != viaFlag {
+			t.Errorf("%s -h differs from --help", c.Name)
+		}
+		if !strings.Contains(viaFlag, "difftui "+c.Name) {
+			t.Errorf("%s --help does not name itself:\n%s", c.Name, viaFlag)
+		}
+		if !strings.Contains(viaFlag, c.What) {
+			t.Errorf("%s --help does not say what it is for:\n%s", c.Name, viaFlag)
+		}
+		for _, f := range c.Flags {
+			if !strings.Contains(viaFlag, "--"+f) {
+				t.Errorf("%s --help does not mention its own --%s", c.Name, f)
+			}
+		}
+	}
+}
+
+// Asking for help must never do the thing instead.
+func TestHelpChangesNothing(t *testing.T) {
+	repo := testRepo(t)
+	run(t, repo, "comment", "server.go:4", "why?")
+	before, _ := repo.ReadStateFile(review.FileName)
+
+	for _, c := range Commands {
+		run(t, repo, c.Name, "--help")
+	}
+	if after, _ := repo.ReadStateFile(review.FileName); after != before {
+		t.Errorf("asking for help changed the review:\n%s", after)
+	}
+}
+
+// A flag belongs to the commands that take it, and is refused by the rest —
+// quietly ignoring one would mean a command that did not do what it was told.
+func TestFlagsBelongToTheirCommands(t *testing.T) {
+	repo := testRepo(t)
+	fails(t, repo, "list", "--stat")
+	fails(t, repo, "comment", "--raw", "server.go:4", "x")
+	fails(t, repo, "approve", "--open", "server.go")
+	fails(t, repo, "diff", "--by", "someone")
+
+	// And the ones that do belong are taken.
+	run(t, repo, "diff", "--stat")
+	run(t, repo, "list", "--open")
+	run(t, repo, "comment", "--by", "claude", "server.go:4", "x")
+
+	// The refusal says where to look.
+	var out strings.Builder
+	err := Run(repo, []string{"list", "--stat"}, &out)
+	if err == nil || !strings.Contains(err.Error(), "difftui list --help") {
+		t.Errorf("refusal = %v, want it to point at the command's own help", err)
+	}
+}
+
+// The table is the only place a command is described, so the two halves of it
+// have to agree with each other.
+func TestTheCommandTableIsConsistent(t *testing.T) {
+	for _, c := range Commands {
+		for _, f := range c.Flags {
+			if flagHelp[f] == "" {
+				t.Errorf("%s takes --%s, which nothing describes", c.Name, f)
+			}
+			if !c.takes(f) {
+				t.Errorf("%s lists --%s but does not take it", c.Name, f)
+			}
+		}
+		// A flag shown in the one-line summary has to be one the command
+		// really accepts, or the listing is telling people the wrong thing.
+		for _, word := range strings.Fields(c.Args) {
+			name := strings.TrimLeft(strings.Trim(word, "[]"), "-")
+			if !strings.HasPrefix(strings.Trim(word, "[]"), "--") {
+				continue
+			}
+			if !c.takes(name) {
+				t.Errorf("%s advertises --%s in %q but does not take it",
+					c.Name, name, c.Args)
+			}
+		}
+	}
+	// Nothing is described that no command takes.
+	for f := range flagHelp {
+		used := false
+		for _, c := range Commands {
+			used = used || c.takes(f)
+		}
+		if !used {
+			t.Errorf("--%s is described but no command takes it", f)
+		}
+	}
+}
+
+func TestHelpForNothingInParticular(t *testing.T) {
+	repo := testRepo(t)
+	// Bare help still lists them all, and points at the per-command pages.
+	got := run(t, repo, "help")
+	for _, c := range Commands {
+		if !strings.Contains(got, "difftui "+c.Name) {
+			t.Errorf("the listing is missing %q", c.Name)
+		}
+	}
+	if !strings.Contains(got, "--help") {
+		t.Error("the listing does not say there is more")
+	}
+	fails(t, repo, "help", "nope")
+}

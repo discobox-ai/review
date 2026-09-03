@@ -24,22 +24,143 @@ import (
 	"github.com/discobox-ai/difftui/internal/review"
 )
 
-// Commands is every subcommand, in the order help lists them.
-var Commands = []struct {
+// Command is one subcommand: what it is called, what it takes, and what it is
+// for. The table is the only place any of that is written down — the listing,
+// one command's own help, and the check that a flag belongs to the command it
+// was given to all read it, so none of them can come to disagree.
+type Command struct {
 	Name, Args, What string
-}{
-	{"diff", "[--path P] [--stat] [--raw]", "the review itself"},
-	{"base", "[<ref>] [--auto]", "show or set what it is measured from"},
-	{"list", "[--path P] [--open] [--resolved]", "list the comments"},
-	{"show", "<id>", "one conversation in full"},
-	{"comment", "<path>:<line>[-<line>] <body>", "start a conversation"},
-	{"reply", "<id> <body>", "answer one"},
-	{"resolve", "<id>…", "close one"},
-	{"reopen", "<id>…", "open one again"},
-	{"delete", "<id> [n]", "delete a conversation, or one remark of it"},
-	{"approve", "<path>…", "sign off a file"},
-	{"unapprove", "<path>…", "take that back"},
-	{"status", "", "what is left to do"},
+
+	// Long is the paragraph `difftui <name> --help` prints, and Example the
+	// line under it. Both are empty for a command with nothing to add.
+	Long, Example string
+
+	// Flags are the flags this command takes, by name. Anything else given to
+	// it is refused rather than quietly ignored.
+	Flags []string
+}
+
+// Commands is every subcommand, in the order help lists them.
+var Commands = []Command{
+	{
+		Name: "diff", Args: "[--path P] [--stat] [--raw]", What: "the review itself",
+		Flags: []string{"path", "base", "context", "stat", "raw"},
+		Long: "Every change between the base and the working tree — committed,\n" +
+			"staged and unstaged alike — with the line numbers a comment anchors\n" +
+			"to. Each line carries its own side's number, a ! where the change is\n" +
+			"not in a commit yet, and <t1> for whatever has already been said\n" +
+			"about it.\n\n" +
+			"--stat prints the headings alone. --raw prints the plain unified\n" +
+			"diff with none of that, which git apply will take.",
+		Example: "difftui diff --path internal/git/git.go",
+	},
+	{
+		Name: "base", Args: "[<ref>] [--auto]", What: "show or set what it is measured from",
+		Flags: []string{"auto"},
+		Long: "With no argument it says where the review starts. With one it moves\n" +
+			"it there, and saves: the base is part of the review, so the window\n" +
+			"and every later command agree about what is under review. --auto\n" +
+			"hands it back to whatever difftui works out.\n\n" +
+			"The --base flag on diff and status is the other thing — one command\n" +
+			"seen from somewhere else, changing nothing.",
+		Example: "difftui base origin/main",
+	},
+	{
+		Name: "list", Args: "[--path P] [--open] [--resolved]", What: "list the comments",
+		Flags:   []string{"path", "open", "resolved"},
+		Long:    "One conversation to a line: its id, where it is, whether anybody is\nstill waiting on it, who started it, and what they said.",
+		Example: "difftui list --open",
+	},
+	{
+		Name: "show", Args: "<id>", What: "one conversation in full",
+		Long:    "Every remark on it, numbered, so that one of them can be deleted by\nnumber.",
+		Example: "difftui show t3",
+	},
+	{
+		Name: "comment", Args: "<path>:<line>[-<line>] <body>", What: "start a conversation",
+		Flags: []string{"by", "side"},
+		Long: "A place is written path:line, or path:line-line for a block — the way\n" +
+			"a place in a review is written in an error message or a stack trace.\n" +
+			"The numbers are the ones difftui diff prints.\n\n" +
+			"--side old anchors to a line the change removed, which has no line in\n" +
+			"the file as it now stands.",
+		Example: `difftui comment server.go:42 "why not check the error here?"`,
+	},
+	{
+		Name: "reply", Args: "<id> <body>", What: "answer one",
+		Flags:   []string{"by"},
+		Example: `difftui reply t3 --by claude "good catch, fixing"`,
+	},
+	{
+		Name: "resolve", Args: "<id>…", What: "close one",
+		Long:    "Closing a conversation keeps the record of what was asked and\nanswered, which is nearly always what you want instead of deleting it.",
+		Example: "difftui resolve t1 t2",
+	},
+	{Name: "reopen", Args: "<id>…", What: "open one again"},
+	{
+		Name: "delete", Args: "<id> [n]", What: "delete a conversation, or one remark of it",
+		Long: "With a number it deletes that one remark, counting from zero as show\n" +
+			"prints them. Without, it deletes the whole conversation. Taking the\n" +
+			"last remark out takes the conversation with it: an anchor on a line\n" +
+			"with nothing to say is not a thing to leave behind.",
+		Example: "difftui delete t3 1",
+	},
+	{
+		Name: "approve", Args: "<path>…", What: "sign off a file",
+		Flags: []string{"by"},
+		Long: "No digest is written, exactly as a hand-written approval leaves none:\n" +
+			"difftui stamps in the change as it stands the next time anything\n" +
+			"reads the review, which is what keeps such an approval nullifiable.\n" +
+			"Edit the file afterwards and the approval falls.",
+		Example: "difftui approve internal/git/git.go",
+	},
+	{Name: "unapprove", Args: "<path>…", What: "take that back"},
+	{
+		Name: "status", Args: "", What: "what is left to do, one fact to a line",
+		Flags: []string{"base"},
+		Long: "Reads the repository as well as the review, because two of the things\n" +
+			"worth knowing are not in the file: merge-base is the commit the base\n" +
+			"and this branch last had in common, and unapproved counts the files\n" +
+			"there are to approve.\n\n" +
+			"One fact to a line, so a script can read any of it without reading\n" +
+			"all of it.",
+		Example: "difftui status | grep ^unapproved",
+	},
+}
+
+// flagHelp describes every flag once, so that a command listing one of them
+// does not have to say again what it means.
+var flagHelp = map[string]string{
+	"path":     "only this file",
+	"base":     "measure this one command from here, without saving it",
+	"context":  "lines of context either side",
+	"stat":     "the headings alone, without the diff under them",
+	"raw":      "the plain unified diff, for piping somewhere else",
+	"auto":     "let difftui work the base out again",
+	"by":       "who a remark is from (default: git's user.name)",
+	"side":     "old, to anchor to a line the change removed",
+	"open":     "only what is still open",
+	"resolved": "only what is not",
+}
+
+// find is the command a word names.
+func find(name string) (Command, bool) {
+	for _, c := range Commands {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return Command{}, false
+}
+
+// takes reports whether a command accepts a flag.
+func (c Command) takes(flag string) bool {
+	for _, f := range c.Flags {
+		if f == flag {
+			return true
+		}
+	}
+	return false
 }
 
 // Is reports whether a word names a subcommand, which is what tells the
@@ -55,14 +176,30 @@ func Is(word string) bool {
 
 // Run carries out one subcommand. args is the command and its arguments.
 func Run(repo *git.Repo, args []string, out io.Writer) error {
-	if len(args) == 0 || args[0] == "help" {
+	if len(args) == 0 || (args[0] == "help" && len(args) == 1) {
 		Usage(out)
 		return nil
 	}
 	cmd, rest := args[0], args[1:]
 
-	// Flags first, so that the positional arguments left are just that.
-	opts, rest, err := parseFlags(rest)
+	// `help <cmd>` and `<cmd> --help` are the same question asked two ways.
+	if cmd == "help" && len(rest) == 1 {
+		return helpFor(out, rest[0])
+	}
+	c, known := find(cmd)
+	if !known {
+		return fmt.Errorf("no such command: %s", cmd)
+	}
+	for _, a := range rest {
+		if a == "--help" || a == "-h" {
+			return helpFor(out, cmd)
+		}
+	}
+
+	// Flags first, so that the positional arguments left are just that. Only
+	// this command's own flags are allowed: one it does not take is a mistake
+	// worth reporting rather than ignoring.
+	opts, rest, err := parseFlags(c, rest)
 	if err != nil {
 		return err
 	}
@@ -103,8 +240,6 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 		note, err = setApproved(st, repo, rest, opts, true)
 	case "unapprove":
 		note, err = setApproved(st, repo, rest, opts, false)
-	default:
-		return fmt.Errorf("no such command: %s", cmd)
 	}
 	if err != nil {
 		return err
@@ -118,8 +253,8 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 	return nil
 }
 
-// Usage is the help these commands print, and the one the window's own help
-// points at.
+// Usage lists the commands. It is what `difftui help` prints, and what a
+// difftui with nowhere to draw prints instead of opening a window.
 func Usage(out io.Writer) {
 	fmt.Fprintln(out, "difftui reviews a branch. With no command it opens a window;")
 	fmt.Fprintln(out, "these read and write the same review from a script.")
@@ -128,18 +263,47 @@ func Usage(out io.Writer) {
 		fmt.Fprintf(out, "  difftui %-9s %-32s %s\n", c.Name, c.Args, c.What)
 	}
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "  --base REF   measure this one diff from here, without saving it")
-	fmt.Fprintln(out, "  --auto       let difftui work the base out again")
-	fmt.Fprintln(out, "  --context N  lines of context either side (default", strconv.Itoa(git.DefaultContext)+")")
-	fmt.Fprintln(out, "  --stat       just the files and what stands against them")
-	fmt.Fprintln(out, "  --raw        the plain unified diff, for piping somewhere else")
-	fmt.Fprintln(out, "  --by NAME    who a remark is from (default: git's user.name)")
-	fmt.Fprintln(out, "  --side old   anchor to the line the change removed, not the one it added")
-	fmt.Fprintln(out, "  --path P     list only this file's comments")
-	fmt.Fprintln(out, "  --open       list only what is still open, --resolved only what is not")
+	fmt.Fprintln(out, "  difftui <command> --help   what that one does, in full")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "The review is .git/"+review.FileName+", and a window open on it")
 	fmt.Fprintln(out, "picks these changes up within the second.")
+}
+
+// helpFor is one command's own page: what it takes, what it is for, the flags
+// it accepts, and a line showing it used.
+func helpFor(out io.Writer, name string) error {
+	c, ok := find(name)
+	if !ok {
+		return fmt.Errorf("no such command: %s", name)
+	}
+	fmt.Fprintf(out, "difftui %s %s\n", c.Name, c.Args)
+	fmt.Fprintf(out, "  %s\n", c.What)
+	if c.Long != "" {
+		fmt.Fprintln(out)
+		for _, l := range strings.Split(c.Long, "\n") {
+			// A blank line stays blank rather than becoming two spaces.
+			if l == "" {
+				fmt.Fprintln(out)
+				continue
+			}
+			fmt.Fprintln(out, "  "+l)
+		}
+	}
+	if len(c.Flags) > 0 {
+		fmt.Fprintln(out)
+		for _, f := range c.Flags {
+			what := flagHelp[f]
+			if f == "context" {
+				what += " (default " + strconv.Itoa(git.DefaultContext) + ")"
+			}
+			fmt.Fprintf(out, "  --%-9s %s\n", f, what)
+		}
+	}
+	if c.Example != "" {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "  "+c.Example)
+	}
+	return nil
 }
 
 // options are the flags any command may carry.
@@ -156,7 +320,7 @@ type options struct {
 	resolved bool
 }
 
-func parseFlags(args []string) (options, []string, error) {
+func parseFlags(c Command, args []string) (options, []string, error) {
 	o := options{context: git.DefaultContext}
 	var rest []string
 	for i := 0; i < len(args); i++ {
@@ -205,6 +369,9 @@ func parseFlags(args []string) (options, []string, error) {
 			o.resolved = true
 		default:
 			err = fmt.Errorf("no such flag: --%s", name)
+		}
+		if err == nil && !c.takes(name) {
+			err = fmt.Errorf("%s takes no --%s; see difftui %s --help", c.Name, name, c.Name)
 		}
 		if err != nil {
 			return o, nil, err
