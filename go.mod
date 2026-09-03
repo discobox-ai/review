@@ -10,7 +10,7 @@ require (
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/charmbracelet/ultraviolet v0.0.0-20260812204455-68fa937c71be
 	github.com/charmbracelet/x/ansi v0.11.8
-	github.com/discobox-ai/x v0.0.0-00010101000000-000000000000
+	github.com/discobox-ai/x v0.0.0-20260828205057-2567df0ccf27
 	github.com/mattn/go-runewidth v0.0.27
 	golang.org/x/term v0.31.0
 )
@@ -39,5 +39,3 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 )
-
-replace github.com/discobox-ai/x => ../x
