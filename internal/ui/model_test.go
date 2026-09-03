@@ -134,6 +134,14 @@ func newTestModel(t *testing.T) Model {
 	return modelFor(t, testRepo(t))
 }
 
+// shortTestModel is the same review in a window too short to hold it, which is
+// where scrolling — and so where a pane's idea of the reader's place — matters.
+func shortTestModel(t *testing.T) Model {
+	t.Helper()
+	m := New(testRepo(t), "main")
+	return drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()())
+}
+
 func modelFor(t *testing.T, repo *git.Repo) Model {
 	t.Helper()
 	m := New(repo, "main")
@@ -205,6 +213,18 @@ func reviewJSON(t *testing.T, repo *git.Repo) *review.State {
 		t.Fatalf("the review file will not parse: %v\n%s", err, body)
 	}
 	return st
+}
+
+// fileScreen is how far down the review pane a file's heading is drawn,
+// counted from the first body row. It is negative when the heading has been
+// scrolled off the top, which is still an answer: the heading is not on
+// screen.
+func fileScreen(m Model, path string) (int, bool) {
+	i, ok := m.view.fileRow(path)
+	if !ok {
+		return 0, false
+	}
+	return i - m.view.offset, true
 }
 
 // fileIn finds a file's section of the stack.
@@ -1346,6 +1366,69 @@ func TestCommentingOnABlockOfLines(t *testing.T) {
 				t.Errorf("the block comment hangs off line %d, want 5", f.lines[idx].New)
 			}
 		}
+	}
+}
+
+// Folding a file empties the space under its heading; it does not move the
+// heading. A pane that jerked the line you just pressed Space on up to the top
+// of itself would take the files above it off the screen, and the reader would
+// have to find their place again to carry on down the review.
+func TestFoldingLeavesTheHeadingWhereItIs(t *testing.T) {
+	// Short enough that the review scrolls, which is when the difference shows.
+	m := shortTestModel(t)
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowFile && m.view.files[r.file].path == "foo.txt"
+	})
+	before, ok := fileScreen(m, "foo.txt")
+	if !ok || before <= 0 {
+		t.Fatalf("foo.txt starts at screen row %d; the test wants it partway down a scrolling pane", before)
+	}
+
+	m = drive(t, m, letterKey(" "))
+	if !fileIn(t, m, "foo.txt").folded {
+		t.Fatal("Space did not fold the file")
+	}
+	if got, _ := fileScreen(m, "foo.txt"); got != before {
+		t.Errorf("folding moved the heading to screen row %d, want %d", got, before)
+	}
+
+	m = drive(t, m, letterKey(" "))
+	if fileIn(t, m, "foo.txt").folded {
+		t.Fatal("Space did not open the file again")
+	}
+	if got, _ := fileScreen(m, "foo.txt"); got != before {
+		t.Errorf("unfolding moved the heading to screen row %d, want %d", got, before)
+	}
+}
+
+// Approving a file folds it away, which is the same shape of change and wants
+// the same stability: the heading stays where it was drawn and the diff under
+// it goes, rather than the pane hauling the heading up to its top.
+func TestApprovingLeavesTheHeadingWhereItIs(t *testing.T) {
+	m := shortTestModel(t)
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowFile && m.view.files[r.file].path == "foo.txt"
+	})
+	before, ok := fileScreen(m, "foo.txt")
+	if !ok || before <= 0 {
+		t.Fatalf("foo.txt starts at screen row %d; the test wants it partway down a scrolling pane", before)
+	}
+
+	m = drive(t, m, letterKey("a"))
+	if !fileIn(t, m, "foo.txt").folded {
+		t.Fatal("approving the file did not fold it away")
+	}
+	if got, _ := fileScreen(m, "foo.txt"); got != before {
+		t.Errorf("approving moved the heading to screen row %d, want %d", got, before)
+	}
+
+	// And withdrawing the approval opens it again in place.
+	m = drive(t, m, letterKey("a"))
+	if fileIn(t, m, "foo.txt").folded {
+		t.Fatal("withdrawing the approval left the file folded")
+	}
+	if got, _ := fileScreen(m, "foo.txt"); got != before {
+		t.Errorf("unapproving moved the heading to screen row %d, want %d", got, before)
 	}
 }
 

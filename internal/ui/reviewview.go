@@ -328,44 +328,53 @@ func newReviewView() *reviewView {
 // by file rather than by row: a rescan that adds a hunk higher up must not
 // scroll the file you were reading out from under you.
 func (v *reviewView) setFiles(files []*reviewFile, commit, label string) {
-	path, within := v.cursorAnchor()
+	a := v.cursorAnchor()
 	v.files, v.commit, v.label = files, commit, label
 	v.byPath = make(map[string]int, len(files))
 	for i, f := range files {
 		v.byPath[f.path] = i
 	}
 	v.anchor = -1
-	v.restore(path, within)
+	v.restore(a)
 }
 
-// cursorAnchor remembers where the cursor is as a path and how far into that
-// file, which survives the rows being rebuilt underneath it.
-func (v *reviewView) cursorAnchor() (path string, within int) {
+// place is where the reader was: a file, how far into it the cursor had got,
+// and how far down the pane that file's heading was drawn. All three are told
+// in terms of the file rather than of row numbers, which is what lets them
+// survive the rows being rebuilt underneath them.
+type place struct {
+	path   string
+	within int
+	screen int // rows from the top of the pane to the heading, or -1 for above it
+}
+
+// cursorAnchor remembers where the cursor is, for restore to put it back.
+func (v *reviewView) cursorAnchor() place {
 	if v.cursor < 0 || v.cursor >= len(v.rows) {
-		return "", 0
+		return place{screen: -1}
 	}
 	r := v.rows[v.cursor]
 	if r.file < 0 || r.file >= len(v.files) {
-		return "", 0
+		return place{screen: -1}
 	}
 	f := v.files[r.file]
 	for i := v.cursor; i >= 0; i-- {
 		if v.rows[i].kind == rowFile && v.rows[i].file == r.file {
-			return f.path, v.cursor - i
+			return place{path: f.path, within: v.cursor - i, screen: max(i-v.offset, -1)}
 		}
 	}
-	return f.path, 0
+	return place{path: f.path, screen: -1}
 }
 
 // restore puts the cursor back where cursorAnchor found it, as nearly as the
 // new rows allow.
-func (v *reviewView) restore(path string, within int) {
+func (v *reviewView) restore(a place) {
 	v.build()
-	if path == "" {
+	if a.path == "" {
 		v.clamp()
 		return
 	}
-	fi, ok := v.byPath[path]
+	fi, ok := v.byPath[a.path]
 	if !ok {
 		v.clamp()
 		return
@@ -382,11 +391,19 @@ func (v *reviewView) restore(path string, within int) {
 		for last+1 < len(v.rows) && v.rows[last+1].file == fi {
 			last++
 		}
-		v.cursor = min(i+within, last)
-		// Keep the file's header on screen: coming back to a file and finding
-		// it starting above the top of the pane reads as having lost your
-		// place even when the cursor is right.
-		v.offset = i
+		v.cursor = min(i+a.within, last)
+		// The heading goes back to the height it was drawn at, so what changes
+		// on the screen is the file itself: folding it empties the space below
+		// its heading and approving it takes that space away, and neither
+		// hauls the files above it out of sight. A heading that was above the
+		// pane has no height to go back to and comes to the top instead, since
+		// a file that starts off the top of the screen reads as having lost
+		// your place even when the cursor is right.
+		if a.screen < 0 {
+			v.offset = i
+		} else {
+			v.offset = min(max(i-a.screen, 0), v.maxOffset())
+		}
 		v.clamp()
 		return
 	}
@@ -851,17 +868,26 @@ func (v *reviewView) top(i int) {
 
 // jumpToFile puts a file's header at the top of the pane.
 func (v *reviewView) jumpToFile(path string) bool {
-	fi, ok := v.byPath[path]
+	i, ok := v.fileRow(path)
 	if !ok {
 		return false
 	}
+	v.top(i)
+	return true
+}
+
+// fileRow is the row a file's heading is drawn on.
+func (v *reviewView) fileRow(path string) (int, bool) {
+	fi, ok := v.byPath[path]
+	if !ok {
+		return 0, false
+	}
 	for i, r := range v.rows {
 		if r.kind == rowFile && r.file == fi {
-			v.top(i)
-			return true
+			return i, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // pathAt is the file the cursor is in, for keeping the list beside the pane in

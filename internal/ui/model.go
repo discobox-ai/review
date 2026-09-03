@@ -1331,7 +1331,10 @@ func (m Model) doToggle() (tea.Model, tea.Cmd) {
 	return m.doComment()
 }
 
-// doFold opens or shuts the file the cursor is in.
+// doFold opens or shuts the file the cursor is in. The rebuild leaves the
+// file's heading at the height it was drawn at, so folding empties the space
+// below the heading and unfolding fills it again, with the heading itself and
+// everything above it staying where they were.
 func (m Model) doFold() (tea.Model, tea.Cmd) {
 	f, ok := m.view.file()
 	if !ok {
@@ -1339,7 +1342,6 @@ func (m Model) doFold() (tea.Model, tea.Cmd) {
 	}
 	m.folds[f.path] = !f.folded
 	m.rebuild()
-	m.view.jumpToFile(f.path)
 	return m, nil
 }
 
