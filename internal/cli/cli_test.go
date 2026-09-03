@@ -266,19 +266,129 @@ func TestApproving(t *testing.T) {
 	}
 }
 
+// status reads the repository as well as the review: where the review is
+// measured from is a commit only git can name, and the file records approvals
+// rather than the files there are to approve.
 func TestStatus(t *testing.T) {
 	repo := testRepo(t)
+	write(t, repo.Dir, "other.go", "package main\n")
+	gitRun(t, repo.Dir, "add", "other.go")
 	run(t, repo, "comment", "server.go:4", "why?")
 	run(t, repo, "comment", "server.go:5", "and this")
 	run(t, repo, "resolve", "t2")
 	run(t, repo, "approve", "server.go")
 
-	got := run(t, repo, "status")
-	for _, want := range []string{"feature", "approved  1 file", "comments  2, 1 open"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("status is missing %q:\n%s", want, got)
-		}
+	got := fields(t, run(t, repo, "status"))
+	if got["branch"] != "feature" {
+		t.Errorf("branch = %q", got["branch"])
 	}
+	if got["base"] != "main" {
+		t.Errorf("base = %q, want the ref the review names", got["base"])
+	}
+	// The merge base is the commit, which is the thing the ref cannot say.
+	head := strings.TrimSpace(gitOut(t, repo.Dir, "rev-parse", "--short", "main"))
+	if got["merge-base"] != head {
+		t.Errorf("merge-base = %q, want %q", got["merge-base"], head)
+	}
+	if got["ahead"] != "1" || got["behind"] != "0" {
+		t.Errorf("ahead/behind = %q/%q, want 1/0", got["ahead"], got["behind"])
+	}
+	// Two files under review, one of them signed off.
+	if got["files"] != "2" || got["approved"] != "1" || got["unapproved"] != "1" {
+		t.Errorf("files/approved/unapproved = %q/%q/%q, want 2/1/1",
+			got["files"], got["approved"], got["unapproved"])
+	}
+	if got["comments"] != "2" || got["open"] != "1" {
+		t.Errorf("comments/open = %q/%q, want 2/1", got["comments"], got["open"])
+	}
+}
+
+// An approval given from a command carries no digest, so the first thing to
+// read the review stamps in the change as it stands — and once it has, editing
+// the file nullifies the approval, exactly as it does in the window.
+func TestStatusNullifiesAStaleApproval(t *testing.T) {
+	repo := testRepo(t)
+	run(t, repo, "approve", "server.go")
+
+	// Reading it stamps rather than nullifies: nothing has moved yet.
+	if got := fields(t, run(t, repo, "status")); got["approved"] != "1" {
+		t.Fatalf("approved = %q after approving", got["approved"])
+	}
+	if stored(t, repo).FileFor("server.go").Digest == "" {
+		t.Fatal("reading the review did not stamp the digest in")
+	}
+
+	write(t, repo.Dir, "server.go", "package main\n\nfunc handler() error {\n\treturn boom()\n}\n")
+	got := fields(t, run(t, repo, "status"))
+	if got["approved"] != "0" || got["unapproved"] != "1" {
+		t.Errorf("approved/unapproved = %q/%q, want 0/1", got["approved"], got["unapproved"])
+	}
+	if got["nullified"] != "server.go" {
+		t.Errorf("nullified = %q, want the file named", got["nullified"])
+	}
+	// And it is written down, so the window sees the same thing.
+	if f := stored(t, repo).FileFor("server.go"); f.Approved || !f.Nullified {
+		t.Errorf("the review says %+v", f)
+	}
+	// The diff heading says so too.
+	if out := run(t, repo, "diff", "--stat"); !strings.Contains(out, "nullified") {
+		t.Errorf("diff --stat = %q", out)
+	}
+}
+
+// A base that cannot be used is reported rather than returned: this is the
+// command you run to find out what is wrong, so it has to answer.
+func TestStatusReportsABadBase(t *testing.T) {
+	repo := testRepo(t)
+	got := fields(t, run(t, repo, "status", "--base", "no/such/ref"))
+	if !strings.Contains(got["problem"], "no/such/ref") {
+		t.Errorf("problem = %q", got["problem"])
+	}
+	if got["branch"] != "feature" {
+		t.Error("it stopped rather than answering with what it could")
+	}
+}
+
+// A base nothing pinned may move when the branch does, and says so.
+func TestStatusSaysWhenTheBaseWasWorkedOut(t *testing.T) {
+	repo := testRepo(t)
+	if got := fields(t, run(t, repo, "status")); got["base-chosen"] != "" {
+		t.Errorf("base-chosen = %q with a base set", got["base-chosen"])
+	}
+	run(t, repo, "base", "--auto")
+	if got := fields(t, run(t, repo, "status")); got["base-chosen"] != "no" {
+		t.Errorf("base-chosen = %q with none set", got["base-chosen"])
+	}
+}
+
+// fields reads status's one-fact-a-line output the way a script would.
+func fields(t *testing.T, out string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if l == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(l, " ")
+		if !ok {
+			t.Errorf("status line %q is not a key and a value", l)
+			continue
+		}
+		got[key] = strings.TrimSpace(value)
+	}
+	return got
+}
+
+// gitOut runs git and returns what it said.
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return string(out)
 }
 
 // A review is of a branch, and the commands see the same one the window does.

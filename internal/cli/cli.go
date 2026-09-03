@@ -79,7 +79,7 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 	case "list":
 		return list(out, st, opts)
 	case "status":
-		return status(out, repo, st, branch)
+		return status(out, repo, st, branch, opts)
 	case "show":
 		return show(out, st, rest)
 	}
@@ -260,6 +260,10 @@ func diff(out io.Writer, repo *git.Repo, st *review.State, o options) error {
 	}
 
 	patches := git.ParseMulti(scan.Diff)
+	if err := reconcile(repo, repo.CurrentBranch(), st, patches); err != nil {
+		return err
+	}
+
 	shown := 0
 	for _, p := range patches {
 		if p.Path == "" || (o.path != "" && p.Path != o.path) {
@@ -427,22 +431,61 @@ func show(out io.Writer, st *review.State, args []string) error {
 	return nil
 }
 
-func status(out io.Writer, repo *git.Repo, st *review.State, branch string) error {
-	total, open := len(st.Threads), st.Open()
-	approved := 0
-	for _, f := range st.Files {
-		if f.Approved {
+// status is what is left to do, one fact to a line so that a script can read
+// any of it without reading all of it.
+//
+// It reads the repository as well as the review, because the two things worth
+// knowing — where the review is measured from, and how much of it is still
+// unread — are not in the file. The base a review names is a ref; what it is
+// measured from is the commit that ref and this branch last had in common, and
+// only git can say which that is. And the file records approvals, not the
+// files there are to approve.
+func status(out io.Writer, repo *git.Repo, st *review.State, branch string, o options) error {
+	// One fact to a line, in a column wide enough for the longest key, so that
+	// the values line up and either half can be cut out with a shell.
+	say := func(key string, value any) { fmt.Fprintf(out, "%-12s%v\n", key, value) }
+	say("branch", branch)
+
+	base := st.Base
+	if o.base != "" {
+		base = o.base
+	}
+	// Context of none: the file names are all this wants, and every line of
+	// context is a line to produce and parse for nothing.
+	scan, err := repo.Rescan(base, 0)
+	if err != nil {
+		return err
+	}
+	say("base", nameOr(scan.Base.Ref, "(none)"))
+	say("merge-base", nameOr(scan.Base.Commit, "(none)"))
+	say("ahead", scan.Base.Ahead)
+	say("behind", scan.Base.Behind)
+	if scan.Base.Auto {
+		// Nothing pinned it, so it may move when the branch does.
+		say("base-chosen", "no")
+	}
+
+	patches := git.ParseMulti(scan.Diff)
+	if err := reconcile(repo, branch, st, patches); err != nil {
+		return err
+	}
+
+	files, approved := 0, 0
+	for _, p := range patches {
+		if p.Path == "" {
+			continue
+		}
+		files++
+		if st.Approved(p.Path) {
 			approved++
 		}
 	}
-	base := st.Base
-	if base == "" {
-		base = "(whatever this branch is built on)"
-	}
-	fmt.Fprintf(out, "branch    %s\n", branch)
-	fmt.Fprintf(out, "base      %s\n", base)
-	fmt.Fprintf(out, "approved  %d %s\n", approved, plural(approved, "file", "files"))
-	fmt.Fprintf(out, "comments  %d, %d open\n", total, open)
+	say("files", files)
+	say("approved", approved)
+	say("unapproved", files-approved)
+
+	say("comments", len(st.Threads))
+	say("open", st.Open())
 
 	// A file whose approval fell is the one thing here somebody has to do
 	// something about, so it is named rather than counted.
@@ -454,9 +497,47 @@ func status(out io.Writer, repo *git.Repo, st *review.State, branch string) erro
 	}
 	sort.Strings(fallen)
 	for _, p := range fallen {
-		fmt.Fprintf(out, "nullified %s\n", p)
+		say("nullified", p)
+	}
+
+	// A base that could not be used is reported rather than returned: this is
+	// the command you run to find out what is wrong, so it has to answer.
+	if scan.Base.Err != "" {
+		say("problem", scan.Base.Err)
 	}
 	return nil
+}
+
+// reconcile checks every approval against the change now in front of the
+// reader, and saves if any of them fell.
+//
+// The window does this on every scan; a command that did not would report an
+// approval as standing when the file had moved under it, which is the one
+// thing an approval is supposed to be unable to do. It also stamps in the
+// digest of an approval given without one — which is how `difftui approve`
+// leaves it — so such an approval becomes nullifiable as soon as anything
+// reads the review.
+//
+// The digests come out the same whatever context the diff was taken with,
+// since they count only the changed lines and their numbers.
+func reconcile(repo *git.Repo, branch string, st *review.State, patches []*git.Patch) error {
+	digests := make(map[string]string, len(patches))
+	for _, p := range patches {
+		if p.Path != "" {
+			digests[p.Path] = review.Digest(p)
+		}
+	}
+	if changed, _ := st.Reconcile(digests); changed {
+		return review.Save(repo, branch, st)
+	}
+	return nil
+}
+
+func nameOr(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
 }
 
 // ---------------------------------------------------------------------------

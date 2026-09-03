@@ -567,11 +567,30 @@ t1  server.go:42  open
       good catch, fixing
 
 $ difftui status
-branch    feature
-base      origin/main
-approved  1 file
-comments  2, 1 open
+branch      feature
+base        origin/main
+merge-base  5e23e87
+ahead       2
+behind      0
+files       4
+approved    1
+unapproved  3
+comments    2
+open        1
+nullified   internal/ui/model.go
 ```
+
+`status` reads the repository as well as the review, because the two things
+worth knowing are not in the file. **`merge-base`** is the commit the base and
+this branch last had in common — the ref can only name where to look for it —
+and **`unapproved`** counts the files there are to approve, where the file
+records only approvals. One fact to a line, so a script can read any of it
+without reading all of it: `difftui status | grep ^unapproved`.
+
+`base-chosen no` appears when nothing pinned the base, so it may move when the
+branch does. `problem` appears instead of an error when the base could not be
+used at all — this is the command you run to find out what is wrong, so it
+answers with what it can.
 
 **The numbers `diff` prints are the numbers `comment` takes.** That agreement
 is the whole point of the command: anything that made you count lines to work
@@ -595,7 +614,7 @@ none of that, which `git apply` will take.
 | `resolve <id>…` / `reopen <id>…` | close one, or open it again |
 | `delete <id> [n]` | a conversation, or one remark of it |
 | `approve <path>…` / `unapprove <path>…` | sign off a file, or take it back |
-| `status` | what is left to do |
+| `status` | what is left to do, one fact to a line |
 
 `base` saves, because the base is part of the review: the window and every
 later command have to agree about what is under review. `--base REF` is the
@@ -613,6 +632,9 @@ disagree about which review they are looking at.
 `difftui approve` deliberately writes no digest, exactly as a hand-written
 approval does: difftui stamps in the change as it stands the next time it reads
 the review, which is what keeps such an approval nullifiable like any other.
+`diff` and `status` do that reading, and nullify an approval whose file has
+moved since — a command that reported an approval as standing when the file had
+changed under it would be undoing the one thing an approval cannot do.
 
 ### Writing it from somewhere else
 
