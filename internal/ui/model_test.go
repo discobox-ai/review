@@ -3224,6 +3224,126 @@ func TestRelayKeepsTheCursorOnTheSameConversation(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Space discloses; Enter acts
+// ---------------------------------------------------------------------------
+
+// Space inside a file's content folds that file, from wherever in it you have
+// got to. It used to share a key with Enter, so reading down a file with the
+// key that folds one opened a comment box on every line of the diff instead.
+func TestSpaceInsideAFileFoldsIt(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	if fileIn(t, m, "foo.txt").folded {
+		t.Fatal("foo.txt is folded before we start")
+	}
+
+	m = drive(t, m, letterKey(" "))
+	if !fileIn(t, m, "foo.txt").folded {
+		t.Errorf("Space on a line of foo.txt did not fold it (status %q)", m.status)
+	}
+	if m.compose != nil {
+		t.Error("Space opened a comment box on a line of the diff")
+	}
+	if m.view.draft != nil {
+		t.Error("Space left a draft in the stack")
+	}
+	// Nothing was written, and nothing is waiting to be. Read from the review
+	// in hand rather than from the file, which correctly does not exist yet.
+	if n := len(m.rv.Threads); n != 0 {
+		t.Errorf("%d threads after pressing Space, want 0", n)
+	}
+
+	// And Space again opens it, without having to find the heading first.
+	m = drive(t, m, letterKey(" "))
+	if fileIn(t, m, "foo.txt").folded {
+		t.Errorf("Space did not open foo.txt again (status %q)", m.status)
+	}
+}
+
+// Enter is the half that acts, and c is the letter for it.
+func TestEnterAndCBothStartAComment(t *testing.T) {
+	for _, k := range []tea.KeyPressMsg{namedKey(tea.KeyEnter), letterKey("c")} {
+		m := newTestModel(t)
+		m = onLine(t, m, "foo.txt", '+', "FOUR")
+		m = drive(t, m, k)
+		if m.compose == nil {
+			t.Errorf("%v did not open the composer (status %q)", k.Code, m.status)
+			continue
+		}
+		if m.compose.line != 4 || m.compose.side != review.SideNew {
+			t.Errorf("%v aimed at %s:%d, want new:4", k.Code, m.compose.side, m.compose.line)
+		}
+	}
+}
+
+// What Space is for still works: a file's heading folds, and a resolved
+// conversation opens and shuts.
+func TestSpaceStillFoldsAndUnfolds(t *testing.T) {
+	m := newTestModel(t)
+	m = cursorTo(t, m, func(r reviewRow) bool { return r.kind == rowFile })
+	path := m.view.pathAt()
+
+	want := !fileIn(t, m, path).folded
+	m = drive(t, m, letterKey(" "))
+	if fileIn(t, m, path).folded != want {
+		t.Errorf("Space did not fold %s", path)
+	}
+	m = drive(t, m, letterKey(" "))
+	if fileIn(t, m, path).folded == want {
+		t.Errorf("Space did not open %s again", path)
+	}
+
+	// A resolved conversation collapses to one line, and Space opens it.
+	m = onLine(t, m, "foo.txt", '+', "TWO")
+	m = comment(t, m, "answer this")
+	id := reviewJSON(t, m.repo).Threads[0].ID
+	m = drive(t, m, letterKey("x")) // resolve it
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowThread && r.thread == id && r.first
+	})
+	if m.view.expanded[id] {
+		t.Fatal("the resolved thread is already open")
+	}
+	m = drive(t, m, letterKey(" "))
+	if !m.view.expanded[id] {
+		t.Error("Space did not open the resolved conversation")
+	}
+}
+
+// An open conversation is part of its file's section, so Space folds the file
+// rather than replying to it — replying is writing, and Space never writes.
+func TestSpaceOnAnOpenCommentDoesNotReply(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "TWO")
+	m = comment(t, m, "why shout?")
+	id := reviewJSON(t, m.repo).Threads[0].ID
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowThread && r.thread == id && r.first
+	})
+
+	m = drive(t, m, letterKey(" "))
+	if m.compose != nil {
+		t.Error("Space opened a reply box on an open conversation")
+	}
+	if !fileIn(t, m, "foo.txt").folded {
+		t.Error("Space on a conversation did not fold the file it is in")
+	}
+
+	// Enter is the one that replies.
+	m = drive(t, m, letterKey(" ")) // open the file again
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowThread && r.thread == id && r.first
+	})
+	m = drive(t, m, namedKey(tea.KeyEnter))
+	if m.compose == nil {
+		t.Fatalf("Enter did not open a reply (status %q)", m.status)
+	}
+	if m.compose.thread != id {
+		t.Errorf("Enter replied to %q, want %q", m.compose.thread, id)
+	}
+}
+
 // A pane too narrow for two columns draws a unified diff without forgetting
 // that it would rather be split: it says so in the title, and splits itself as
 // soon as there is room.

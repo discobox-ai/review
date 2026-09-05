@@ -1072,8 +1072,9 @@ func (m Model) filesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.files.moveTo(0)
 	case key.Matches(msg, m.keys.End):
 		m.files.moveTo(len(m.files.entries) - 1)
-	case key.Matches(msg, m.keys.Right), key.Matches(msg, m.keys.Toggle):
-		// Right and Space both mean "show me this one", and land in the
+	case key.Matches(msg, m.keys.Right), key.Matches(msg, m.keys.Toggle),
+		key.Matches(msg, m.keys.Act):
+		// Right, Space and Enter all mean "show me this one", and land in the
 		// review with the file at the top of the pane.
 		m.view.jumpToFile(m.files.currentPath())
 		return m.setFocus(focusReview)
@@ -1118,7 +1119,8 @@ func (m Model) historyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.history.moveTo(0)
 	case key.Matches(msg, m.keys.End):
 		m.history.moveTo(m.history.rows() - 1)
-	case key.Matches(msg, m.keys.Right), key.Matches(msg, m.keys.Toggle):
+	case key.Matches(msg, m.keys.Right), key.Matches(msg, m.keys.Toggle),
+		key.Matches(msg, m.keys.Act):
 		return m.setFocus(focusReview)
 	case key.Matches(msg, m.keys.ZoomKey):
 		return m.toggleZoom(m.focus)
@@ -1250,7 +1252,9 @@ func (m Model) reviewKey(msg tea.KeyPressMsg, count string) (tea.Model, tea.Cmd)
 	case key.Matches(msg, m.keys.ZoomKey):
 		return m.toggleZoom(m.focus)
 	case key.Matches(msg, m.keys.Toggle):
-		return m.doToggle()
+		return m.doDisclose()
+	case key.Matches(msg, m.keys.Act):
+		return m.doAct()
 	default:
 		return m, nil
 	}
@@ -1318,7 +1322,7 @@ func (m Model) follow() Model {
 // doToggle is Space in the review: it opens or shuts whatever the cursor is
 // on. One verb, three objects — a file's section, a closed conversation, and a
 // line, which has nothing to open and so offers the thing you would want next.
-func (m Model) doToggle() (tea.Model, tea.Cmd) {
+func (m Model) doAct() (tea.Model, tea.Cmd) {
 	r, ok := m.view.row()
 	if !ok {
 		return m, nil
@@ -1340,6 +1344,35 @@ func (m Model) doToggle() (tea.Model, tea.Cmd) {
 	return m.doComment()
 }
 
+// doDisclose opens and shuts what the cursor is on, and makes nothing new.
+//
+// That is the whole of the difference from doAct, and the reason for it: the
+// two were one key, so reading down a file and pressing Space — which folds a
+// file and unfolds a closed conversation — opened a comment box on every line
+// of the diff. A key for looking at things should not start writing them.
+//
+// A file's section is the file, wherever in it you have got to. Space folds it
+// from a line two hundred rows down as readily as from its heading, because
+// having to scroll back up to the heading to put a file away is the sort of
+// errand a reader should not be sent on. The one thing that is not the file is
+// a resolved conversation, which has a disclosure of its own.
+func (m Model) doDisclose() (tea.Model, tea.Cmd) {
+	r, ok := m.view.row()
+	if !ok {
+		return m, nil
+	}
+	if r.kind == rowThread {
+		id := r.thread
+		if t := m.rv.Thread(id); t != nil && t.Resolved {
+			m.view.expanded[id] = !m.view.expanded[id]
+			m.view.build()
+			m.view.clamp()
+			return m, nil
+		}
+	}
+	return m.doFold()
+}
+
 // doFold opens or shuts the file the cursor is in. The rebuild leaves the
 // file's heading at the height it was drawn at, so folding empties the space
 // below the heading and unfolding fills it again, with the heading itself and
@@ -1350,6 +1383,19 @@ func (m Model) doFold() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.folds[f.path] = !f.folded
+	m.rebuild()
+	return m, nil
+}
+
+// foldFile discloses one file by name, for the mouse: the cursor is on the
+// heading that was clicked, but a name says which file was meant however the
+// rows have moved since the button went down.
+func (m Model) foldFile(path string) (tea.Model, tea.Cmd) {
+	i, ok := m.view.byPath[path]
+	if !ok {
+		return m, nil
+	}
+	m.folds[path] = !m.view.files[i].folded
 	m.rebuild()
 	return m, nil
 }

@@ -74,6 +74,18 @@ type mouseState struct {
 	// zoom gesture — is counted here rather than by a selection.
 	titleAt   focusArea
 	titleTime time.Time
+
+	// foldPath is the file whose heading the button went down on, empty when
+	// it went down anywhere else or once the gesture has turned out to be a
+	// drag. A heading folds on the click rather than on the press, because
+	// until the button comes up there is no telling a click on it from a drag
+	// over the file's name.
+	//
+	// Whether the pointer moved is tracked here rather than read off the
+	// selection, which counts a double click as a selection too — and two
+	// quick clicks on a heading are two folds, not a word to copy.
+	foldPath string
+	foldAt   [2]int // the cell the press landed on: line, then column
 }
 
 func newMouseState() *mouseState {
@@ -152,6 +164,7 @@ func (ms *mouseState) clear() {
 		}
 	}
 	ms.live = false
+	ms.foldPath = ""
 }
 
 // titleDouble reports whether a press on a pane's title is the second of a
@@ -407,21 +420,22 @@ func (m Model) mousePress(x, y int, block bool) (tea.Model, tea.Cmd) {
 	mdl, cmd := m.clickRow(f, line)
 	m = mdl
 
-	// The ▾ in front of a file's name is a disclosure marker, so clicking it
-	// discloses. Only the marker: the rest of the heading is the file's name,
-	// which is text somebody may well want to drag over and copy.
-	if f == focusReview && col >= 0 && col < foldHit {
-		if row, is := m.view.row(); is && row.kind == rowFile {
-			m.mouse.clear()
-			mdl, fold := m.doFold()
-			return mdl, tea.Batch(cmd, fold)
-		}
-	}
-
 	m.mouse.clear()
 	sel := m.mouse.bind(f, p)
 	m.mouse.pane, m.mouse.live = f, true
 	sel.MouseDown(line, col, block)
+
+	// The whole of a file's heading discloses it, the way the band across a
+	// section does anywhere else. Which is not settled here: a press on the
+	// heading is either a click, which folds, or the start of a drag over the
+	// file's name, which is text worth copying. Nothing yet says which, so the
+	// heading is only remembered, and mouseRelease folds it if the button came
+	// up without a selection having been made.
+	if f == focusReview {
+		if row, is := m.view.row(); is && row.kind == rowFile {
+			m.mouse.foldPath, m.mouse.foldAt = m.view.pathAt(), [2]int{line, col}
+		}
+	}
 	return m, cmd
 }
 
@@ -483,7 +497,13 @@ func (m Model) mouseDrag(x, y int) (tea.Model, tea.Cmd) {
 		m.scrollPane(f, row-rows+1)
 		row = rows - 1
 	}
-	sel.MouseDrag(p.contentOffset()+row, x-r.x-p.contentX())
+	at := [2]int{p.contentOffset() + row, x - r.x - p.contentX()}
+	if at != m.mouse.foldAt {
+		// The pointer has left the cell it went down on, so this is a drag
+		// over the file's name rather than a click on its heading.
+		m.mouse.foldPath = ""
+	}
+	sel.MouseDrag(at[0], at[1])
 	return m, nil
 }
 
@@ -493,9 +513,21 @@ func (m Model) mouseDrag(x, y int) (tea.Model, tea.Cmd) {
 func (m Model) mouseRelease() (tea.Model, tea.Cmd) {
 	sel, _, ok := m.mouse.dragging()
 	if !ok {
+		m.mouse.foldPath = ""
 		return m, nil
 	}
+	path := m.mouse.foldPath
+	m.mouse.foldPath = ""
+
 	text, copied := sel.MouseUp()
+	// A press on a heading that never left the cell it went down on is a click
+	// on that heading, whatever the selection made of it: disclose the file,
+	// and copy nothing. That last part is what lets the second of two quick
+	// clicks fold the file back rather than select the word under the pointer.
+	if path != "" {
+		m.mouse.clear()
+		return m.foldFile(path)
+	}
 	if !copied {
 		m.mouse.live = false
 		return m, nil

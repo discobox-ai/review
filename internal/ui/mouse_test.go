@@ -680,27 +680,30 @@ func TestEveryReviewRowStartsItsContentInTheSameColumn(t *testing.T) {
 // discloses.
 func TestClickingTheFoldMarkerFolds(t *testing.T) {
 	m := newTestModel(t)
-	row := -1
-	for i := m.view.offset; i < len(m.view.rows) && i < m.view.offset+m.view.bodyRows(); i++ {
-		if m.view.rows[i].kind == rowFile {
-			row = i - m.view.offset
-			break
-		}
-	}
-	if row < 0 {
-		t.Fatal("no file heading on screen")
-	}
-	path := m.view.files[m.view.rows[m.view.offset+row].file].path
+	row, path := headingOnScreen(t, m)
 
 	x, y := contentPoint(t, m, focusReview, row, 0)
-	m = drive(t, m, pressAt(x, y))
+	m = drive(t, m, pressAt(x, y), releaseAt(x, y))
 	if !fileIn(t, m, path).folded {
 		t.Errorf("clicking the marker on %s did not fold it", path)
 	}
-	m = drive(t, m, pressAt(x, y))
+	m = drive(t, m, pressAt(x, y), releaseAt(x, y))
 	if fileIn(t, m, path).folded {
 		t.Errorf("clicking it again did not open %s", path)
 	}
+}
+
+// headingOnScreen is the first file heading the review pane is drawing, as a
+// row of the screen and the file it names.
+func headingOnScreen(t *testing.T, m Model) (int, string) {
+	t.Helper()
+	for i := m.view.offset; i < len(m.view.rows) && i < m.view.offset+m.view.bodyRows(); i++ {
+		if m.view.rows[i].kind == rowFile {
+			return i - m.view.offset, m.view.files[m.view.rows[i].file].path
+		}
+	}
+	t.Fatalf("no file heading on screen:\n%s", plain(m))
+	return 0, ""
 }
 
 // The word naming the way the diff is drawn is the one part of the pane's
@@ -793,27 +796,43 @@ func TestClickingAHalfPicksTheSide(t *testing.T) {
 	}
 }
 
-// The rest of the heading is the file's name, which is text somebody may well
-// want to drag over and copy — so it is not a fold button.
-func TestClickingTheFileNameDoesNotFold(t *testing.T) {
+// The whole heading discloses the file, not only the marker in front of it:
+// the band is the thing you are pointing at.
+func TestClickingAnywhereOnTheHeadingFolds(t *testing.T) {
 	m := newTestModel(t)
-	row := -1
-	for i := m.view.offset; i < len(m.view.rows) && i < m.view.offset+m.view.bodyRows(); i++ {
-		if m.view.rows[i].kind == rowFile {
-			row = i - m.view.offset
-			break
+	row, path := headingOnScreen(t, m)
+
+	for _, col := range []int{0, foldHit + 1, 12} {
+		want := !fileIn(t, m, path).folded
+		x, y := contentPoint(t, m, focusReview, row, col)
+		m = drive(t, m, pressAt(x, y), releaseAt(x, y))
+		if got := fileIn(t, m, path).folded; got != want {
+			t.Errorf("clicking column %d of %s left folded=%v, want %v", col, path, got, want)
 		}
 	}
-	if row < 0 {
-		t.Fatal("no file heading on screen")
-	}
-	path := m.view.files[m.view.rows[m.view.offset+row].file].path
+}
+
+// Dragging over the heading is not clicking it. The file's name is text
+// somebody may well want to copy, and a drag that took any of it copies rather
+// than folding — which is what lets the whole band be a button at all.
+func TestDraggingOverTheHeadingCopiesInsteadOfFolding(t *testing.T) {
+	m := newTestModel(t)
+	clip := captureClipboard(t)
+	row, path := headingOnScreen(t, m)
 	before := fileIn(t, m, path).folded
 
-	x, y := contentPoint(t, m, focusReview, row, foldHit+1)
-	m = drive(t, m, pressAt(x, y))
+	x, y := contentPoint(t, m, focusReview, row, 0)
+	end, _ := contentPoint(t, m, focusReview, row, len(path)+foldHit-1)
+	m = drive(t, m, pressAt(x, y), dragTo(end, y), releaseAt(end, y))
+
 	if fileIn(t, m, path).folded != before {
-		t.Error("clicking the file's name folded it")
+		t.Error("dragging over the heading folded the file")
+	}
+	if !m.mouse.hasSelection() {
+		t.Fatal("the drag left no selection")
+	}
+	if got := copied(t, clip.String()); !strings.Contains(got, path) {
+		t.Errorf("copied %q, want it to hold %q", got, path)
 	}
 }
 

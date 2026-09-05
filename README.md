@@ -206,9 +206,16 @@ that choice sticks across rescans: you were looking at it more recently than
 the rule was. Deciding about a file — approving it, or taking that back — hands
 its fold back to the rule, so a file signed off still goes away.
 
-Clicking the `▾` in front of a file's name folds it too — it is a disclosure
-marker, so it discloses. Only the marker: the rest of the heading is the file's
-name, which is text somebody may well want to drag over and copy.
+Clicking a file's heading folds it too — anywhere along the band, not only the
+`▾` in front of the name. The whole thing is the disclosure control, which is
+what a band across a section reads as.
+
+It folds on the **click** rather than on the press, because the heading carries
+the file's name and that is text somebody may well want to drag over and copy.
+A press that stays in the cell it went down on is a click and folds; one that
+moves off it is a drag and copies. Two quick clicks are two folds, so a file
+you shut by mistake opens again on the next click rather than selecting the
+word under the pointer.
 
 **`F` folds every file**, turning a long review into a list of its headings,
 and folds them all open again once they are shut. It is one key rather than
@@ -686,8 +693,17 @@ different objects, not a letter meaning two unrelated things.
 | `V` | select a run of lines | `R` | rescan (also `F5`) |
 | `-` | less diff context | `=` | more diff context |
 
-`Space` opens whatever the cursor is on. `Ctrl-C` or `q` quits, `F1` or `?`
-shows the keys.
+`Space` and `Enter` are the two halves of one verb. **`Space` discloses** and
+never writes anything: it folds the file you are reading — from a line two
+hundred rows down as readily as from its heading, since having to scroll back
+up to put a file away is an errand nobody should be sent on — and opens it
+again. On a resolved conversation it opens that instead, which is the one thing
+in a file's section that is not the file. **`Enter` acts**: it comments on a
+line, replies to a conversation, folds a file. So reading down a diff and
+pressing `Space` puts the file away, and does not start remarks you had not
+asked to write; `c` or `Enter` is how a comment begins.
+
+`Ctrl-C` or `q` quits, `F1` or `?` shows the keys.
 
 **No letter command wears Ctrl.** The only chords bound at all are `Ctrl-C`
 and `Ctrl-Q` to quit, and `Ctrl-S` to post the comment being written. The box

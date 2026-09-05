@@ -38,6 +38,7 @@ func commandBindings(m keyMap) []struct {
 		{"help", m.HelpKey},
 		{"quit", m.QuitKey},
 		{"open or fold", m.Toggle},
+		{"act on this", m.Act},
 		{"visual select", m.Visual},
 		{"zoom", m.ZoomKey},
 		{"next hunk", m.NextHunk},
@@ -55,7 +56,8 @@ func commandBindings(m keyMap) []struct {
 //
 // A key may act on whatever is under the cursor — Space opens a file in the
 // list, folds one in the review, and unfolds a closed comment — but that is
-// one verb reaching different objects. Two unrelated commands sharing a letter
+// one verb reaching different objects. Space discloses and never writes;
+// Enter is the one that acts, and on a line of the diff that means a comment. Two unrelated commands sharing a letter
 // is the thing this rules out, and it is easy to reintroduce by accident: a
 // letter looks free in the pane you are working on while already being spoken
 // for somewhere else.
@@ -97,8 +99,8 @@ func TestCommandsDoNotCollideWithMovement(t *testing.T) {
 	}
 	for _, b := range commandBindings(m) {
 		for _, k := range b.Keys() {
-			// Enter doubles as Space, which is deliberate: it is the same
-			// gesture, not a movement.
+			// Enter acts on the row the cursor is on, which is a command
+			// rather than a movement — Space is its milder half.
 			if k == "enter" {
 				continue
 			}

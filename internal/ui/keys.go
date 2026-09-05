@@ -18,6 +18,12 @@ import "charm.land/bubbles/v2/key"
 // as a letter meaning two unrelated things; TestNoTwoCommandsShareAKey keeps
 // the difference.
 //
+// Space and Enter are the two halves of that verb. Space discloses — it folds
+// the file you are reading, from wherever in it you have got to, and opens a
+// resolved conversation — and Enter acts, which on a line of the diff means
+// writing a remark about it. They were one key, and the cost was that reading
+// down a file with the fold key opened a comment box on every line.
+//
 // Inside the comment composer every letter is text, so none of the commands
 // are reachable from it: Ctrl-Enter posts what was written, Esc throws it away.
 //
@@ -59,6 +65,7 @@ type keyMap struct {
 	HelpKey     key.Binding
 	QuitKey     key.Binding
 	Toggle      key.Binding
+	Act         key.Binding
 	Visual      key.Binding
 	ZoomKey     key.Binding
 
@@ -155,7 +162,14 @@ func newKeyMap() keyMap {
 		// The space bar is named rather than spelled: a key reports the text
 		// it produced, and a bare space would be indistinguishable from one
 		// typed into a field.
-		Toggle:  key.NewBinding(key.WithKeys("space", "enter"), key.WithHelp("Space", "open / fold")),
+		Toggle: key.NewBinding(key.WithKeys("space"), key.WithHelp("Space", "open / fold")),
+		// Enter acts on what the cursor is on; Space only discloses it. The
+		// two were one key, and on a line of the diff that key opened a
+		// comment box — so reading down a file with Space, which discloses
+		// everything else, kept starting remarks nobody had asked to write.
+		// Space is the safe one now: it opens and shuts what is already there
+		// and never makes anything new.
+		Act:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("Enter", "act on this")),
 		Visual:  key.NewBinding(key.WithKeys("V"), key.WithHelp("V", "visual select")),
 		ZoomKey: key.NewBinding(key.WithKeys("z"), key.WithHelp("z", "zoom the pane")),
 
