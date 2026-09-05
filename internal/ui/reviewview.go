@@ -187,29 +187,30 @@ func (f *reviewFile) buildRows(split bool) {
 	}
 }
 
-// lineRows maps a line number on each side of a diff to the row that draws it,
-// which is how a comment finds the line it was written against. A split row
-// draws two lines, and both find their way to it.
-func (f *reviewFile) lineRows() (newAt, oldAt map[int]int) {
+// lineIndex maps a line number on each side of a diff to the index of the diff
+// line carrying it, which is how a comment finds the line it was written
+// against.
+//
+// It asks nothing about how the file is drawn. A comment belongs to a line, and
+// which row that line is drawn on — or whether it shares one with the line it
+// replaced — is a question for whoever is drawing. Keying a remark by the row
+// instead was the bug that made a zoom or a resize move every conversation in
+// the file: two places worked out the layout separately and only agreed while
+// the diff was unified.
+func (f *reviewFile) lineIndex() (newAt, oldAt map[int]int) {
 	newAt, oldAt = map[int]int{}, map[int]int{}
-	for row := range f.rows {
-		for _, i := range []int{f.rows[row].old, f.rows[row].new} {
-			if i < 0 || i >= len(f.lines) {
-				continue
+	for i, l := range f.lines {
+		if !isCodeLine(l.Kind) {
+			continue
+		}
+		if l.New > 0 {
+			if _, dup := newAt[l.New]; !dup {
+				newAt[l.New] = i
 			}
-			l := f.lines[i]
-			if !isCodeLine(l.Kind) {
-				continue
-			}
-			if l.New > 0 {
-				if _, dup := newAt[l.New]; !dup {
-					newAt[l.New] = row
-				}
-			}
-			if l.Old > 0 {
-				if _, dup := oldAt[l.Old]; !dup {
-					oldAt[l.Old] = row
-				}
+		}
+		if l.Old > 0 {
+			if _, dup := oldAt[l.Old]; !dup {
+				oldAt[l.Old] = i
 			}
 		}
 	}
@@ -226,6 +227,38 @@ func (f *reviewFile) primary(row int) int {
 		return r.new
 	}
 	return f.rows[row].old
+}
+
+// side is the diff line on one side of a row, or the row's primary line when
+// that side is empty — an insertion has nothing on the left of it, and a
+// cursor asking for the left of one is still on the row.
+func (f *reviewFile) side(row int, old bool) int {
+	if row < 0 || row >= len(f.rows) {
+		return -1
+	}
+	r := f.rows[row]
+	i := r.new
+	if old {
+		i = r.old
+	}
+	if i < 0 {
+		return f.primary(row)
+	}
+	return i
+}
+
+// liveSide is the diff line the cursor is on within a row: the half it is
+// sitting in when the view is split, and the row's primary line when it is
+// not — a unified row draws one line, so there is no side to be on.
+//
+// It is the pane's answer to "which line is this", and everything that acts on
+// the line under the cursor goes through it, so that what a key does is what
+// the cursor bar says it will.
+func (v *reviewView) liveSide(f *reviewFile, row int) int {
+	if !v.splitting() {
+		return f.primary(row)
+	}
+	return f.side(row, v.onOld)
 }
 
 // rowLine is the diff line a row is about.
@@ -306,6 +339,27 @@ type reviewView struct {
 	// forty characters is worse than one of eighty.
 	split bool
 
+	// builtAt is the pane width the current rows were laid out for. A comment
+	// is wrapped to the pane and whether the diff is split at all is decided
+	// by it, so rows built at one width cannot be drawn at another: see
+	// reflow, and the two places that change the width without going anywhere
+	// near the rows.
+	builtAt int
+
+	// asked records that the reader chose the view themselves, which is what
+	// makes a pane too narrow to honour it worth explaining. The default is
+	// split, and a default that quietly does the best it can with the room it
+	// has needs no note; a request that cannot be met does.
+	asked bool
+
+	// onOld is the half of a split row the cursor is in: the left, where the
+	// line the change took away is drawn. A unified diff gives every line a
+	// row of its own, so the cursor picks a side by being on one; a split row
+	// draws two lines at once and needs telling which of them it is on. It
+	// stays set while the view is unified, so that reading a diff one way and
+	// then the other does not quietly move the cursor across.
+	onOld bool
+
 	// hidden counts the files left out because they are done with. They are
 	// still part of the review, so the tally still counts them; they are just
 	// not on the screen.
@@ -321,7 +375,15 @@ type reviewView struct {
 }
 
 func newReviewView() *reviewView {
-	return &reviewView{anchor: -1, expanded: map[string]bool{}, byPath: map[string]int{}}
+	// Split by default: lining up what a line was against what it became is
+	// what most people want to see most of the time, and a change that is an
+	// edit rather than an insertion reads far better that way. A pane too
+	// narrow for two columns still draws a unified diff, so this is a
+	// preference rather than a demand — see splitting.
+	return &reviewView{
+		split: true, anchor: -1,
+		expanded: map[string]bool{}, byPath: map[string]int{},
+	}
 }
 
 // setFiles replaces the diff the pane is showing, keeping the reader's place
@@ -419,10 +481,17 @@ func (v *reviewView) restore(a place) {
 const foldHit = 2
 
 // minSplitWidth is the narrowest a pane can be and still be worth splitting.
-// It leaves each side about thirty-six columns of code once the numbers and
-// the markers have taken theirs — under that a diff has to be scrolled
-// sideways to be read twice, which is worse than reading it once.
-const minSplitWidth = 90
+// It leaves each side about thirty columns of code once the numbers and the
+// markers have taken theirs — under that a diff has to be scrolled sideways to
+// be read twice, which is worse than reading it once.
+//
+// It is measured against the pane rather than the window, and the list and the
+// history take about forty-seven columns before this one gets any: eighty here
+// is a terminal around a hundred and thirty. That is the number this is chosen
+// against, since a review opens split and a threshold most terminals fall
+// short of would be a default nobody saw. z zooms the pane over the whole
+// window, which is the other way to find the room.
+const minSplitWidth = 80
 
 // splitting reports whether the pane is drawing side by side: asked for, and
 // wide enough to be worth it.
@@ -430,6 +499,33 @@ const minSplitWidth = 90
 // cannot answer differently either side of a scrollbar appearing — the rows
 // and the comments hung off them have to agree about which mode they are in.
 func (v *reviewView) splitting() bool { return v.split && v.width >= minSplitWidth }
+
+// onOldLine reports whether the cursor is really on the old side of the diff:
+// asked for, and on a row that has a removed line for it to be on.
+//
+// It is not the same question as onOld. A row with nothing on its left — a pure
+// insertion — draws the cursor on the right whatever was asked, and a row of
+// context draws one line in both halves and anchors a remark to the new side
+// either way. Naming the old side on those would name a side the next key will
+// not act on, which is the one thing this label is for.
+func (v *reviewView) onOldLine() bool {
+	if !v.onOld || !v.splitting() {
+		return false
+	}
+	_, l, ok := v.line()
+	return ok && l.Kind == '-'
+}
+
+// pickSide puts the cursor in the half of a split row a column falls in, x
+// being measured from the pane's left edge. A unified diff has no halves to
+// choose between, so it is left alone.
+func (v *reviewView) pickSide(x int) {
+	if !v.splitting() {
+		return
+	}
+	left, _ := v.halvesOf(v.rowW())
+	v.onOld = x < left
+}
 
 // halvesOf is where a split row's two sides fall in a row of a given width:
 // the columns each gets, with one between them for the rule.
@@ -456,6 +552,7 @@ func (v *reviewView) build() {
 	rows := make([]reviewRow, 0, 256)
 	if len(v.files) == 0 {
 		v.rows = append(rows, reviewRow{kind: rowEmpty, file: -1, line: -1})
+		v.builtAt = v.width
 		return
 	}
 	wrapAt := max(v.contentWidth()-threadIndent-2, 16)
@@ -484,10 +581,23 @@ func (v *reviewView) build() {
 			rows = append(rows, reviewRow{
 				kind: rowDiff, file: fi, line: i, marked: f.marked(f.primary(i)),
 			})
-			for _, t := range f.threads[i] {
-				rows = append(rows, v.threadRows(t, fi, i, wrapAt, false)...)
-				if mine && v.draft.thread == t.ID {
-					rows, placed = append(rows, v.draftRows(fi)...), true
+			// The lines this row draws, in the order it draws them. A split
+			// row draws two and either may have been commented on. A row that
+			// draws one line in both halves — a line neither side touched —
+			// must not draw its conversation twice with it.
+			sides := [2]int{f.rows[i].old, f.rows[i].new}
+			if sides[0] == sides[1] {
+				sides[1] = -1
+			}
+			for _, at := range sides {
+				if at < 0 {
+					continue
+				}
+				for _, t := range f.threads[at] {
+					rows = append(rows, v.threadRows(t, fi, i, wrapAt, false)...)
+					if mine && v.draft.thread == t.ID {
+						rows, placed = append(rows, v.draftRows(fi)...), true
+					}
 				}
 			}
 			if mine && i == draftRow {
@@ -502,6 +612,101 @@ func (v *reviewView) build() {
 		rows = append(rows, reviewRow{kind: rowGap, file: fi, line: -1})
 	}
 	v.rows = rows
+	v.builtAt = v.width
+}
+
+// spot is where the reader is, told in terms that survive the rows being laid
+// out again: a file, and the line of it under the cursor. Row numbers do not
+// survive, which is the whole difficulty — the two views draw the same file in
+// different numbers of rows, so a cursor left holding its old number lands
+// somewhere else, often in another file.
+type spot struct {
+	path string
+	line int  // index into that file's diff lines, -1 when the cursor is elsewhere
+	old  bool // that line is numbered on the base's side
+	side bool // that line settles which side the cursor is on; a context line does not
+	head bool // the cursor is on the file's own heading
+
+	// thread is the conversation the cursor is in. A remark is not a line, so
+	// it is found again by its own name rather than by a row number — landing
+	// on a different thread would put r on a remark nobody was reading.
+	thread string
+}
+
+// mark remembers where the reader is, for reflow to put them back.
+//
+// It must be taken before anything moves the pane's width. cursorLine asks
+// which half of a row the cursor is in, and that question is settled by the
+// width: asked after the width has moved it answers with the new mode about
+// the old rows, and for split becoming unified that quietly slides the cursor
+// off a removed line onto the addition that replaced it.
+func (v *reviewView) mark() spot {
+	s := spot{line: -1}
+	r, ok := v.row()
+	if !ok || r.file < 0 || r.file >= len(v.files) {
+		return s
+	}
+	f := v.files[r.file]
+	s.path = f.path
+	s.head = r.kind == rowFile
+	s.thread = r.thread
+	if r.kind == rowDiff {
+		_, s.line, s.old = v.cursorLine()
+		// A line neither side touched is drawn in both halves, so it cannot
+		// say which half the cursor is in. Only a line that belongs to one
+		// side settles it; anything else must leave the reader's own choice
+		// standing.
+		if s.line >= 0 && s.line < len(f.lines) {
+			s.side = f.lines[s.line].Kind == '-' || f.lines[s.line].Kind == '+'
+		}
+	}
+	return s
+}
+
+// reflow lays the rows out again when the pane has changed width since they
+// were built, and puts the reader back on the line they were on. It does
+// nothing when the width has not moved.
+//
+// The width is set by layout, which runs on a great deal more than a resize —
+// taking the focus moves it, because the left column gives up its space on a
+// narrow window. Nothing there knows about rows, and the rows decide whether
+// the diff is split, so without this a Tab on an eighty-column terminal draws
+// split rows through the unified renderer: every removal that had an addition
+// paired with it simply vanishes.
+func (v *reviewView) reflow(s spot) {
+	if v.width == v.builtAt {
+		return
+	}
+	v.build()
+	switch {
+	case s.thread != "":
+		// A conversation is found by its name. Its row number means nothing
+		// once the rows have been laid out again, and the row that inherits
+		// the number may well be somebody else's remark.
+		if i, ok := v.threadRowAt(s.thread); ok {
+			v.reveal(i)
+			return
+		}
+	case s.line >= 0:
+		// The side comes back with the line, so that a relay across the split
+		// threshold does not move the cursor from a removal to its
+		// replacement — a different line, on a different side. A line that
+		// cannot settle the question leaves the reader's choice alone.
+		if s.side {
+			v.onOld = s.old
+		}
+		if v.goToDiffLine(s.path, s.line) {
+			return
+		}
+	case s.head && s.path != "":
+		// Arriving at a file puts its heading at the top of the pane, and the
+		// relay that follows must not undo that: → in the list jumps to the
+		// file before the focus moves, which is what changes the width.
+		if v.jumpToFile(s.path) {
+			return
+		}
+	}
+	v.clamp()
 }
 
 // draftRows are the rows the box being written takes up. They carry only an
@@ -666,26 +871,34 @@ func (v *reviewView) file() (*reviewFile, bool) {
 }
 
 // line is the line of diff under the cursor, and false when the cursor is on
-// something else — a file header, a comment.
+// something else — a file header, a comment. On a split row it is the line in
+// the half the cursor is in, which is the one the cursor bar is drawn under.
 func (v *reviewView) line() (*reviewFile, git.DiffLine, bool) {
 	r, ok := v.row()
 	if !ok || r.kind != rowDiff || r.file < 0 {
 		return nil, git.DiffLine{}, false
 	}
 	f := v.files[r.file]
-	l, ok := f.rowLine(r.line)
-	if !ok {
+	at := v.liveSide(f, r.line)
+	if at < 0 || at >= len(f.lines) {
 		return nil, git.DiffLine{}, false
 	}
-	return f, l, true
+	return f, f.lines[at], true
 }
 
 // commentTarget is what a comment would be written against: the line under the
 // cursor, or the run of lines a V selection covers.
 //
 // It reports the line the remark is anchored to, how many lines it covers, and
-// the index of the last of them — which is where the box, and later the
-// thread, is drawn, since a remark reads as being about what came above it.
+// the index into the file's diff lines of the last of them — which is where the
+// box, and later the thread, is drawn, since a remark reads as being about what
+// came above it. A line index rather than a row index, because the rows are
+// rebuilt whenever the pane changes shape and a diff that splits itself
+// half way through a comment being written must not take the box with it.
+//
+// Each row is read at the side the cursor is on, so a split row anchors the
+// remark to the half the cursor bar is drawn under rather than to whichever of
+// its two lines the pane happens to think of first.
 //
 // A selection can run over both sides of a diff at once — the lines a change
 // took away and the ones it put in their place — but a remark has to be
@@ -710,16 +923,20 @@ func (v *reviewView) commentTarget() (f *reviewFile, first git.DiffLine, span, l
 		} else if v.files[r.file] != f {
 			continue // a selection never spans two files
 		}
-		l := f.lines[r.line]
+		at := v.liveSide(f, r.line)
+		if at < 0 || at >= len(f.lines) {
+			continue
+		}
+		l := f.lines[at]
 		if !isCodeLine(l.Kind) {
 			continue
 		}
 		if !found {
-			first, lastLine, last, found = l, l, r.line, true
+			first, lastLine, last, found = l, l, at, true
 			continue
 		}
 		if sameSide(l, first) {
-			lastLine, last = l, r.line
+			lastLine, last = l, at
 		}
 	}
 	if !found {
@@ -837,8 +1054,8 @@ func (v *reviewView) lineRow(fi, want int) (row int, exact bool, ok bool) {
 		if r.kind != rowDiff || r.file != fi || r.line < 0 {
 			continue
 		}
-		l := v.files[fi].lines[r.line]
-		if l.New <= 0 || !isCodeLine(l.Kind) {
+		l, ok := v.files[fi].rowLine(r.line)
+		if !ok || l.New <= 0 || !isCodeLine(l.Kind) {
 			continue
 		}
 		if l.New == want {
@@ -890,6 +1107,43 @@ func (v *reviewView) fileRow(path string) (int, bool) {
 	return 0, false
 }
 
+// cursorLine is the line of diff the cursor is on, as a file and an index into
+// that file's lines, together with which side of the diff it is numbered on.
+// It is what a change of view has to preserve, and is told in terms that
+// survive the rows being built again underneath it.
+//
+// The index is -1 when the cursor is not on a line at all — a heading, a
+// comment — which is a place the pane keeps by other means.
+func (v *reviewView) cursorLine() (path string, at int, old bool) {
+	path = v.pathAt()
+	r, ok := v.row()
+	if !ok || r.kind != rowDiff || r.file < 0 {
+		return path, -1, false
+	}
+	f := v.files[r.file]
+	at = v.liveSide(f, r.line)
+	if at < 0 || at >= len(f.lines) {
+		return path, -1, false
+	}
+	return path, at, f.lines[at].Kind == '-'
+}
+
+// goToDiffLine puts the cursor on the row drawing one line of one file, and
+// reports whether there was one.
+//
+// It reveals rather than tops: a line already on the screen stays where it is.
+// Changing how a diff is drawn should not scroll it, and landing the line hard
+// against the top would throw away everything it follows — which in a diff is
+// half of what a line means.
+func (v *reviewView) goToDiffLine(path string, at int) bool {
+	i, ok := v.diffRowAt(path, at)
+	if !ok {
+		return false
+	}
+	v.reveal(i)
+	return true
+}
+
 // pathAt is the file the cursor is in, for keeping the list beside the pane in
 // step with what is being read.
 func (v *reviewView) pathAt() string {
@@ -923,14 +1177,21 @@ func (v *reviewView) threadRowAt(id string) (int, bool) {
 	return 0, false
 }
 
-// diffRowAt is the row drawing one line of one file.
+// diffRowAt is the row drawing one line of one file. The line is an index into
+// the file's diff lines; the row it is drawn on is a split view's business, and
+// is looked up rather than assumed to be the same number.
 func (v *reviewView) diffRowAt(path string, line int) (int, bool) {
 	fi, ok := v.byPath[path]
 	if !ok {
 		return 0, false
 	}
+	f := v.files[fi]
+	if line < 0 || line >= len(f.rowAt) {
+		return 0, false
+	}
+	want := f.rowAt[line]
 	for i, r := range v.rows {
-		if r.kind == rowDiff && r.file == fi && r.line == line {
+		if r.kind == rowDiff && r.file == fi && r.line == want {
 			return i, true
 		}
 	}
@@ -1067,21 +1328,70 @@ func (v *reviewView) scrollH(delta int) bool {
 // Drawing
 // ---------------------------------------------------------------------------
 
+// titleLabel is the left of the pane's title, and where in it the word naming
+// the way the diff is drawn falls: `unified` or `split`.
+//
+// That word is the one part of the title that names a choice, so it is the one
+// part that offers to change it — the same rule the top bar follows with the
+// branch and the base. It is named even when it is the ordinary one, because a
+// mode nothing ever mentions is a mode nobody finds; saying `unified` is how
+// the reader learns there is anything else.
+//
+// The label and the span come out of one function because they are one
+// arithmetic, for the same reason branchBar works that way: worked out in two
+// places they drift apart the first time either changes.
+//
+// The columns are counted from the pane's left edge and include the one cell
+// the title style pads with.
+func (v *reviewView) titleLabel() (label string, modeX, modeW int) {
+	label = "Review"
+	if v.label != "" {
+		label = v.label
+	}
+	label += " · "
+
+	mode := "unified"
+	if v.splitting() {
+		mode = "split"
+	}
+	modeX, modeW = width(label)+1, width(mode)
+	label += mode
+
+	switch {
+	case v.asked && v.split && !v.splitting():
+		// Asked for and remembered, but not drawn. The status line says so at
+		// the moment of asking and is gone by the next keystroke; this stays,
+		// because otherwise the pane looks as though it ignored the request.
+		label += " · too narrow to split"
+	case v.onOldLine():
+		// Which half the cursor is in is not always visible: a row with
+		// nothing on the left draws the bar on the right whichever side is
+		// live, so the title says which side the next key will act on.
+		label += " · old side"
+	}
+	if v.hidden > 0 {
+		label += " · " + itoa(v.hidden) + " hidden"
+	}
+	return label, modeX, modeW
+}
+
+// modeHit reports whether a column of the pane's title is on the word naming
+// the way the diff is drawn. A word that ran off the end of a narrow title is
+// not offered, the same care branchBar takes: nothing invisible is clickable.
+func (v *reviewView) modeHit(x int) bool {
+	_, at, w := v.titleLabel()
+	if at+w > v.width-1 {
+		return false
+	}
+	return x >= at && x < at+w
+}
+
 func (v *reviewView) view(st *styles, focused bool, rv *review.State) string {
 	titleStyle := st.titleDiff
 	if !focused {
 		titleStyle = st.titleDim
 	}
-	label := "Review"
-	if v.label != "" {
-		label = v.label
-	}
-	if v.splitting() {
-		label += " · split"
-	}
-	if v.hidden > 0 {
-		label += " · " + itoa(v.hidden) + " hidden"
-	}
+	label, _, _ := v.titleLabel()
 	right := v.tally(rv)
 	if v.hoffset > 0 {
 		right = "col " + itoa(v.hoffset+1) + "   " + right
@@ -1366,16 +1676,23 @@ func collapsedThread(r reviewRow) bool {
 // A hunk header belongs to neither side, so it runs the whole width — and so
 // does the rule between the two, which is drawn rather than left as a gap so
 // that a blank half reads as "nothing here" rather than as the end of the row.
+//
+// The cursor bar goes on the half the cursor is in rather than across both,
+// because on a row that changed a line the two halves are two different lines
+// and a key is about to act on one of them. Where the row draws the same line
+// twice — a line neither side touched — both halves light, since there is no
+// choice being made and a bar down half an unchanged line would look like one.
 func (v *reviewView) renderSplit(r reviewRow, st *styles, rowW int, cursor, selected bool) string {
 	f := v.files[r.file]
 	if l, ok := f.rowLine(r.line); ok && !isCodeLine(l.Kind) {
 		return renderDiffRow(v.diffRowFor(r, st, rowW, cursor, selected))
 	}
 	ref := f.rows[r.line]
+	live := v.liveSide(f, r.line)
 	leftW, rightW := v.halvesOf(rowW)
-	return v.half(f, ref.old, st, leftW, cursor, selected) +
+	return v.half(f, ref.old, st, leftW, cursor && ref.old == live, selected) +
 		st.commentRule.Render("│") +
-		v.half(f, ref.new, st, rightW, cursor, selected)
+		v.half(f, ref.new, st, rightW, cursor && ref.new == live, selected)
 }
 
 // half draws one side of a split row, or an empty column where the change has

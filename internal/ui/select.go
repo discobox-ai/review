@@ -1,5 +1,7 @@
 package ui
 
+import "github.com/charmbracelet/x/ansi"
+
 // The panes' side of the mouse selection: what each one calls content, and
 // where on screen it starts. See [selectable] for what the two coordinate
 // spaces are and why they differ.
@@ -45,6 +47,16 @@ func (s reviewSel) contentRow(line int) string {
 		return ""
 	}
 	if r := s.v.rows[line]; r.kind == rowDiff {
+		// A split row is copied as it is drawn, chrome and all past the first
+		// half: the two halves are two different lines, and rendering the row
+		// the unified way would hand back the added line while the highlight
+		// was over the removed one. The right half's own numbers come with it
+		// because they are on the screen at those columns, and what this pane
+		// promises is that what you dragged over is what you get.
+		if s.v.splitting() {
+			row := s.v.renderSplit(r, s.st, s.v.rowW(), false, false)
+			return fitANSI(ansi.TruncateLeft(row, s.contentX(), ""), s.contentWidth())
+		}
 		return renderDiffContent(
 			s.v.diffRowFor(r, s.st, s.v.rowW(), false, false), s.contentWidth())
 	}

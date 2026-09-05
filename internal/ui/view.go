@@ -23,6 +23,13 @@ func (m *Model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
+	// Whatever shape the window takes, the review's rows were laid out for
+	// whatever width it had before. Deferred rather than written at the end
+	// because the zoomed window leaves by its own path, and the one that gets
+	// forgotten is the one that draws nonsense. The mark is taken here, before
+	// the width moves, for the reason mark itself gives.
+	keep := m.view.mark()
+	defer func() { m.view.reflow(keep) }()
 	m.rects = [focusCount]rect{}
 	body := max(m.height-2, 4) // branch bar and status bar
 
@@ -443,9 +450,19 @@ func (m Model) hints() string {
 		}
 		return "r reply · x resolve · X delete the whole thread · t next open"
 	case ok && r.kind == rowFile:
-		return "a approve · Space fold · F fold them all · ] next file · ? keys"
+		return "a approve · Space fold · F fold them all · " + m.splitHint() + " · ] next file · ? keys"
 	}
-	hint := "c comment · a approve the file · n/p hunk · t open comments · ] file · -/= context"
+	// The hints run out of room before the scoreboard does, and what runs off
+	// the end is the tail — so the ones worth keeping are said early.
+	hint := "c comment · a approve the file · " + m.splitHint() +
+		" · n/p hunk · t open comments · ] file · -/= context"
+	if m.view.splitting() {
+		// Crossing a split row only means anything while there are two sides
+		// to cross between, so it is offered there and nowhere else. This one
+		// does ask what was drawn rather than what was asked for.
+		hint = "c comment · a approve the file · " + m.splitHint() +
+			" · S other side · n/p hunk · t open comments · ] file"
+	}
 	if m.commit != "" {
 		hint = "Reading one commit · c comments on the review · Alt-3 then ↑ for all of it"
 	}
@@ -453,6 +470,21 @@ func (m Model) hints() string {
 		hint = "← files · " + hint
 	}
 	return hint
+}
+
+// splitHint names what s would do next rather than what the pane is doing now.
+// A key's hint is an offer, and "s split" while already split reads as a
+// description of the screen instead of as something to press.
+//
+// It follows the preference rather than what the pane managed to draw. The two
+// differ on a pane too narrow to split, and there "s split" would be an offer
+// to do the thing already asked for: pressing it turns the preference off,
+// reports "Unified diff", and changes nothing on the screen.
+func (m Model) splitHint() string {
+	if m.view.split {
+		return "s unify"
+	}
+	return "s split"
 }
 
 func helpText() string {
@@ -470,7 +502,9 @@ func helpText() string {
 		"    a  approve this file      A  approve every file",
 		"    F  fold every file, or open them all again",
 		"    f  hide the files that are done with, and show them again",
-		"    s  split the diff into its two sides, or unify it again",
+		"    s  unify the diff, or split it into its two sides again",
+		"       (it opens split; clicking the word in the title does the same)",
+		"    S  cross a split row, to the line the change took away",
 		"    c  comment on this line   r  reply to this comment",
 		"    x  resolve / reopen it    X  delete a comment",
 		"",

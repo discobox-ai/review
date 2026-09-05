@@ -44,6 +44,7 @@ type keyMap struct {
 	FoldAll     key.Binding
 	HideDone    key.Binding
 	SplitKey    key.Binding
+	SideKey     key.Binding
 	CommentKey  key.Binding
 	ReplyKey    key.Binding
 	ResolveKey  key.Binding
@@ -127,7 +128,14 @@ func newKeyMap() keyMap {
 		HideDone: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "hide the files that are done with")),
 		// s stands the two sides of a change beside each other. Neither view
 		// is right for everything, so it is a key rather than a setting.
-		SplitKey:   key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "split the diff, or unify it")),
+		SplitKey: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "split the diff, or unify it")),
+		// S moves the cursor across a split row, between the line the change
+		// took away and the line it put there. It is the one thing a unified
+		// diff does for free — every line has a row, so the cursor picks a
+		// side by being on one — and the one thing a split row has to be told.
+		// Not h and l, which run the code sideways: a split half is narrow, so
+		// that is wanted more here than anywhere, not less.
+		SideKey:    key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "the other side of a split row")),
 		CommentKey: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "comment on this line")),
 		ReplyKey:   key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reply")),
 		ResolveKey: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "resolve / reopen")),

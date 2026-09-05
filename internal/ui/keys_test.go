@@ -23,6 +23,7 @@ func commandBindings(m keyMap) []struct {
 		{"fold everything", m.FoldAll},
 		{"hide the finished files", m.HideDone},
 		{"split the diff", m.SplitKey},
+		{"cross a split row", m.SideKey},
 		{"comment", m.CommentKey},
 		{"reply", m.ReplyKey},
 		{"resolve", m.ResolveKey},

@@ -262,17 +262,29 @@ func cursorTo(t *testing.T, m Model, want func(reviewRow) bool) Model {
 }
 
 // onLine puts the cursor on a particular line of a particular file.
+//
+// A split row draws two lines and the cursor is on one of them, so the helper
+// crosses to the side the wanted line is numbered on — which is what S does,
+// and what a reader would have to do to get there.
 func onLine(t *testing.T, m Model, path string, kind byte, text string) Model {
 	t.Helper()
+	m.view.onOld = kind == '-' && m.view.splitting()
 	return cursorTo(t, m, func(r reviewRow) bool {
 		if r.kind != rowDiff || r.file < 0 {
 			return false
 		}
 		f := m.view.files[r.file]
-		if f.path != path || r.line < 0 || r.line >= len(f.lines) {
+		if f.path != path {
 			return false
 		}
-		l := f.lines[r.line]
+		// The row, not the line: in a split view a row can draw two lines, and
+		// the cursor lands on the one the pane says it is on. A helper that
+		// read f.lines[r.line] would agree with a bug that did the same.
+		at := m.view.liveSide(f, r.line)
+		if at < 0 || at >= len(f.lines) {
+			return false
+		}
+		l := f.lines[at]
 		return l.Kind == kind && strings.Contains(l.Text, text)
 	})
 }
@@ -804,8 +816,8 @@ func TestACommentMadeOnACommitIsCarriedToTheReview(t *testing.T) {
 
 	m = selectCommit(t, m, "capitalise two")
 	m = onLine(t, m, "foo.txt", '+', "TWO")
-	if got := m.view.files[0].lines[m.view.rows[m.view.cursor].line].New; got != 2 {
-		t.Fatalf("in the commit, TWO is line %d, want 2", got)
+	if _, l, ok := m.view.line(); !ok || l.New != 2 {
+		t.Fatalf("in the commit, TWO is line %d, want 2", l.New)
 	}
 	m = comment(t, m, "shouting again")
 
@@ -830,9 +842,9 @@ func TestACommentMadeOnACommitIsCarriedToTheReview(t *testing.T) {
 	}
 	f := fileIn(t, m, "foo.txt")
 	found := false
-	for idx, threads := range f.threads {
+	for at, threads := range f.threads {
 		for range threads {
-			if f.lines[idx].New == 4 {
+			if f.lines[at].New == 4 {
 				found = true
 			}
 		}
@@ -1360,10 +1372,12 @@ func TestCommentingOnABlockOfLines(t *testing.T) {
 	// Drawn under the last line of the block, which is where it reads as being
 	// about what came above it.
 	f := fileIn(t, m, "foo.txt")
-	for idx, threads := range f.threads {
+	for at, threads := range f.threads {
 		for range threads {
-			if f.lines[idx].New != 5 {
-				t.Errorf("the block comment hangs off line %d, want 5", f.lines[idx].New)
+			// Keyed by the line, which is what a remark is about; the row it
+			// gets drawn on is the pane's business and changes with the view.
+			if f.lines[at].New != 5 {
+				t.Errorf("the block comment hangs off line %d, want 5", f.lines[at].New)
 			}
 		}
 	}
@@ -1878,7 +1892,26 @@ func TestTheBoxForABlockGoesUnderTheLastLine(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		m = drive(t, m, namedKey(tea.KeyDown))
 	}
-	end := m.view.cursor
+	// The last line of the block is line 5 of the file as it now stands — the
+	// box goes under that one, not under the first of them. Named here rather
+	// than asked of commentTarget, which is the thing under test: a test that
+	// takes its expected answer from the code it is checking agrees with that
+	// code however wrong it is.
+	end := -1
+	for i, r := range m.view.rows {
+		if r.kind != rowDiff || r.file < 0 || m.view.files[r.file].path != "foo.txt" {
+			continue
+		}
+		f := m.view.files[r.file]
+		at := m.view.liveSide(f, r.line)
+		if at >= 0 && at < len(f.lines) && isCodeLine(f.lines[at].Kind) && f.lines[at].New == 5 {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		t.Fatal("line 5 of foo.txt is not drawn")
+	}
 	m = drive(t, m, letterKey("c"))
 
 	first, _, ok := draftRows(m)
@@ -2448,18 +2481,24 @@ func TestTheReaderOwnsTheKeys(t *testing.T) {
 // Split and unified
 // ---------------------------------------------------------------------------
 
-// s stands the two sides of a change beside each other: what a line was on the
-// left, what it became on the right.
+// The review opens with the two sides of a change beside each other: what a
+// line was on the left, what it became on the right. s unifies it and back.
 func TestSplitPutsTheTwoSidesSideBySide(t *testing.T) {
 	m := newTestModel(t)
+	if !m.view.splitting() {
+		t.Fatalf("the review does not open split (width %d)", m.view.width)
+	}
+
+	// What the same diff costs unified, to compare the pairs against.
+	m = drive(t, m, letterKey("s"))
 	if m.view.splitting() {
-		t.Fatal("the review starts split")
+		t.Fatalf("s did not unify (status %q)", m.status)
 	}
 	unified := len(m.view.rows)
 
 	m = drive(t, m, letterKey("s"))
 	if !m.view.splitting() {
-		t.Fatalf("s did not split (status %q, width %d)", m.status, m.view.width)
+		t.Fatalf("s did not split again (status %q, width %d)", m.status, m.view.width)
 	}
 	if !strings.Contains(plain(m), "· split") {
 		t.Error("the title does not say the diff is split")
@@ -2502,7 +2541,7 @@ func TestSplitPutsTheTwoSidesSideBySide(t *testing.T) {
 		t.Error("the new side is drawn to the left of the old one")
 	}
 
-	// And s again puts it back.
+	// And s again puts it back the other way.
 	m = drive(t, m, letterKey("s"))
 	if m.view.splitting() || len(m.view.rows) != unified {
 		t.Errorf("s did not unify: splitting=%v rows=%d want %d",
@@ -2513,9 +2552,9 @@ func TestSplitPutsTheTwoSidesSideBySide(t *testing.T) {
 // A pure insertion has nothing on the left of it, and a hunk header belongs to
 // neither side, so it runs the whole width.
 func TestSplitLeavesTheMissingSideEmpty(t *testing.T) {
-	m := drive(t, newTestModel(t), letterKey("s"))
+	m := newTestModel(t)
 	if !m.view.splitting() {
-		t.Fatal("not split")
+		t.Fatal("the review does not open split")
 	}
 	// beta.go is a new file: every line of it is an addition with nothing it
 	// replaced.
@@ -2554,29 +2593,49 @@ func TestSplitLeavesTheMissingSideEmpty(t *testing.T) {
 	}
 }
 
-// A comment still hangs off the row that draws its line, in either view, and
-// survives being switched between them.
+// A comment is filed against a line, and stays on it in either view and across
+// every switch between them. The line is the anchor; which row draws it is the
+// pane's business and changes underneath.
 func TestCommentsSurviveTheSplit(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "why shout?")
 
-	m = drive(t, m, letterKey("s"))
-	if !strings.Contains(plain(m), "why shout?") {
-		t.Errorf("the comment is missing from the split view:\n%s", plain(m))
-	}
-	f := fileIn(t, m, "foo.txt")
-	placed := 0
-	for row, threads := range f.threads {
-		placed += len(threads)
-		// It hangs off the row that draws line 4 of the new side.
-		if l, ok := f.rowLine(row); !ok || l.New != 4 {
-			t.Errorf("the comment hangs off %+v, want the row for new line 4", l)
+	// Checked on both sides of the toggle, starting with the split view the
+	// review opens in, since that is the one this is named for.
+	for _, view := range []string{"split", "unified", "split again"} {
+		if !strings.Contains(plain(m), "why shout?") {
+			t.Errorf("the comment is missing from the %s view:\n%s", view, plain(m))
 		}
+		f := fileIn(t, m, "foo.txt")
+		placed := 0
+		for at, threads := range f.threads {
+			placed += len(threads)
+			if f.lines[at].New != 4 {
+				t.Errorf("in the %s view the comment is filed against line %d, want 4",
+					view, f.lines[at].New)
+			}
+		}
+		if placed != 1 {
+			t.Errorf("%d comments in the %s view, want 1", placed, view)
+		}
+		// And drawn against that line, not merely filed against it.
+		head := -1
+		for i, r := range m.view.rows {
+			if r.kind == rowThread && r.first {
+				head = i
+			}
+		}
+		if head < 1 {
+			t.Fatalf("the conversation is not drawn in the %s view", view)
+		}
+		above := m.view.rows[head-1]
+		if l, ok := m.view.files[above.file].rowLine(above.line); !ok || l.New != 4 {
+			t.Errorf("in the %s view it is drawn under %q, want under FOUR", view, l.Text)
+		}
+		m = drive(t, m, letterKey("s"))
 	}
-	if placed != 1 {
-		t.Errorf("%d comments placed, want 1", placed)
-	}
+	m = drive(t, m, letterKey("s")) // back to the view the review opened in
 
 	// A comment written while split lands in the same place as one written
 	// unified: the review does not know which way it was being read.
@@ -2588,22 +2647,613 @@ func TestCommentsSurviveTheSplit(t *testing.T) {
 	}
 }
 
-// A pane too narrow to split honours the request without acting on it: it
-// says so, and splits itself as soon as there is room.
+// Every row of a split diff comments on the line it draws. A split row folds a
+// removal and the addition that replaced it onto one line of the screen, so
+// there are fewer rows than lines and the two stop counting alike — a pane
+// that reached for f.lines[row] would anchor each remark to a line further and
+// further above the one the cursor was on.
+func TestSplitCommentsOnTheLineTheCursorIsOn(t *testing.T) {
+	m := newTestModel(t)
+	if !m.view.splitting() {
+		t.Fatal("the review does not open split")
+	}
+	checked := 0
+	for i, r := range m.view.rows {
+		if r.kind != rowDiff || r.file < 0 {
+			continue
+		}
+		f := m.view.files[r.file]
+		at := m.view.liveSide(f, r.line)
+		if at < 0 || at >= len(f.lines) || !isCodeLine(f.lines[at].Kind) {
+			continue
+		}
+		m.view.cursor = i
+		got, line, _, last, ok := m.view.commentTarget()
+		if !ok {
+			t.Errorf("row %d draws %q but offers nothing to comment on",
+				i, f.lines[at].Text)
+			continue
+		}
+		if got != f || line.Text != f.lines[at].Text {
+			t.Errorf("the cursor is on %q, but a comment would land on %q",
+				f.lines[at].Text, line.Text)
+		}
+		// And the index it reports is into the file's lines, which is what
+		// the box and the thread are hung off.
+		if last != at {
+			t.Errorf("on %q: reported line %d, want %d", f.lines[at].Text, last, at)
+		}
+		checked++
+	}
+	if checked < 4 {
+		t.Fatalf("only %d code rows checked; the fixture is not exercising this", checked)
+	}
+}
+
+// S crosses a split row to the line the change took away, which is the one
+// thing a split view cannot point at by moving up and down.
+func TestSideKeyReachesTheRemovedLine(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "TWO")
+
+	// As it stands, the cursor is on the new side of that row.
+	_, l, ok := m.view.line()
+	if !ok || l.Kind != '+' {
+		t.Fatalf("the cursor is on %+v, want the added line", l)
+	}
+
+	m = drive(t, m, letterKey("S"))
+	_, l, ok = m.view.line()
+	if !ok || l.Kind != '-' || !strings.Contains(l.Text, "two") {
+		t.Fatalf("S put the cursor on %+v, want the removed line -two", l)
+	}
+	if !strings.Contains(plain(m), "old side") {
+		t.Error("the title does not say which side the cursor is on")
+	}
+
+	m = comment(t, m, "why was this dropped?")
+	th := reviewJSON(t, m.repo).Threads[0]
+	if th.Side != review.SideOld || th.Line != 2 {
+		t.Errorf("anchored at %s:%d, want old:2 — the removed line", th.Side, th.Line)
+	}
+
+	// And S again comes back to the side the change is proposing. Posting
+	// left the cursor on the conversation, so it goes back to a line first.
+	m = onLine(t, m, "foo.txt", '-', "two")
+	m = drive(t, m, letterKey("S"))
+	if _, l, ok := m.view.line(); !ok || l.Kind != '+' || !strings.Contains(l.Text, "TWO") {
+		t.Errorf("S did not come back to the new side: %+v", l)
+	}
+}
+
+// A row with only one side draws the cursor on the side it has, whichever one
+// is live: an insertion has nothing on its left to put a cursor on.
+func TestSideKeyFallsBackToTheSideThatExists(t *testing.T) {
+	m := drive(t, newTestModel(t), letterKey("S"))
+	if !m.view.onOld {
+		t.Fatal("S did not cross to the old side")
+	}
+	// beta.go is a new file: every line is an addition with no left half.
+	m = onLine(t, m, "beta.go", '+', "package beta")
+	_, l, ok := m.view.line()
+	if !ok || l.Kind != '+' {
+		t.Fatalf("on a pure insertion the cursor is on %+v, want the added line", l)
+	}
+	m = comment(t, m, "fine")
+	th := reviewJSON(t, m.repo).Threads[0]
+	if th.Side != review.SideNew {
+		t.Errorf("anchored on the %s side, want new: there is no old line here", th.Side)
+	}
+}
+
+// S says so rather than doing nothing when there are no sides to cross.
+func TestSideKeyIsInertWhenUnified(t *testing.T) {
+	m := drive(t, newTestModel(t), letterKey("s"))
+	if m.view.splitting() {
+		t.Fatal("s did not unify the diff")
+	}
+	m = onLine(t, m, "foo.txt", '+', "TWO")
+	m = drive(t, m, letterKey("S"))
+	if m.view.onOld {
+		t.Error("S crossed sides in a view that has none")
+	}
+	if !strings.Contains(m.status, "unified") {
+		t.Errorf("S said %q, which does not explain itself", m.status)
+	}
+}
+
+// Switching between the two views keeps the reader on the line they were
+// reading, and on the side of the diff it is numbered on — not merely in the
+// file it belongs to.
+func TestSplitKeepsTheLineYouWereOn(t *testing.T) {
+	// Unified first, then the cursor put on the removed line there. Landing on
+	// it in the split view would set onOld as a side effect, and doSplit's
+	// carry would then write true over true — passing whether or not the side
+	// were carried at all.
+	m := drive(t, newTestModel(t), letterKey("s"))
+	if m.view.splitting() {
+		t.Fatal("s did not unify the diff")
+	}
+	m = onLine(t, m, "foo.txt", '-', "four")
+	if m.view.onOld {
+		t.Fatal("onOld is already set; the carry would not be under test")
+	}
+
+	m = drive(t, m, letterKey("s"))
+	if !m.view.splitting() {
+		t.Fatal("s did not split it again")
+	}
+	if _, l, ok := m.view.line(); !ok || l.Kind != '-' || !strings.Contains(l.Text, "four") {
+		t.Errorf("splitting moved the cursor to %+v, want -four", l)
+	}
+	if !m.view.onOld {
+		t.Error("s did not carry the side across with the line")
+	}
+
+	// And back to unified, still on the same line.
+	m = drive(t, m, letterKey("s"))
+	if m.view.splitting() {
+		t.Fatal("s did not unify again")
+	}
+	if _, l, ok := m.view.line(); !ok || l.Kind != '-' || !strings.Contains(l.Text, "four") {
+		t.Errorf("unifying moved the cursor to %+v, want -four", l)
+	}
+}
+
+// The cursor bar goes on the half the cursor is in, so that what a key is
+// about to act on is the thing that looks selected.
+func TestSplitBarsOnlyTheLiveHalf(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "TWO")
+
+	// The row as it is actually drawn, colours and all: the bar is a styled
+	// space, so stripping the escapes would strip the thing under test.
+	changedRow := func(m Model) string {
+		t.Helper()
+		raw := strings.Split(m.frame(), "\n")
+		for i, l := range strings.Split(ansi.Strip(m.frame()), "\n") {
+			if strings.Contains(l, "-two") && strings.Contains(l, "+ TWO") {
+				return raw[i]
+			}
+		}
+		t.Fatalf("no row draws both sides of the change:\n%s", plain(m))
+		return ""
+	}
+
+	onNew := changedRow(m)
+	m = drive(t, m, letterKey("S"))
+	onOld := changedRow(m)
+	if onNew == onOld {
+		t.Error("the row is drawn the same on either side; nothing says which half is live")
+	}
+
+	// The bar is at the head of the half it is in, so the two differ in the
+	// left half when the cursor is on the old side and not before it.
+	left, _ := m.view.halvesOf(m.view.rowW())
+	if ansi.Truncate(onNew, left, "") == ansi.Truncate(onOld, left, "") {
+		t.Error("the left half is drawn the same whether or not the cursor is in it")
+	}
+}
+
+// A comment belongs to a line, and stays on it when the pane changes shape
+// under it. Zooming can cross the split threshold, and the rows either side of
+// that are numbered differently — a remark keyed by a row would move to
+// whatever line took its number, which is roughly half a file away.
+func TestCommentsSurviveZoomingAcrossTheThreshold(t *testing.T) {
+	// The crossing is made by zooming, which is the path layoutZoom returns by
+	// and the reason reflow is deferred rather than called at the foot of
+	// layout. A suite whose every crossing goes through the ordinary path
+	// would still pass if that defer became a trailing call, while z on a
+	// window this size went back to drawing split rows through the unified
+	// renderer.
+	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 120, Height: 40})
+	if m.view.splitting() {
+		t.Skipf("the review pane is %d columns, split before the zoom", m.view.width)
+	}
+	m = drive(t, m, altKey("z"))
+	if !m.view.splitting() {
+		t.Fatalf("zooming to %d columns did not split the diff", m.view.width)
+	}
+
+	// Written while the pane is split, which is what gives the key assertion
+	// below any teeth: a comment filed in a unified pane is filed against a
+	// line whose index and row number are the same, so a row-keyed map and a
+	// line-keyed one would store the same number and neither could be caught.
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "about FOUR")
+
+	// Off and on again: the rows are renumbered each way, both times inside
+	// layoutZoom.
+	m = drive(t, m, altKey("z"))
+	if m.view.splitting() {
+		t.Fatalf("the pane is %d columns and still split; it never crossed", m.view.width)
+	}
+	m = drive(t, m, altKey("z"))
+	if !m.view.splitting() {
+		t.Fatalf("the pane is %d columns and not split; it never came back", m.view.width)
+	}
+	f := fileIn(t, m, "foo.txt")
+	// The key is an index into the lines, and the row drawing that line is a
+	// different number now the pane has split — which is the whole point, and
+	// what makes this assertion worth making. Both are named here so that
+	// checking the key against the line index is not the same as checking it
+	// against the row: in a unified pane those coincide and either would pass.
+	wantAt, wantRow := -1, -1
+	for i, l := range f.lines {
+		if l.Kind == '+' && l.New == 4 {
+			wantAt, wantRow = i, f.rowAt[i]
+			break
+		}
+	}
+	if wantAt < 0 {
+		t.Fatal("FOUR is not in the diff")
+	}
+	if wantAt == wantRow {
+		t.Fatalf("line %d is drawn on row %d: the two coincide, so this proves nothing",
+			wantAt, wantRow)
+	}
+	seen := 0
+	for at, threads := range f.threads {
+		seen += len(threads)
+		if at != wantAt {
+			t.Errorf("the comment is keyed to %d (line %d); want line index %d, and note "+
+				"row %d is what a row-keyed map would hold",
+				at, f.lines[at].New, wantAt, wantRow)
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("%d comments after crossing the threshold, want 1", seen)
+	}
+	// And it is drawn against that line, not merely filed against it.
+	head := -1
+	for i, r := range m.view.rows {
+		if r.kind == rowThread && r.first {
+			head = i
+		}
+	}
+	if head < 1 {
+		t.Fatal("the conversation is not drawn")
+	}
+	above := m.view.rows[head-1]
+	if l, ok := m.view.files[above.file].rowLine(above.line); !ok || l.New != 4 {
+		t.Errorf("the conversation is drawn under %q, want under FOUR", l.Text)
+	}
+}
+
+// Zooming can cross the split threshold, and the reader keeps their line
+// across it.
+//
+// This is the one crossing that goes through layoutZoom, which returns by its
+// own path — which is why reflow is deferred from layout rather than called at
+// the foot of it. Note what does *not* break if that defer becomes a trailing
+// call: toggleZoom calls build() itself, so the rows are still laid out for
+// the new width and the diff still draws correctly. What is lost is the
+// reader's place, so that is what this has to assert.
+func TestZoomingAcrossTheThresholdKeepsTheLine(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 120, Height: 40})
+	if m.view.splitting() {
+		t.Skipf("the review pane is %d columns, split before the zoom", m.view.width)
+	}
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+
+	m = drive(t, m, altKey("z"))
+	if !m.view.splitting() {
+		t.Fatalf("zooming to %d columns did not split the diff", m.view.width)
+	}
+	if _, l, ok := m.view.line(); !ok || l.New != 4 || l.Kind != '+' {
+		t.Errorf("the zoom moved the cursor to %+v, want +FOUR", l)
+	}
+
+	// And back the other way, out of split into unified.
+	m = drive(t, m, altKey("z"))
+	if m.view.splitting() {
+		t.Fatalf("unzooming to %d columns did not unify the diff", m.view.width)
+	}
+	if _, l, ok := m.view.line(); !ok || l.New != 4 || l.Kind != '+' {
+		t.Errorf("the unzoom moved the cursor to %+v, want +FOUR", l)
+	}
+
+	// The other door into layoutZoom: taking the focus while zoomed. Zoom the
+	// file list, then come back to the review — setFocus reaches layoutZoom's
+	// review case and hands the pane the full width, and setFocus does not
+	// build. Only the relay in layout covers this one.
+	m = drive(t, m, altKey("1"), altKey("z"))
+	if !m.zoom {
+		t.Fatal("the file list did not zoom")
+	}
+	m = drive(t, m, altKey("2"))
+	if !m.view.splitting() {
+		t.Fatalf("the zoomed review pane is %d columns and not split", m.view.width)
+	}
+	if m.view.builtAt != m.view.width {
+		t.Errorf("rows built for %d columns, pane is %d — nothing laid them out again",
+			m.view.builtAt, m.view.width)
+	}
+	// The pairing, not merely the presence. Rows laid out at 79 and drawn
+	// split read rowRef{5,5} and put line 5 in both halves, so the row says
+	// "-four │ -four" and FOUR appears nowhere on it — a check that -four is
+	// on the screen somewhere is satisfied by the corruption itself.
+	row := ""
+	for _, l := range strings.Split(plain(m), "\n") {
+		if strings.Contains(l, "-four") {
+			row = l
+			break
+		}
+	}
+	if row == "" {
+		t.Fatalf("the removed line is not drawn at all:\n%s", plain(m))
+	}
+	if !strings.Contains(row, "FOUR") {
+		t.Errorf("the row holding -four does not hold FOUR beside it: %q", row)
+	}
+}
+
+// The rows are laid out for a particular width, and taking the focus changes
+// it: the left column gives up its space on a narrow window. Rows built for
+// one view and drawn through the other are not a cosmetic problem — split rows
+// drawn unified lose every removal that had an addition paired with it.
+func TestChangingFocusRelaysTheRows(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 95, Height: 40})
+	m = drive(t, m, altKey("2"))
+	wide, rows := m.view.splitting(), len(m.view.rows)
+
+	m = drive(t, m, altKey("1"))
+	if m.view.splitting() == wide {
+		t.Skipf("the focus does not cross the threshold at this width (pane %d)", m.view.width)
+	}
+	if len(m.view.rows) == rows {
+		t.Errorf("splitting() flipped %v→%v but the %d rows were not laid out again",
+			wide, m.view.splitting(), rows)
+	}
+	if m.view.builtAt != m.view.width {
+		t.Errorf("rows built for %d columns, pane is %d", m.view.builtAt, m.view.width)
+	}
+	// Whatever it drew, every removed line is still on the screen.
+	if view := plain(m); !strings.Contains(view, "-two") {
+		t.Errorf("the removed line is not drawn after the focus moved:\n%s", view)
+	}
+}
+
+// 24g can only mean a line of the file as it now stands, so it lands on the
+// new side of a split row whatever side the cursor was on. Otherwise the
+// status names one line and c comments on another.
+func TestGoToLineComesBackToTheNewSide(t *testing.T) {
+	m := newTestModel(t)
+	if !m.view.splitting() {
+		t.Skipf("the review pane is %d columns, not split", m.view.width)
+	}
+	m = onLine(t, m, "foo.txt", '-', "two")
+	if !m.view.onOld {
+		t.Fatal("the cursor is not on the old side to begin with")
+	}
+	m = drive(t, m, letterKey("4"), letterKey("g"))
+	if m.view.onOld {
+		t.Error("24g-style jump left the cursor on the old side")
+	}
+	_, l, ok := m.view.line()
+	if !ok || l.New != 4 {
+		t.Fatalf("the cursor is on %+v, want new line 4", l)
+	}
+	// And a comment goes where the status said it would.
+	m = comment(t, m, "here")
+	th := reviewJSON(t, m.repo).Threads[0]
+	if th.Side != review.SideNew || th.Line != 4 {
+		t.Errorf("anchored at %s:%d, want new:4 — the line jumped to", th.Side, th.Line)
+	}
+}
+
+// The title names the side the next key will act on, which is not the same as
+// the side that was asked for: a row with nothing on its left draws the cursor
+// on the right whatever S said, and a comment there anchors to the new side.
+func TestTheTitleNamesTheSideThatWillBeActedOn(t *testing.T) {
+	m := drive(t, newTestModel(t), letterKey("S"))
+	if !m.view.onOld {
+		t.Fatal("S did not cross to the old side")
+	}
+	m = onLine(t, m, "foo.txt", '-', "two")
+	// The title, not the whole frame: pressing S puts its own account of what
+	// it did in the status bar, which would answer for the title's words.
+	if title, _, _ := m.view.titleLabel(); !strings.Contains(title, "old side") {
+		t.Errorf("on a removed line the title is %q, want it to say `old side`", title)
+	}
+
+	// beta.go is a new file: every line is an addition with no left half.
+	m = onLine(t, m, "beta.go", '+', "package beta")
+	m = drive(t, m, letterKey("S"))
+	if !m.view.onOld {
+		t.Fatal("S did not set the old side")
+	}
+	if title, _, _ := m.view.titleLabel(); strings.Contains(title, "old side") {
+		t.Errorf("the title is %q on a row that has no old side", title)
+	}
+}
+
+// The hint offers what s would do next. On a pane too narrow to split, the
+// preference is still on even though the screen is unified, so the offer is to
+// turn it off — otherwise `s split` turns the preference off and reports the
+// opposite of what was asked for.
+func TestTheHintFollowsThePreferenceNotTheDrawing(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 70, Height: 30})
+	m = drive(t, m, altKey("2"))
+	if m.view.splitting() {
+		t.Skipf("the review pane is %d columns, wide enough to split", m.view.width)
+	}
+	if !m.view.split {
+		t.Fatal("the preference was dropped")
+	}
+	if got := m.hints(); !strings.Contains(got, "s unify") {
+		t.Errorf("hint = %q, want it to offer `s unify`: the preference is on", got)
+	}
+	m = drive(t, m, letterKey("s"))
+	if got := m.hints(); !strings.Contains(got, "s split") {
+		t.Errorf("after unifying, hint = %q, want it to offer `s split`", got)
+	}
+}
+
+// Arriving at a file from the list lands on its heading, even when arriving is
+// what changes the pane's width.
+//
+// The left column gives up its space on a narrow window, so → both jumps to
+// the file and moves the focus — and the jump happens first, against the rows
+// as they were. Relaying them without carrying the reader across leaves the
+// cursor holding a row number that now means a different line, and on a longer
+// review a different file.
+func TestArrivingAtAFileLandsOnItsHeading(t *testing.T) {
+	for i := 0; i < 4; i++ {
+		m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 95, Height: 40})
+		m = drive(t, m, altKey("1"))
+		if i >= len(m.files.entries) {
+			break
+		}
+		m.files.moveTo(i)
+		want := m.files.currentPath()
+		before := m.view.splitting()
+
+		m = drive(t, m, namedKey(tea.KeyRight))
+		if m.view.splitting() == before {
+			t.Skipf("→ does not cross the split threshold at this width (pane %d)", m.view.width)
+		}
+		r, ok := m.view.row()
+		if !ok || r.file < 0 {
+			t.Fatalf("[%s] the cursor is nowhere after →", want)
+		}
+		if got := m.view.files[r.file].path; got != want {
+			t.Errorf("→ on %s landed in %s", want, got)
+		}
+		if r.kind != rowFile {
+			t.Errorf("→ on %s landed on a %v, want its heading", want, r.kind)
+		}
+	}
+}
+
+// A resize keeps the reader on the line, and on the side of the diff it is
+// numbered on: crossing the threshold must not slide the cursor off a removed
+// line onto the addition that replaced it.
+func TestResizingKeepsTheLineAndItsSide(t *testing.T) {
+	// Started narrow, where the pane is unified, and that is the whole point:
+	// a unified row draws one line, so the cursor is on the removed line
+	// without onOld being set. Started split instead, the helper would set
+	// onOld itself and the carry would write true over true — the side would
+	// ride along whether or not anything carried it, and this test would pass
+	// with the carry deleted.
+	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 100, Height: 40})
+	if m.view.splitting() {
+		t.Skipf("the review pane is %d columns, already split", m.view.width)
+	}
+	m = onLine(t, m, "foo.txt", '-', "four")
+	if m.view.onOld {
+		t.Fatal("onOld is already set; the carry would not be under test")
+	}
+	if _, l, ok := m.view.line(); !ok || l.Kind != '-' {
+		t.Fatalf("the cursor is on %+v, want the removed line", l)
+	}
+
+	// Widen across the threshold. Without the carry, goToDiffLine finds the
+	// row and liveSide then takes its new half — landing the reader on FOUR,
+	// the addition that replaced the line they were reading.
+	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40})
+	if !m.view.splitting() {
+		t.Fatalf("the pane is %d columns and not split; it never crossed", m.view.width)
+	}
+	if _, l, ok := m.view.line(); !ok || l.Kind != '-' || !strings.Contains(l.Text, "four") {
+		t.Errorf("widening moved the cursor to %+v, want -four", l)
+	}
+	if !m.view.onOld {
+		t.Error("the side was not carried across the threshold")
+	}
+
+	// And back down again.
+	m = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	if _, l, ok := m.view.line(); !ok || l.Kind != '-' || !strings.Contains(l.Text, "four") {
+		t.Errorf("narrowing moved the cursor to %+v, want -four", l)
+	}
+}
+
+// A line neither side touched is drawn in both halves, so it cannot say which
+// half the cursor is in. A relay must leave the reader's own choice standing
+// rather than reading it back off a line that never held it.
+func TestRelayKeepsTheSideChosenOnAContextLine(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 140, Height: 40})
+	if !m.view.splitting() {
+		t.Skipf("the review pane is %d columns, not split", m.view.width)
+	}
+	m = onLine(t, m, "foo.txt", ' ', "three")
+	m = drive(t, m, letterKey("S"))
+	if !m.view.onOld {
+		t.Fatal("S did not cross to the old side")
+	}
+
+	// Any relay at all: the width moves, the rows are laid out again.
+	m = drive(t, m, tea.WindowSizeMsg{Width: 150, Height: 40})
+	if !m.view.onOld {
+		t.Error("the relay dropped the side the reader chose on a context line")
+	}
+	// And the cursor is still on that line.
+	if _, l, ok := m.view.line(); !ok || !strings.Contains(l.Text, "three") {
+		t.Errorf("the cursor moved to %+v, want the context line three", l)
+	}
+}
+
+// A conversation is found again by its own name. A remark is not a line, and
+// the row that inherits its number after a relay may be somebody else's
+// remark — where r would reply to something nobody was reading.
+func TestRelayKeepsTheCursorOnTheSameConversation(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "TWO")
+	m = comment(t, m, "first remark")
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "second remark")
+
+	// Sit on the first conversation, about to reply to it.
+	want := reviewJSON(t, m.repo).Threads[0].ID
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowThread && r.thread == want && r.first
+	})
+	if got := m.view.thread(); got != want {
+		t.Fatalf("the cursor is on %q, want %q", got, want)
+	}
+
+	// Relay the rows under it, both ways across the threshold: at 120 columns
+	// the pane is under it and draws unified, at 140 it is over and splits.
+	for _, w := range []int{120, 140, 120} {
+		m = drive(t, m, tea.WindowSizeMsg{Width: w, Height: 40})
+		if got := m.view.thread(); got != want {
+			t.Fatalf("at %d columns the cursor is on %q, want %q — r would reply to the wrong remark",
+				w, got, want)
+		}
+	}
+}
+
+// A pane too narrow for two columns draws a unified diff without forgetting
+// that it would rather be split: it says so in the title, and splits itself as
+// soon as there is room.
 func TestSplitWaitsForTheRoom(t *testing.T) {
 	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 70, Height: 30})
-	m = drive(t, m, altKey("2"), letterKey("s"))
+	m = drive(t, m, altKey("2"))
 	if m.view.width >= minSplitWidth {
 		t.Skipf("the review pane is %d columns, wide enough to split", m.view.width)
 	}
 	if !m.view.split {
-		t.Error("the request was forgotten")
+		t.Error("the preference was forgotten")
 	}
 	if m.view.splitting() {
 		t.Error("it split a pane too narrow for it")
 	}
+	// Nobody asked for it here, so nothing is explained: a default doing the
+	// best it can with the room it has is not a request going unmet.
+	if strings.Contains(plain(m), "too narrow") {
+		t.Errorf("the title explains a choice nobody made:\n%s", plain(m))
+	}
+
+	// Asking for it says why it cannot be given rather than doing nothing,
+	// and the title keeps saying so after the status line has gone.
+	m = drive(t, m, letterKey("s")) // off
+	m = drive(t, m, letterKey("s")) // on again, but still too narrow
 	if !strings.Contains(m.status, "columns") {
 		t.Errorf("status = %q, want it to say why", m.status)
+	}
+	if !strings.Contains(plain(m), "too narrow") {
+		t.Errorf("the title does not say why it is not split:\n%s", plain(m))
 	}
 
 	m = drive(t, m, tea.WindowSizeMsg{Width: 200, Height: 30})

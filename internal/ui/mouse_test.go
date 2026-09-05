@@ -225,7 +225,12 @@ func TestAPlainClickSelectsNothing(t *testing.T) {
 // the cursor bar, the uncommitted margin and the line numbers left behind as
 // the chrome they are.
 func TestDragOverTheReviewCopiesCodeWithoutLineNumbers(t *testing.T) {
-	m := newTestModel(t)
+	// Unified, where a row is one line: what the split view copies is its own
+	// test, below.
+	m := drive(t, newTestModel(t), letterKey("s"))
+	if m.view.splitting() {
+		t.Fatal("s did not unify the diff")
+	}
 	clip := captureClipboard(t)
 
 	// Find an added line on screen to drag over.
@@ -236,8 +241,9 @@ func TestDragOverTheReviewCopiesCodeWithoutLineNumbers(t *testing.T) {
 			continue
 		}
 		f := m.view.files[r.file]
-		if f.lines[r.line].Kind == '+' {
-			row, want = i-m.view.offset, "+ "+f.texts[r.line]
+		at := m.view.liveSide(f, r.line)
+		if at >= 0 && f.lines[at].Kind == '+' {
+			row, want = i-m.view.offset, "+ "+f.texts[at]
 			break
 		}
 	}
@@ -255,6 +261,47 @@ func TestDragOverTheReviewCopiesCodeWithoutLineNumbers(t *testing.T) {
 	got := copied(t, clip.String())
 	if got != want {
 		t.Errorf("copied %q, want %q", got, want)
+	}
+}
+
+// Dragging over a split row copies what is under the highlight. The two halves
+// are two different lines, so a pane that copied the row the unified way would
+// hand back the added line while the drag was over the removed one.
+func TestDragOverASplitRowCopiesTheHalfUnderIt(t *testing.T) {
+	m := newTestModel(t)
+	if !m.view.splitting() {
+		t.Skipf("the review pane is %d columns, not split", m.view.width)
+	}
+	clip := captureClipboard(t)
+
+	// The row drawing -two beside +TWO, on screen.
+	f := fileIn(t, m, "foo.txt")
+	want := f.rowAt[2]
+	row := -1
+	for i := m.view.offset; i < len(m.view.rows) && i < m.view.offset+m.view.bodyRows(); i++ {
+		if r := m.view.rows[i]; r.kind == rowDiff && r.line == want && m.view.files[r.file] == f {
+			row = i - m.view.offset
+			break
+		}
+	}
+	if row < 0 {
+		t.Fatalf("the changed row is not on screen:\n%s", plain(m))
+	}
+
+	// Drag the left half, from the start of its content to the rule.
+	left, _ := m.view.halvesOf(m.view.rowW())
+	x, y := contentPoint(t, m, focusReview, row, 0)
+	end, _ := contentPoint(t, m, focusReview, row, left-m.view.chromeW()-1)
+	m = drive(t, m, pressAt(x, y), dragTo(end, y), releaseAt(end, y))
+	if !m.mouse.hasSelection() {
+		t.Fatal("the drag left no selection")
+	}
+	got := copied(t, clip.String())
+	if !strings.Contains(got, "two") {
+		t.Errorf("dragging the left half copied %q, want the removed line -two", got)
+	}
+	if strings.Contains(got, "TWO") {
+		t.Errorf("dragging the left half copied the added line: %q", got)
 	}
 }
 
@@ -653,6 +700,96 @@ func TestClickingTheFoldMarkerFolds(t *testing.T) {
 	m = drive(t, m, pressAt(x, y))
 	if fileIn(t, m, path).folded {
 		t.Errorf("clicking it again did not open %s", path)
+	}
+}
+
+// The word naming the way the diff is drawn is the one part of the pane's
+// title that names a choice, so it is the one part that offers to change it.
+func TestClickingTheViewModeTogglesIt(t *testing.T) {
+	m := newTestModel(t)
+	if !m.view.splitting() {
+		t.Skipf("the review pane is %d columns, too narrow to split", m.view.width)
+	}
+	if !strings.Contains(plain(m), "split") {
+		t.Fatalf("the title does not name the view:\n%s", plain(m))
+	}
+
+	r := m.rects[focusReview]
+	_, at, w := m.view.titleLabel()
+
+	m = drive(t, m, pressAt(r.x+at, r.y))
+	if m.view.splitting() {
+		t.Error("clicking `split` did not unify the diff")
+	}
+	if !strings.Contains(plain(m), "unified") {
+		t.Errorf("the title does not name the view it changed to:\n%s", plain(m))
+	}
+
+	// And back, at whatever width the other word takes.
+	_, at, w = m.view.titleLabel()
+	m = drive(t, m, pressAt(r.x+at+w-1, r.y))
+	if !m.view.splitting() {
+		t.Error("clicking `unified` did not split the diff")
+	}
+}
+
+// The rest of the title is chrome: it takes the focus, and a second press
+// zooms the pane. Only the word that names a choice is a button.
+func TestClickingTheRestOfTheTitleStillFocuses(t *testing.T) {
+	m := newTestModel(t)
+	m.focus = focusFiles
+	r := m.rects[focusReview]
+	_, at, _ := m.view.titleLabel()
+
+	split := m.view.splitting()
+	m = drive(t, m, pressAt(r.x+at-2, r.y)) // just before the word
+	if m.focus != focusReview {
+		t.Error("clicking the title did not take the focus")
+	}
+	if m.view.splitting() != split {
+		t.Error("clicking beside the word changed the view")
+	}
+}
+
+// Clicking one half of a split row is pointing at the line drawn in it, which
+// is the plainest way of saying which side a comment is about.
+func TestClickingAHalfPicksTheSide(t *testing.T) {
+	m := newTestModel(t)
+	if !m.view.splitting() {
+		t.Fatalf("the review does not open split (pane %d columns)", m.view.width)
+	}
+	// The row drawing -two beside +TWO.
+	f := fileIn(t, m, "foo.txt")
+	want := f.rowAt[2]
+	row := -1
+	for i := m.view.offset; i < len(m.view.rows) && i < m.view.offset+m.view.bodyRows(); i++ {
+		if r := m.view.rows[i]; r.kind == rowDiff && r.line == want && m.view.files[r.file] == f {
+			row = i - m.view.offset
+			break
+		}
+	}
+	if row < 0 {
+		t.Fatal("the changed row is not on screen")
+	}
+
+	r := m.rects[focusReview]
+	left, _ := m.view.halvesOf(m.view.rowW())
+	y := r.y + 1 + row
+
+	m = drive(t, m, pressAt(r.x+left+4, y))
+	if m.view.onOld {
+		t.Error("clicking the right half put the cursor on the old side")
+	}
+	if _, l, ok := m.view.line(); !ok || l.Kind != '+' {
+		t.Errorf("clicking the right half landed on %+v, want the added line", l)
+	}
+
+	m = drive(t, m, pressAt(r.x+left-4, y))
+	if !m.view.onOld {
+		t.Error("clicking the left half did not put the cursor on the old side")
+	}
+	if _, l, ok := m.view.line(); !ok || l.Kind != '-' {
+		t.Errorf("clicking the left half landed on %+v, want the removed line", l)
 	}
 }
 

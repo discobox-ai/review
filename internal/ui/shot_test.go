@@ -457,11 +457,12 @@ func TestWriteScreenshots(t *testing.T) {
 			return selectCommit(t, m, "turn the limiter on for reads")
 		},
 	}, {
-		// Side by side, with the panes out of the way.
+		// Side by side, with the panes out of the way. No s: a review opens
+		// split, so this is the view without doing anything to it.
 		name: "split", w: 128, h: 28,
 		take: func(t *testing.T, m Model) Model {
 			m = onLine(t, m, "internal/server/server.go", '+', "limiter: NewLimiter")
-			return drive(t, m, altKey("z"), letterKey("s"))
+			return drive(t, m, altKey("z"))
 		},
 	}, {
 		// The whole file, with the lines the review touches marked in the

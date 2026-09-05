@@ -804,13 +804,12 @@ func (m *Model) place(files []*reviewFile) []*reviewFile {
 		out = append(out, f)
 	}
 
-	split := m.view.splitting()
 	for _, f := range out {
-		// The rows have to exist before a comment can be hung off one, and the
-		// pane lays them out again when it draws. Both ask the same question
-		// of the same width, so both get the same answer.
-		f.buildRows(split)
-		newAt, oldAt := f.lineRows()
+		// By line, not by row: how the file is drawn is none of this
+		// function's business, and a remark keyed by a row moves the moment
+		// anything relays the rows out — a resize, a zoom — without coming
+		// back through here.
+		newAt, oldAt := f.lineIndex()
 		for _, t := range m.rv.ThreadsFor(f.path) {
 			side := t.Side
 			first, last := t.Span()
@@ -1004,6 +1003,8 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.doHideDone()
 	case key.Matches(msg, m.keys.SplitKey):
 		return m.doSplit()
+	case key.Matches(msg, m.keys.SideKey):
+		return m.doSide()
 	case key.Matches(msg, m.keys.CommentKey):
 		return m.doComment()
 	case key.Matches(msg, m.keys.ReplyKey):
@@ -1288,6 +1289,12 @@ func (m Model) gotoLine(n int) (tea.Model, tea.Cmd) {
 		m.setError(f.path + " has no line " + itoa(n) + " in this diff")
 		return m, nil
 	}
+	// lineRow can only find a line on the new side, so that is the side the
+	// cursor lands on. Leaving it where it was would put the bar under the
+	// removed line in the left half while the status named the line on the
+	// right — the same mismatch between the line named and the line acted on
+	// that this pane exists to avoid.
+	m.view.onOld = false
 	m.view.reveal(row)
 	if !exact {
 		at := 0
@@ -1382,10 +1389,24 @@ func (m Model) doHideDone() (tea.Model, tea.Cmd) {
 // against what it became, which is what you want when the change is an edit
 // rather than an insertion. So it is a key rather than a setting.
 func (m Model) doSplit() (tea.Model, tea.Cmd) {
-	m.view.split = !m.view.split
-	path := m.view.pathAt()
+	// The line being read is what the reader is keeping their place in, so it
+	// is what survives the change of view — not merely the file it is in. The
+	// rows are numbered differently either side of this, which is exactly why
+	// the line has to be remembered as a line and looked up again afterwards.
+	path, at, wasOld := m.view.cursorLine()
+	m.view.split, m.view.asked = !m.view.split, true
+	// A line the cursor was on in a unified diff is on one side or the other,
+	// and in a split one it is in the half for that side. Carrying the side
+	// over is what stops s moving the cursor from the removed line to the
+	// added one that replaced it, which would be a different line entirely.
+	if at >= 0 {
+		m.view.onOld = wasOld
+	}
+	m.view.clearVisual()
 	m.rebuild()
-	m.view.jumpToFile(path)
+	if at < 0 || !m.view.goToDiffLine(path, at) {
+		m.view.jumpToFile(path)
+	}
 	switch {
 	case !m.view.split:
 		m.setOK("Unified diff")
@@ -1395,6 +1416,27 @@ func (m Model) doSplit() (tea.Model, tea.Cmd) {
 		// Asked for and remembered, but not drawn: the pane will split itself
 		// as soon as it is wide enough.
 		m.setWarn("Split diff needs " + itoa(minSplitWidth) + " columns; showing unified until then")
+	}
+	return m, nil
+}
+
+// doSide moves the cursor across a split row, to the other of the two lines it
+// draws. It is what makes a comment on a removed line reachable while split: a
+// unified diff gives that line a row of its own to sit on, and a split one does
+// not, so the side has to be said rather than pointed at.
+func (m Model) doSide() (tea.Model, tea.Cmd) {
+	if !m.view.splitting() {
+		m.setWarn("S picks a side of a split row; this diff is unified (s splits it)")
+		return m, nil
+	}
+	m.view.onOld = !m.view.onOld
+	// A selection is a run of lines on one side, so moving across sides ends
+	// it rather than quietly changing what it covers.
+	m.view.clearVisual()
+	if m.view.onOld {
+		m.setOK("The old side: the lines this change took away")
+	} else {
+		m.setOK("The new side: the lines this change proposes")
 	}
 	return m, nil
 }

@@ -676,14 +676,15 @@ different objects, not a letter meaning two unrelated things.
 | --- | --- | --- | --- |
 | `a` | approve this file | `A` | approve every file |
 | `Space` | fold this file | `F` | fold every file, or open them all |
-| `f` | hide the files that are done with | `s` | split the diff, or unify it |
+| `f` | hide the files that are done with | `z` | zoom the pane |
+| `s` | unify the diff, or split it | `S` | cross a split row, to the other side |
 | `c` | comment on this line | `r` | reply |
 | `x` | resolve / reopen | `X` | delete the conversation |
 | `b` | choose the base | `K` | check out another branch |
 | `v` | read the whole file | `o` | read it as the base has it |
 | `e` | edit the file in `$EDITOR` | `m` | read a markdown file, rendered |
-| `V` | select a run of lines | `z` | zoom the pane |
-| `R` | rescan (also `F5`) | `-` / `=` | less / more diff context |
+| `V` | select a run of lines | `R` | rescan (also `F5`) |
+| `-` | less diff context | `=` | more diff context |
 
 `Space` opens whatever the cursor is on. `Ctrl-C` or `q` quits, `F1` or `?`
 shows the keys.
@@ -927,17 +928,22 @@ no lines of its own to mark, so the seam it left behind is marked instead.
 
 ## Split and unified
 
-**`s`** stands the two sides of a change beside each other: what a line was on
-the left, what it became on the right.
+**A review opens split**: what a line was on the left, what it became on the
+right. Most changes under review are edits rather than insertions, and an edit
+is far easier to read when the before and after are on the same row.
 
 ![The same change with its two sides side by side: what each line was on the left, what it became on the right](docs/screenshots/split.png)
 
-Everywhere else in this README is the unified view.
+**`s`** unifies it, and splits it again. Neither is the right way round for
+everything, which is why it is a key rather than a setting. A unified diff
+reads as one text, and is what a patch actually is. A split one lines up what a
+line *was* against what it *became*.
 
-Neither is the right way round for everything, which is why it is a key rather
-than a setting. A unified diff reads as one text, and is what a patch actually
-is. A split one lines up what a line *was* against what it *became*, which is
-what you want when the change is an edit rather than an insertion.
+The review pane's title always names which one you are looking at — `split` or
+`unified` — and that word is a button: clicking it does what `s` does. It is
+named even when it is the ordinary one, because a mode nothing ever mentions is
+a mode nobody finds. The same rule governs the branch and the base on the bar
+above: the things that name a choice are the things that offer to change it.
 
 Each run of removals is paired with the run of additions that follows it, line
 for line — the same reading the [emphasis](#how-a-diff-is-drawn) makes when it
@@ -945,13 +951,44 @@ picks out the characters that changed. Runs of unequal length leave the shorter
 side blank, so a pure insertion has nothing on its left. A hunk header belongs
 to neither side and runs the whole width.
 
-Everything else carries over unchanged: comments hang off the row that draws
-their line, and one written while split lands in exactly the place one written
-unified would. The review does not know which way it was being read.
+### Comments, in both views
 
-Below 90 columns the pane goes on drawing a unified diff — two columns of forty
-characters is worse than one of eighty — and remembers that you asked, so it
-splits itself as soon as the window is wide enough.
+Comments hang off the row that draws their line, and one written while split
+lands in exactly the place one written unified would: a remark is anchored to a
+file, a side and a line number, none of which are things a view can change. The
+stored review does not record which way it was being read, and does not need to.
+
+There is one thing a split row has to be told that a unified row says for
+itself. A unified diff gives every line a row, so putting the cursor on a line
+*is* choosing it. A split row draws two — the line the change took away and the
+line it put there — and moving up and down cannot pick between them.
+
+**`S`** crosses to the other side. The cursor bar is drawn under the half it is
+in, so the line a key is about to act on is the one that looks selected, and
+the title says `old side` while the cursor is on the left. Clicking a half does
+the same thing with the mouse. A row with only one side — a pure insertion has
+nothing on its left — draws the cursor on the side it has, whichever is live.
+
+`s` keeps you on the line you were reading, and on the side it is numbered on,
+without scrolling it: switching views is a change of how the diff is drawn, not
+of where you are in it.
+
+Both `s` and `S` end a `V` selection. A selection is a run of *rows*, and the
+two views do not number rows alike — carrying one across would quietly change
+which lines it covered, which is worse than dropping it and saying so.
+
+Below 80 columns **the pane** — not the window; the file list and the history
+take about forty-seven columns before this one gets any, so eighty here is a
+terminal around a hundred and thirty — draws a unified diff whatever it was
+asked for. At the threshold each half is about thirty columns of code once the
+numbers and the markers have taken theirs, and two columns of thirty are worth
+having where two of twenty are not. It splits itself as soon as there is room,
+and `z` zooms the review pane over the whole window, which is the other way to
+find some.
+
+Ask for it there and it says why it cannot be given, in the title, for as long
+as that is true. Left alone it says nothing: a default doing the best it can
+with the room it has is not a request going unmet.
 
 ## How a diff is drawn
 

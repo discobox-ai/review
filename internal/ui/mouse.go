@@ -347,8 +347,17 @@ func (m Model) mousePress(x, y int, block bool) (tea.Model, tea.Cmd) {
 
 	// The title bar is chrome: clicking it takes the focus, and clicking it
 	// twice zooms the pane, the gesture every tiling window manager taught.
+	// The one exception is the word naming the way the diff is drawn, which
+	// names a choice and so offers to change it — the same thing the branch
+	// and the base do on the bar above.
 	if y == r.y && f != focusReader {
 		m.mouse.clear()
+		if f == focusReview && m.view.modeHit(x-r.x) {
+			mdl, cmd := m.setFocus(f)
+			m = mdl.(Model)
+			mdl, split := m.doSplit()
+			return mdl, tea.Batch(cmd, split)
+		}
 		if m.mouse.titleDouble(f) {
 			return m.toggleZoom(f)
 		}
@@ -385,6 +394,16 @@ func (m Model) mousePress(x, y int, block bool) (tea.Model, tea.Cmd) {
 	// cursor to the row. It is also where a drag starts, and the two do not
 	// fight — a selection is not a selection until it has moved off the cell
 	// it began on, so a plain click leaves nothing highlighted behind it.
+	// Clicking one half of a split row is pointing at the line drawn in it,
+	// which is the plainest way there is to say which side you mean. Only a
+	// row of diff has halves: a heading, a conversation and the box being
+	// written all run the width of the pane, and a press on one of those is
+	// not pointing at either side of anything.
+	if f == focusReview && line >= 0 && line < len(m.view.rows) &&
+		m.view.rows[line].kind == rowDiff {
+		m.view.pickSide(x - r.x)
+	}
+
 	mdl, cmd := m.clickRow(f, line)
 	m = mdl
 
