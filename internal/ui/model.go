@@ -365,6 +365,12 @@ func buildFiles(diff, pending string, states map[string]git.State) []*reviewFile
 		f.plain = len(f.lines) > maxLexLines
 		files = append(files, f)
 	}
+	// Git hands the tracked files over in path order and the untracked ones
+	// arrive on the end, which puts every new file at the bottom of a review
+	// rather than where its name says it belongs. Sorting here is the one
+	// place that fixes it for both panes, since the contents page and the
+	// stack are built from this same slice.
+	sort.SliceStable(files, func(i, j int) bool { return files[i].path < files[j].path })
 	lexAll(files)
 	return files
 }

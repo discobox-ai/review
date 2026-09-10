@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -3611,5 +3612,36 @@ func TestChoosingACommitAsTheBase(t *testing.T) {
 	}
 	if !strings.Contains(plain(m), hash[:7]) {
 		t.Error("the bar does not say which commit the review is measured from")
+	}
+}
+
+// Git lists the tracked files in path order and discobox-review appends the untracked
+// ones, so a new file arrives at the end of the diff however its name reads.
+// The review sorts them back together, and because the contents page is built
+// from the same slice as the stack, the two panes agree on the order.
+func TestFilesAreSortedByPathInBothPanes(t *testing.T) {
+	var b strings.Builder
+	// The order they arrive in: the tracked files in path order, then the
+	// untracked ones appended however git listed them.
+	for _, path := range []string{"internal/mid.go", "zz/last.go", "aardvark.go", "internal/aaa.go"} {
+		fmt.Fprintf(&b, "diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n+x\n", path, path, path, path)
+	}
+	files := buildFiles(b.String(), "", nil)
+
+	var got []string
+	for _, f := range files {
+		got = append(got, f.path)
+	}
+	want := []string{"aardvark.go", "internal/aaa.go", "internal/mid.go", "zz/last.go"}
+	if !slices.Equal(got, want) {
+		t.Errorf("the stack is in %v, want %v", got, want)
+	}
+
+	var listed []string
+	for _, e := range entriesFor(files) {
+		listed = append(listed, e.path)
+	}
+	if !slices.Equal(listed, got) {
+		t.Errorf("the file list is in %v, the stack in %v", listed, got)
 	}
 }
