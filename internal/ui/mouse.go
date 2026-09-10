@@ -285,10 +285,17 @@ func (m Model) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if m.dragBar(msg.X, msg.Y) {
 			return m, nil
 		}
+		if m.dragRule(msg.X) {
+			return m, nil
+		}
 		return m.mouseDrag(msg.X, msg.Y)
 	case tea.MouseReleaseMsg:
 		if m.bar != nil {
 			m.bar = nil
+			return m, nil
+		}
+		if m.rule != nil {
+			m.rule = nil
 			return m, nil
 		}
 		return m.mouseRelease()
@@ -349,6 +356,12 @@ func (m Model) mousePress(x, y int, block bool) (tea.Model, tea.Cmd) {
 	// is drawn over the pane's own right edge and foot, so whatever is behind
 	// it must not answer for it.
 	if m.grabBar(x, y) {
+		m.mouse.clear()
+		return m, nil
+	}
+	// The rule between the columns belongs to neither of them, so it is
+	// answered here rather than by a pane.
+	if m.grabRule(x, y) {
 		m.mouse.clear()
 		return m, nil
 	}
@@ -593,4 +606,48 @@ func copyToClipboard(text string) tea.Cmd {
 
 func osc52(text string) string {
 	return "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\a"
+}
+
+// ---------------------------------------------------------------------------
+// The rule between the columns
+// ---------------------------------------------------------------------------
+
+// ruleDrag is the divider being dragged: where the press landed and how wide
+// the left column was when it did, so the rule keeps its place under the
+// pointer however far the hand wanders.
+type ruleDrag struct{ from, at int }
+
+// ruleX is the column the divider is drawn in, and whether it is drawn at all.
+func (m *Model) ruleX() (int, bool) {
+	if !m.ready || m.zoom || m.leftCollapsed() {
+		return 0, false
+	}
+	return m.leftWidth(), true
+}
+
+// grabRule takes hold of the divider. Only the column the rule is actually
+// drawn in counts: the cells either side of it belong to the panes, and a
+// press on a row of the review has to reach that row rather than a handle
+// nobody was aiming at.
+func (m *Model) grabRule(x, y int) bool {
+	col, ok := m.ruleX()
+	if !ok || x != col {
+		return false
+	}
+	if y < 1 || y >= 1+max(m.height-2, 4) {
+		return false
+	}
+	m.rule = &ruleDrag{from: x, at: col}
+	return true
+}
+
+// dragRule follows the pointer while the divider is held. Only the column
+// matters: a divider runs the height of the window, so there is nowhere for it
+// to go vertically.
+func (m *Model) dragRule(x int) bool {
+	if m.rule == nil {
+		return false
+	}
+	m.setLeftWidth(m.rule.at + x - m.rule.from)
+	return true
 }

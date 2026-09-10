@@ -77,6 +77,8 @@ type keyMap struct {
 	PrevFile       key.Binding
 	LessContextKey key.Binding
 	MoreContextKey key.Binding
+	WiderKey       key.Binding
+	NarrowerKey    key.Binding
 
 	Up       key.Binding
 	Down     key.Binding
@@ -181,6 +183,14 @@ func newKeyMap() keyMap {
 		PrevFile:       key.NewBinding(key.WithKeys("["), key.WithHelp("[", "previous file")),
 		LessContextKey: key.NewBinding(key.WithKeys("-"), key.WithHelp("-", "less context")),
 		MoreContextKey: key.NewBinding(key.WithKeys("=", "+"), key.WithHelp("=", "more context")),
+		// The rule between the columns. > and < point the way the rule moves,
+		// and Alt with an arrow is the same thing for a hand that reaches for
+		// the arrows — spelled out because Alt-→ is not Meta on every macOS
+		// terminal, which is why the letters are the ones the help names.
+		WiderKey: key.NewBinding(
+			key.WithKeys(">", "alt+right"), key.WithHelp(">", "widen the file list")),
+		NarrowerKey: key.NewBinding(
+			key.WithKeys("<", "alt+left"), key.WithHelp("<", "narrow the file list")),
 
 		Up:       key.NewBinding(key.WithKeys("up", "k")),
 		Down:     key.NewBinding(key.WithKeys("down", "j")),

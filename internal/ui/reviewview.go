@@ -1548,7 +1548,7 @@ func (v *reviewView) fileHeader(f *reviewFile, st *styles, band lipgloss.Style, 
 	// The tail gets whatever the whole name leaves. Only when that is not
 	// enough for anything at all, and only when the file has something the
 	// reader has to act on, does the name give way instead — elided from the
-	// front, since the end of a path is the half that names the file.
+	// middle, so both which file it is and where it sits survive the cut.
 	tail := f.headerTail(max(avail-width(fold+name)-2, 0))
 	if tail == "" && f.speaks() {
 		tail = f.headerTail(max(avail/2, 0))
@@ -1556,7 +1556,7 @@ func (v *reviewView) fileHeader(f *reviewFile, st *styles, band lipgloss.Style, 
 
 	left := fold + name
 	if tail != "" {
-		left = fold + elideLeft(name, max(avail-width(tail)-width(fold)-2, 1))
+		left = fold + elideMiddle(name, max(avail-width(tail)-width(fold)-2, 1))
 	}
 	text := left
 	if tail != "" && width(left)+width(tail)+2 <= avail {

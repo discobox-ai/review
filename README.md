@@ -729,7 +729,9 @@ terminals that can say them.
 Letters also need no modifier, which sidesteps macOS: Option is not Meta there
 unless the terminal is configured for it, so an `Alt`-based scheme would arrive
 as accented characters. The only `Alt` bindings are `Alt-1` … `Alt-3` for
-jumping to a pane and `Alt-Z` for zoom, and `Tab` does the first without them.
+jumping to a pane, `Alt-Z` for zoom, and `Alt-←` / `Alt-→` for the rule between
+the columns — and each of those has a plain key that does the same thing:
+`Tab`, `z`, and `<` / `>`.
 
 ### Getting about
 
@@ -744,6 +746,7 @@ jumping to a pane and `Alt-Z` for zoom, and `Tab` does the first without them.
 | `g` / `G` | The top / the bottom |
 | `24g` | Line 24 of the file the cursor is in |
 | `z` | Zoom the focused pane to the whole window |
+| `<` / `>` | Narrow / widen the left column (also `Alt-←` / `Alt-→`) |
 
 The panes form a grid, and navigation walks it:
 
@@ -806,6 +809,50 @@ read code in, which is the one thing the window is for. `→` gives the review
 the whole width, `←` brings the list back, and the status bar says so while it
 is away.
 
+#### Moving the rule
+
+The left column is a third of the window to begin with, within reason, and
+paths are longer than that. **`>` widens it and `<` narrows it**, two columns a
+press; `Alt-→` and `Alt-←` do the same for a hand already on the arrows, and
+**dragging the rule between the columns** moves it straight to where you let go.
+The width you set is kept — resizing the window leaves the rule where you put
+it — and it stops before either pane stops being worth drawing: the review
+keeps 40 columns whatever the lists are asked for, because the review is what
+the window is for.
+
+**A path too long for the row is cut in the middle**, not at either end:
+
+```
+  ○ int…/reviewview.go +120 −33 (2)
+```
+
+Which file it is lives at the end of a path and where in the tree it sits lives
+at the front, so a cut at either end throws one of those away. **The cut is
+made at a slash** whenever there is room for the name it stands in front of, so
+what follows the ellipsis is a whole path segment: `int…/reviewview.go` reads
+as a file at the end of a path it has no room to name, where
+`int…reviewview.go` reads as a name with a hole in the middle of it. Only when
+the name will not fit even on its own do the two ends share what there is
+between them.
+
+**The files of one directory are all cut in the same column**, so that the
+names line up:
+
+```
+each row cut for itself             cut for the column
+  ○ in…/reviewview.go +120 −33 (2)    ○ in…/reviewview.go +120 −33 (2)
+  ○ internal/ui/model.go        +4    ○ in…/model.go                +4
+  ○ internal/ui/view.go    +12 (2)    ○ in…/view.go            +12 (2)
+```
+
+A list of paths is a column of file names, and the names only form a column if
+the slash in front of them does. So a path is elided even when it would have
+fitted whole: one long name — or one wide tally, which is the same thing to the
+row it is on — moves the cut left for every file in that directory at once. A
+file with no room even for its own name is elided on its own instead, rather
+than dragging the rest of its directory down to nothing, and a directory with
+room to spare keeps its paths whole.
+
 #### Zoom
 
 `z` gives the focused pane the whole window, and `z` again hands the window
@@ -832,6 +879,7 @@ nothing.
 | Click the `from …` | Choose the base |
 | Click a `▾` | Fold that file, or open it |
 | Drag a scrollbar | Scroll the pane, without moving its cursor |
+| Drag the rule between the columns | Widen or narrow the left column |
 | Wheel | Scroll whatever is under the pointer, without moving the focus |
 | Wheel sideways | Slide the review across, a tab stop a tick |
 | Drag | Select text, character by character |

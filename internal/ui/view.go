@@ -38,10 +38,7 @@ func (m *Model) layout() {
 		return
 	}
 
-	leftW := max(min(m.width*34/100, 46), 24)
-	if leftW > m.width-30 {
-		leftW = max(m.width/3, 12)
-	}
+	leftW := m.leftWidth()
 	rightW := max(m.width-leftW-1, 10)
 	if m.leftCollapsed() {
 		leftW, rightW = 0, m.width
@@ -137,6 +134,78 @@ func (m Model) toggleZoom(f focusArea) (tea.Model, tea.Cmd) {
 	m.view.build()
 	m.view.clamp()
 	return m, cmd
+}
+
+// leftWidth is how wide the left column stands: about a third of the window,
+// kept within reason, or whatever width it was last set to by hand.
+//
+// A path is long and a pane is narrow, so which files a review touches is the
+// one thing the window cannot always show — hence the handle: Alt-→ and Alt-←,
+// or > and <, or dragging the rule between the columns.
+func (m *Model) leftWidth() int {
+	if m.treeW > 0 {
+		return min(max(m.treeW, minLeftWidth), m.maxLeftWidth())
+	}
+	return m.autoLeftWidth()
+}
+
+// autoLeftWidth is the width the window picks for itself, and what the rule
+// goes back to if the hand never moves it.
+func (m *Model) autoLeftWidth() int {
+	w := max(min(m.width*34/100, 46), 24)
+	if w > m.width-30 {
+		w = max(m.width/3, 12)
+	}
+	return w
+}
+
+// minLeftWidth is the narrowest the left column is worth drawing: below it a
+// row is more chrome and ellipsis than name. minReviewWidth is what the review
+// keeps whatever the lists are asked for — it is what the window is for, so it
+// is the column with a floor rather than a ceiling.
+const (
+	minLeftWidth   = 12
+	minReviewWidth = 40
+)
+
+// maxLeftWidth is as far right as the rule goes. It is never less than the
+// width the window would have chosen on its own, since on a screen too small
+// for both to hold the ceiling would otherwise sit under the column already
+// drawn — and a press of the widen key would narrow it.
+func (m *Model) maxLeftWidth() int {
+	return max(max(m.width-1-minReviewWidth, m.autoLeftWidth()), minLeftWidth)
+}
+
+// setLeftWidth widens or narrows the left column, remembering the width it
+// lands on so that it survives a resize of the window and everything else that
+// lays the panes out again.
+func (m *Model) setLeftWidth(w int) {
+	m.treeW = min(max(w, minLeftWidth), m.maxLeftWidth())
+	m.layout()
+	// The review is wrapped to its pane, so its rows have to be laid out again
+	// at whatever width the move left it.
+	m.view.build()
+	m.view.clamp()
+}
+
+// resizeStep is how far one press of the resize key moves the rule. One column
+// is too slow to be worth a key; a hand that wants finer than this has the
+// mouse.
+const resizeStep = 2
+
+// doResizeLeft answers the resize keys. Nothing is resizable while a pane is
+// zoomed or the lists are folded away, and a key that silently does nothing is
+// worse than one that says why.
+func (m Model) doResizeLeft(delta int) (tea.Model, tea.Cmd) {
+	switch {
+	case m.zoom:
+		m.setWarn("The pane is zoomed — Alt-Z gives the columns back")
+	case m.leftCollapsed():
+		m.setWarn("The file list is folded away at this width — ← brings it back")
+	default:
+		m.setLeftWidth(m.leftWidth() + delta)
+	}
+	return m, nil
 }
 
 // narrowWidth is where the window stops being wide enough for both columns.
@@ -421,10 +490,13 @@ func (m Model) scoreboard() string {
 func (m Model) hints() string {
 	switch m.focus {
 	case focusFiles:
+		// The width keys are offered here because this is the pane they are
+		// about: a path too long for the column is the thing that sends a
+		// hand looking for them.
 		if m.hideDone {
-			return "↑/↓ jump to a file · → the review · a approve · f shows the finished ones"
+			return "↑/↓ jump to a file · → the review · a approve · < > width · f shows the finished ones"
 		}
-		return "↑/↓ jump to a file · → the review · a approve · F fold them all · ? keys"
+		return "↑/↓ jump to a file · → the review · a approve · < > width · F fold them all · ? keys"
 	case focusHistory:
 		if _, ok := m.history.selected(); ok {
 			return "↑/↓ pick a commit · ↑ to the top row for the whole review · ? keys"
@@ -538,6 +610,8 @@ func helpText() string {
 		"    t / T   next / previous open comment",
 		"    ] / [   next / previous file",
 		"    g / G   the top / the bottom",
+		"    < / >   narrow / widen the file list — Alt-← and Alt-→ do the",
+		"            same, and so does dragging the rule between the columns",
 		"",
 		"  The list on the left is a contents page for the stack on the",
 		"  right: moving in one moves the other, so they never disagree",

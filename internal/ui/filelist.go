@@ -25,6 +25,12 @@ type fileList struct {
 	offset int
 	width  int
 	height int // rows available for file rows, title excluded
+
+	// shown is the path each row draws, elided so that a directory's files cut
+	// in the same column; shownW is the row width it was worked out for. See
+	// fit, which fills them in.
+	shown  []string
+	shownW int
 }
 
 // fileEntry is one row: a path and every verdict standing against it.
@@ -58,7 +64,7 @@ func (l *fileList) title() string {
 // that file is still there and otherwise on the same row.
 func (l *fileList) setEntries(entries []fileEntry) {
 	prev, row := l.currentPath(), l.cursor
-	l.entries = entries
+	l.entries, l.shown = entries, nil
 	l.cursor = row
 	for i, e := range entries {
 		if e.path == prev {
@@ -181,39 +187,161 @@ func (e fileEntry) tally() string {
 // The pending column repeats the review pane's own margin, so a file with
 // work still to commit is marked the same way in both places.
 func (l *fileList) row(i, w int) (chrome, body string) {
-	e := l.entries[i]
-	mark := " "
-	if e.pending != "" {
-		mark = pendingGlyph
-	}
-	chrome = " " + mark + e.verdict() + " "
+	chrome = l.chrome(i)
 	avail := max(w-width(chrome), 0)
 
-	name, tally := l.name(i), e.tally()
+	l.fit(w)
+	name, tally := l.shown[i], l.entries[i].tally()
 	if tally != "" && width(tally)+2 <= avail {
-		name = elideLeft(name, avail-width(tally)-1)
 		gap := avail - width(name) - width(tally)
 		return chrome, name + strings.Repeat(" ", max(gap, 1)) + tally
 	}
-	return chrome, pad(elideLeft(name, avail), avail)
+	return chrome, pad(name, avail)
 }
 
-// elideLeft shortens a path from the front, since the end of one is the half
-// that says which file it is.
-func elideLeft(s string, w int) string {
+// chrome is the four cells in front of a path: the margin, the mark for work
+// still to commit, the verdict, and a space.
+func (l *fileList) chrome(i int) string {
+	mark := " "
+	if l.entries[i].pending != "" {
+		mark = pendingGlyph
+	}
+	return " " + mark + l.entries[i].verdict() + " "
+}
+
+// room is how many columns row i has for its path, once the chrome and the
+// tally have taken theirs.
+func (l *fileList) room(i, w int) int {
+	avail := max(w-width(l.chrome(i)), 0)
+	if tally := l.entries[i].tally(); tally != "" && width(tally)+2 <= avail {
+		return avail - width(tally) - 1
+	}
+	return avail
+}
+
+// fit works out the path every row draws. It cannot be done a row at a time:
+// rows sharing a directory are cut in the same column, so a path that would
+// have fitted whole is elided anyway when a file beside it could not.
+//
+// That alignment is what makes a list of paths a column rather than a wall of
+// text. The eye finds a file by its name, and the names line up only if the
+// slash in front of them does — so a long name, or a wide tally, pushes the
+// cut left for every file in its directory at once:
+//
+//	○ internal/ui/model.go  +4        ○ inte…/model.go            +4
+//	○ internal/ui/view.go  +12 (2)    ○ inte…/view.go        +12 (2)
+//	○ inte…/reviewview.go +120 −33    ○ inte…/reviewview.go +120 −33
+//
+// The result is cached against the width it was laid out for; setEntries drops
+// it, which is the only way the rows change.
+func (l *fileList) fit(w int) {
+	if l.shown != nil && l.shownW == w {
+		return
+	}
+	l.shownW, l.shown = w, make([]string, len(l.entries))
+
+	// What each directory can show of itself: the least any one of its rows
+	// can afford, since a column is only a column if they all cut in the same
+	// place.
+	heads := map[string]int{}
+	for i := range l.entries {
+		if dir, _, afford, ok := l.place(i, w); ok {
+			if h, seen := heads[dir]; !seen || afford < h {
+				heads[dir] = afford
+			}
+		}
+	}
+	for i := range l.entries {
+		name, room := l.name(i), l.room(i, w)
+		dir, base, _, ok := l.place(i, w)
+		switch h := heads[dir]; {
+		case ok && h < width(dir):
+			// Cut where the directory column says, not where this row alone
+			// would have. The head is never the whole of the directory here,
+			// so what is drawn is never wider than the path itself.
+			l.shown[i] = runewidth.Truncate(dir, h, "") + "…" + base
+		case width(name) <= room:
+			l.shown[i] = name
+		default:
+			l.shown[i] = elideMiddle(name, room)
+		}
+	}
+}
+
+// place is what one row would like to draw: the directory it is in, its own
+// name with the slash in front of it, and how much of the directory it can
+// afford to show — all of it, when the whole path fits.
+//
+// ok is false for a row that lines up with nothing: one with no directory at
+// all, and one with no room even for its own name, which is elided on its own
+// rather than dragging the rest of its directory down with it.
+func (l *fileList) place(i, w int) (dir, base string, afford int, ok bool) {
+	name, room := l.name(i), l.room(i, w)
+	j := strings.LastIndexByte(name, '/')
+	if j < 0 {
+		return "", "", 0, false
+	}
+	dir, base = name[:j], name[j:]
+	if width(name) <= room {
+		return dir, base, width(dir), true
+	}
+	// The ellipsis takes a column and the directory must keep at least one,
+	// or there is nothing left to line up.
+	if width(base) > room-2 {
+		return "", "", 0, false
+	}
+	return dir, base, room - 1 - width(base), true
+}
+
+// elideMiddle shortens a path from the middle, keeping both ends. Which file
+// it is lives at the end of a path and where in the tree it sits lives at the
+// front, so a cut at either end throws one of those away; the part a reader
+// can fill in is the run of directories between them.
+//
+// The cut is made at a slash whenever there is room for the name it stands in
+// front of, so what follows the ellipsis is a whole path segment:
+//
+//	internal/ui/filelist.go  →  inter…/filelist.go
+//
+// "inter…/filelist.go" reads as a file at the end of a path it does not have
+// room to name, where "inter…filelist.go" reads as a name with a hole in the
+// middle of it. Only when the name will not fit even on its own do the two
+// ends fall back to sharing what there is between them.
+func elideMiddle(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
 	if width(s) <= w {
 		return s
 	}
+	if w == 1 {
+		return "…"
+	}
 	runes := []rune(s)
-	for i := range runes {
-		if candidate := "…" + string(runes[i:]); width(candidate) <= w {
-			return candidate
+
+	// Where the tail starts. The slash goes with the name, and w-2 leaves the
+	// ellipsis its column and the front at least one of its own.
+	tail := len(runes)
+	if i := strings.LastIndexByte(s, '/'); i >= 0 && width(s[i:]) <= w-2 {
+		tail = len([]rune(s[:i]))
+	} else {
+		for used, tailW := 0, w/2; tail > 0; tail-- {
+			if used += runewidth.RuneWidth(runes[tail-1]); used > tailW {
+				break
+			}
 		}
 	}
-	return runewidth.Truncate(s, w, "…")
+
+	// The front takes whatever the tail leaves. It always stops short of the
+	// tail: a name that fitted whole was never elided in the first place.
+	headW := w - 1 - width(string(runes[tail:]))
+	head := 0
+	for used := 0; head < tail; head++ {
+		if used += runewidth.RuneWidth(runes[head]); used > headW {
+			break
+		}
+	}
+	return string(runes[:head]) + "…" + string(runes[tail:])
 }
 
 func (l *fileList) view(st *styles, focused bool) string {

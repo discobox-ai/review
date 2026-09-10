@@ -142,11 +142,19 @@ type Model struct {
 	// is clicked in a single place.
 	rects [focusCount]rect
 
-	// mouse is the text selection the mouse makes, and bar the scrollbar being
-	// dragged. Both are pointers because the Model is copied on every update
-	// and a gesture in progress has to survive that.
+	// treeW is the width the left column has been set to by hand, and 0 while
+	// it is still whatever the window's own arithmetic makes it. It is kept as
+	// a width rather than as an adjustment so that resizing the window moves
+	// the rule only when it has to.
+	treeW int
+
+	// mouse is the text selection the mouse makes, bar the scrollbar being
+	// dragged, and rule the divider between the columns. All three are
+	// pointers because the Model is copied on every update and a gesture in
+	// progress has to survive that.
 	mouse *mouseState
 	bar   *barDrag
+	rule  *ruleDrag
 }
 
 // compose is a comment being written, and where it will be filed when it is
@@ -1035,6 +1043,10 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.changeContext(-1)
 	case key.Matches(msg, m.keys.MoreContextKey):
 		return m.changeContext(+1)
+	case key.Matches(msg, m.keys.NarrowerKey):
+		return m.doResizeLeft(-resizeStep)
+	case key.Matches(msg, m.keys.WiderKey):
+		return m.doResizeLeft(+resizeStep)
 	}
 
 	switch m.focus {
