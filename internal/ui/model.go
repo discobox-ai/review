@@ -1682,13 +1682,21 @@ func (m Model) enterPane(f focusArea, e entry) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) setFocus(f focusArea) (tea.Model, tea.Cmd) {
+	m, cmd := m.takeFocus(f)
+	m.layout()
+	return m, cmd
+}
+
+// takeFocus is setFocus without laying the window out again. Laying out brings
+// every pane's cursor back on screen, which is wrong for a gesture that has
+// only just scrolled a pane away from it.
+func (m Model) takeFocus(f focusArea) (Model, tea.Cmd) {
 	m.focus = f
 	// A selection belongs to the pane it was made in and to the moment it was
 	// made in, so leaving that pane ends it.
 	if f != focusReview {
 		m.view.clearVisual()
 	}
-	m.layout()
 	if f == focusCompose {
 		m.editor.Focus()
 		return m, textarea.Blink

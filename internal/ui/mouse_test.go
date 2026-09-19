@@ -395,9 +395,9 @@ func TestSelectionIsPaintedWithoutChangingTheLayout(t *testing.T) {
 	}
 }
 
-// The wheel scrolls whatever is under the pointer and leaves the focus alone:
-// reading ahead in a pane is not the same as going to work in it.
-func TestWheelScrollsWithoutMovingTheFocus(t *testing.T) {
+// The wheel scrolls whatever is under the pointer and takes the focus there,
+// leaving the cursor where it was.
+func TestWheelScrollsAndFocusesThePane(t *testing.T) {
 	m := newTestModel(t)
 	m = drive(t, m, altKey("1"))
 	if m.focus != focusFiles {
@@ -412,11 +412,126 @@ func TestWheelScrollsWithoutMovingTheFocus(t *testing.T) {
 	if m.view.offset != before+wheelLines {
 		t.Errorf("review offset = %d, want %d", m.view.offset, before+wheelLines)
 	}
-	if m.focus != focusFiles {
-		t.Errorf("the wheel moved the focus to %v", m.focus)
+	if m.focus != focusReview {
+		t.Errorf("focus = %v after the wheel, want the review", m.focus)
 	}
 	if m.view.cursor != cursor {
 		t.Errorf("the wheel moved the cursor to %d", m.view.cursor)
+	}
+
+	// Going back to a pane with the wheel works the same way.
+	f := m.rects[focusFiles]
+	m = drive(t, m, wheelAt(f.x+2, f.y+2, false))
+	if m.focus != focusFiles {
+		t.Errorf("focus = %v after the wheel over the files, want the file list", m.focus)
+	}
+
+	// Coming back keeps scrolling from wherever the review was, rather than
+	// laying out again and snapping back to the cursor.
+	before = m.view.offset
+	m = drive(t, m, wheelAt(r.x+2, r.y+3, false), wheelAt(r.x+2, r.y+3, false))
+	if m.view.offset != before+2*wheelLines {
+		t.Errorf("review offset = %d after two more ticks, want %d",
+			m.view.offset, before+2*wheelLines)
+	}
+}
+
+// Wheeling over the file list leafs through the files: each tick moves the
+// cursor one file and shows it in the review, the way up and down do.
+func TestWheelOverTheFilesMovesTheCursor(t *testing.T) {
+	m := newTestModel(t)
+	if len(m.files.entries) < 3 {
+		t.Fatalf("need three files, got %v", pathsOf(m))
+	}
+	m = drive(t, m, altKey("2"))
+
+	r := m.rects[focusFiles]
+	m = drive(t, m, wheelAt(r.x+2, r.y+2, false), wheelAt(r.x+2, r.y+2, false))
+	if m.focus != focusFiles {
+		t.Errorf("focus = %v, want the file list", m.focus)
+	}
+	if m.files.cursor != 2 {
+		t.Errorf("cursor = %d after two ticks down, want 2", m.files.cursor)
+	}
+	if got := m.view.pathAt(); got != m.files.currentPath() {
+		t.Errorf("the review is showing %q, want %q", got, m.files.currentPath())
+	}
+
+	m = drive(t, m, wheelAt(r.x+2, r.y+2, true))
+	if m.files.cursor != 1 {
+		t.Errorf("cursor = %d after a tick back up, want 1", m.files.cursor)
+	}
+	// And the list stops at its ends rather than wrapping.
+	m = drive(t, m, wheelAt(r.x+2, r.y+2, true), wheelAt(r.x+2, r.y+2, true))
+	if m.files.cursor != 0 {
+		t.Errorf("cursor = %d past the top, want 0", m.files.cursor)
+	}
+}
+
+// On a narrow window the left column folds away while the review has the
+// focus, so wheeling the focus onto the review has to lay the window out
+// again: otherwise the clicks still land on a file list that is no longer
+// drawn.
+func TestWheelOntoTheReviewFoldsANarrowWindow(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 80, Height: 30}, altKey("1"))
+	if m.leftCollapsed() {
+		t.Fatal("the left column is folded with the focus on the files")
+	}
+	r := m.rects[focusReview]
+	m = drive(t, m, wheelAt(r.x+2, r.y+3, false))
+
+	if m.focus != focusReview {
+		t.Fatalf("focus = %v, want the review", m.focus)
+	}
+	if got := m.rects[focusReview]; got.x != 0 || got.w != m.width {
+		t.Errorf("review drawn at %+v, want the whole width from x=0", got)
+	}
+	if f, _, _, _ := m.hit(2, r.y+3); f != focusReview {
+		t.Errorf("a point at the left edge hits %v, want the review", f)
+	}
+}
+
+// Pressing the review's bar on a narrow window does not fold the left column
+// under the pointer: the fold would move the bar, and a press on the thumb
+// would land on the track and jump the pane.
+func TestGrabbingABarOnANarrowWindowKeepsTheColumn(t *testing.T) {
+	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 80, Height: 30})
+	bigReview(t, &m, 400)
+	m = drive(t, m, altKey("1"))
+	b, ok := m.vbar(focusReview)
+	if !ok {
+		t.Fatal("the review is not wearing a vertical bar")
+	}
+	m = drive(t, m, pressAt(b.pos, b.lo))
+
+	if m.view.offset != 0 {
+		t.Errorf("offset = %d after pressing the thumb, want 0", m.view.offset)
+	}
+	if m.leftCollapsed() {
+		t.Error("pressing the bar folded the left column")
+	}
+	if m.bar == nil || m.bar.pane != focusReview {
+		t.Errorf("bar = %+v, want the review's held", m.bar)
+	}
+}
+
+// Wheeling past the last file leaves the review alone: an overshoot must not
+// pull the reader back to the top of the file they are in.
+func TestWheelPastTheLastFileKeepsTheReviewsPlace(t *testing.T) {
+	m := newTestModel(t)
+	r := m.rects[focusFiles]
+	m = drive(t, m, altKey("1"))
+	m.files.moveTo(len(m.files.entries) - 1)
+	m.view.jumpToFile(m.files.currentPath())
+	m.view.move(1)
+	cursor := m.view.cursor
+
+	m = drive(t, m, wheelAt(r.x+2, r.y+2, false))
+	if m.files.cursor != len(m.files.entries)-1 {
+		t.Fatalf("cursor = %d, want the last file", m.files.cursor)
+	}
+	if m.view.cursor != cursor {
+		t.Errorf("review cursor = %d after an overshoot, want it left at %d", m.view.cursor, cursor)
 	}
 }
 
@@ -841,6 +956,7 @@ func TestDraggingOverTheHeadingCopiesInsteadOfFolding(t *testing.T) {
 func TestDraggingTheVerticalBarScrolls(t *testing.T) {
 	m := newTestModel(t)
 	bigReview(t, &m, 400)
+	m = drive(t, m, altKey("1"))
 	b, ok := m.vbar(focusReview)
 	if !ok {
 		t.Fatal("the review is not wearing a vertical bar")
@@ -864,6 +980,9 @@ func TestDraggingTheVerticalBarScrolls(t *testing.T) {
 	}
 	if m.mouse.hasSelection() {
 		t.Error("grabbing the bar started a text selection")
+	}
+	if m.focus != focusReview {
+		t.Errorf("focus = %v after grabbing its bar, want the review", m.focus)
 	}
 
 	// And back up to the top by dragging.

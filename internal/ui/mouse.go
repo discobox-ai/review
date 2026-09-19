@@ -314,12 +314,33 @@ func (m Model) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// mouseWheel scrolls whatever is under the pointer, without moving the focus
-// to it. Reading ahead in a pane is not the same as going to work in it.
+// mouseWheel scrolls whatever is under the pointer, and takes the focus there:
+// a pane being scrolled is the pane being looked at, and the keys that follow
+// are meant for it. The cursor stays where it was, except in the file list.
 func (m Model) mouseWheel(x, y int, button tea.MouseButton) (tea.Model, tea.Cmd) {
 	f, _, _, ok := m.hit(x, y)
 	if !ok {
 		return m, nil
+	}
+	m, cmd := m.focusUnder(f)
+	// The file list is a table of contents, and wheeling through it is
+	// leafing through the change: each tick moves to the next file and shows
+	// it, the same as a press of up or down. A file per tick rather than
+	// wheelLines of them, since the whole point is to stop on each one.
+	if f == focusFiles && (button == tea.MouseWheelUp || button == tea.MouseWheelDown) {
+		delta := 1
+		if button == tea.MouseWheelUp {
+			delta = -1
+		}
+		// Past either end the cursor stays put, and so does the review: a
+		// wheel overshooting the last file must not pull the reader back to
+		// the top of it.
+		was := m.files.cursor
+		m.files.move(delta)
+		if m.files.cursor != was {
+			m.view.jumpToFile(m.files.currentPath())
+		}
+		return m, cmd
 	}
 	switch button {
 	case tea.MouseWheelUp:
@@ -331,7 +352,38 @@ func (m Model) mouseWheel(x, y int, button tea.MouseButton) (tea.Model, tea.Cmd)
 	case tea.MouseWheelRight:
 		m.scrollPaneH(f, hWheelStep)
 	}
-	return m, nil
+	return m, cmd
+}
+
+// focusUnder moves the focus to the pane the pointer is working in, for the
+// gestures that scroll a pane rather than pick anything in it. It must come
+// before the scroll, and it lays the window out again only when the focus
+// change reshapes it: laying out brings every cursor back on screen, which
+// would undo a scroll made in this pane or any other. The one focus change
+// that reshapes the window is on a narrow one, where the left column folds
+// away while the review has the focus and comes back when it leaves.
+//
+// The reader is not a pane and never takes the focus, and a comment being
+// written lives inside the review, so scrolling the review around it leaves
+// the keyboard in the box.
+func (m Model) focusUnder(f focusArea) (Model, tea.Cmd) {
+	if f == focusReader || f == m.focus || (f == focusReview && m.focus == focusCompose) {
+		return m, nil
+	}
+	folds := m.foldsFor(f)
+	m, cmd := m.takeFocus(f)
+	if folds {
+		m.layout()
+	}
+	return m, cmd
+}
+
+// foldsFor reports whether moving the focus to a pane folds the left column
+// away or brings it back, reshaping everything on screen.
+func (m Model) foldsFor(f focusArea) bool {
+	collapsed := m.leftCollapsed()
+	m.focus = f
+	return m.leftCollapsed() != collapsed
 }
 
 // scrollPaneH slides a pane sideways. Only the review has anywhere to go: it
@@ -355,9 +407,19 @@ func (m Model) mousePress(x, y int, block bool) (tea.Model, tea.Cmd) {
 	// A scrollbar is taken hold of before anything else looks at the press: it
 	// is drawn over the pane's own right edge and foot, so whatever is behind
 	// it must not answer for it.
-	if m.grabBar(x, y) {
+	//
+	// Taking hold of a bar takes the focus too, unless that would fold the
+	// left column: the fold moves and resizes the bar the press just landed
+	// on, so a press on the thumb would end up on the track and jump the
+	// pane. On a narrow window the bar is held and the focus stays put.
+	if f, _, _, ok := m.barAt(x, y); ok {
 		m.mouse.clear()
-		return m, nil
+		var cmd tea.Cmd
+		if !m.foldsFor(f) {
+			m, cmd = m.focusUnder(f)
+		}
+		m.grabBar(x, y)
+		return m, cmd
 	}
 	// The rule between the columns belongs to neither of them, so it is
 	// answered here rather than by a pane.

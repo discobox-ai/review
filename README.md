@@ -878,9 +878,10 @@ nothing.
 | Click the branch name | Check out another branch |
 | Click the `from …` | Choose the base |
 | Click a `▾` | Fold that file, or open it |
-| Drag a scrollbar | Scroll the pane, without moving its cursor |
+| Drag a scrollbar | Scroll the pane and focus it, without moving its cursor (on a narrow window the review's bar leaves the focus where it was, rather than fold the left column away mid-grab) |
 | Drag the rule between the columns | Widen or narrow the left column |
-| Wheel | Scroll whatever is under the pointer, without moving the focus |
+| Wheel | Scroll whatever is under the pointer, and focus it |
+| Wheel over the files | Move to the next or previous file, and show it |
 | Wheel sideways | Slide the review across, a tab stop a tick |
 | Drag | Select text, character by character |
 | Double click | Select a word |
