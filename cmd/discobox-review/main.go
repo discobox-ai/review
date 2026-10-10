@@ -3,9 +3,9 @@
 // With no subcommand it opens the window. With one it reads or writes the same
 // review from a script — see the cli package.
 //
-// The window is a contents page and a history on the left, and on the right
-// every change the branch makes, from its merge base to the working tree, in
-// one scroll — with the comments written into it where they were made. Files
+// The window is every change the branch makes, from its merge base to the
+// working tree, in one scroll — with the comments written into it where they
+// were made — over a strip of the commits it was made in. Files
 // are approved, lines are commented on, and the whole verdict is kept in a
 // JSON file in the git directory that something else can read and write.
 //
@@ -45,7 +45,7 @@ func main() {
 	}
 
 	showVersion := flag.Bool("version", false, "print the version and exit")
-	base := flag.String("base", "", "review from this ref instead of the one discobox-review works out")
+	base := flag.String("base", "", "review from this ref instead of the one Discobox Review works out")
 	by := flag.String("by", "", "who the comments written in the window are from; "+cli.GitUser+" takes git's own user.name")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: discobox-review -by <who> [-version] [-base <ref>] [path]\n"+

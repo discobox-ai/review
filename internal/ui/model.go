@@ -21,9 +21,8 @@ import (
 type focusArea int
 
 const (
-	focusFiles   focusArea = iota // the contents page, top left
-	focusReview                   // the stacked diff, right
-	focusHistory                  // the commits since the base, bottom left
+	focusReview  focusArea = iota // every file's diff, in one column
+	focusHistory                  // the commits since the base, under the review
 	focusCompose                  // the comment being written, under the review
 	focusCount
 )
@@ -63,13 +62,17 @@ type Model struct {
 	width, height int
 	ready         bool
 
-	files   *fileList
 	history *commitList
 	view    *reviewView
 	editor  textarea.Model
 
 	focus focusArea
 	zoom  bool
+
+	// histOpen is the history unfolded under the review, rather than folded
+	// to its title. It starts unfolded, and H and the button on its title
+	// change it.
+	histOpen bool
 
 	// What is being reviewed. baseRef is what the user asked for, empty to
 	// let discobox-review work one out; base is what that came to.
@@ -143,19 +146,11 @@ type Model struct {
 	// is clicked in a single place.
 	rects [focusCount]rect
 
-	// treeW is the width the left column has been set to by hand, and 0 while
-	// it is still whatever the window's own arithmetic makes it. It is kept as
-	// a width rather than as an adjustment so that resizing the window moves
-	// the rule only when it has to.
-	treeW int
-
-	// mouse is the text selection the mouse makes, bar the scrollbar being
-	// dragged, and rule the divider between the columns. All three are
-	// pointers because the Model is copied on every update and a gesture in
-	// progress has to survive that.
+	// mouse is the text selection the mouse makes, and bar the scrollbar
+	// being dragged. Both are pointers because the Model is copied on every
+	// update and a gesture in progress has to survive that.
 	mouse *mouseState
 	bar   *barDrag
-	rule  *ruleDrag
 }
 
 // compose is a comment being written, and where it will be filed when it is
@@ -196,7 +191,6 @@ func New(repo *git.Repo, base, author string) Model {
 		repo:       repo,
 		st:         newStyles(true),
 		keys:       newKeyMap(),
-		files:      newFileList(),
 		history:    newCommitList(),
 		view:       newReviewView(),
 		editor:     ta,
@@ -209,6 +203,7 @@ func New(repo *git.Repo, base, author string) Model {
 		commits:    map[string][]*reviewFile{},
 		carries:    map[string]map[string]*git.Patch{},
 		folds:      map[string]bool{},
+		histOpen:   true,
 		rv:         review.New(""),
 		author:     author,
 		mouse:      newMouseState(),
@@ -377,8 +372,7 @@ func buildFiles(diff, pending string, states map[string]git.State) []*reviewFile
 	// Git hands the tracked files over in path order and the untracked ones
 	// arrive on the end, which puts every new file at the bottom of a review
 	// rather than where its name says it belongs. Sorting here is the one
-	// place that fixes it for both panes, since the contents page and the
-	// stack are built from this same slice.
+	// place that fixes it.
 	sort.SliceStable(files, func(i, j int) bool { return files[i].path < files[j].path })
 	lexAll(files)
 	return files
@@ -465,11 +459,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.pickUpChanges(), reloadTick())
 
 	case approveAllMsg:
+		// As with one file: deciding about it hands its fold back to the rule,
+		// so what has just been signed off goes away.
+		undo := m.keepFolds(msg.paths...)
+		for _, p := range msg.paths {
+			delete(m.folds, p)
+		}
 		if !m.mutate(func(st *review.State) {
 			for _, p := range msg.paths {
 				st.Approve(p, msg.digests[p], msg.by)
 			}
 		}) {
+			undo()
 			return m, nil
 		}
 		m.setOK("Approved " + plural(len(msg.paths), "file", "files"))
@@ -842,15 +843,7 @@ func (m *Model) rebuild() {
 
 	m.view.setFiles(files, m.commit, label)
 	m.view.hidden = hidden
-	m.files.hidden = hidden
 	m.view.note = m.emptyNote()
-	m.files.label = ""
-	if m.commit != "" {
-		if c, ok := m.history.selected(); ok {
-			m.files.label = "Files in " + c.Short
-		}
-	}
-	m.files.setEntries(entriesFor(files))
 	m.layout()
 }
 
@@ -954,7 +947,7 @@ func (m *Model) place(files []*reviewFile) []*reviewFile {
 		if f == nil {
 			f = &reviewFile{path: t.Path, gone: true, threads: map[int][]*review.Thread{}}
 			f.total, f.open = m.rv.CountFor(t.Path)
-			f.folded = m.folds[t.Path]
+			f.folded = m.foldedFor(f)
 			byPath["\x00"+t.Path] = f
 			gone = append(gone, f)
 		}
@@ -966,33 +959,47 @@ func (m *Model) place(files []*reviewFile) []*reviewFile {
 
 // foldedFor decides whether a file starts folded.
 //
-// A file that has been approved and has nothing outstanding on it is done
-// with, so it folds away and the review is what is left. Anything the reader
-// has folded or unfolded by hand overrides that, because they were looking at
-// it more recently than this rule was written.
+// Every file does: the window opens as the list of what changed, each file a
+// heading that says how much and where it stands, and reading one is opening
+// it. Anything the reader has folded or unfolded by hand overrides that — and
+// approving a file hands its fold back to this rule, which is how a file that
+// is done with goes away again.
 func (m *Model) foldedFor(f *reviewFile) bool {
 	if v, ok := m.folds[f.path]; ok {
 		return v
 	}
-	return f.done()
+	return true
 }
 
-// entriesFor is the contents page beside the stack.
-func entriesFor(files []*reviewFile) []fileEntry {
-	out := make([]fileEntry, 0, len(files))
-	for _, f := range files {
-		e := fileEntry{
-			path: f.path, from: f.from, adds: f.adds, dels: f.dels,
-			approved: f.approved, nullified: f.nullified,
-			open: f.open, total: f.total,
-			pending: f.state.Pending(),
-		}
-		if f.gone {
-			e.pending = "no longer changed"
-		}
-		out = append(out, e)
+// doToggleHistory unfolds the strip of history under the review, or folds it
+// back to its title. Folding it while the cursor is in it hands the keys back
+// to the review, since a focus on something that is not drawn is a window
+// that has stopped answering.
+func (m Model) doToggleHistory() (tea.Model, tea.Cmd) {
+	if !m.showHistory() {
+		m.setError("This branch has no commits of its own")
+		return m, nil
 	}
-	return out
+	if !m.zoom && !m.historyFits() {
+		// No row to draw it in, folded or not. Flipping it would change
+		// nothing on screen now and something later, when the room came
+		// back, so the key says why instead.
+		m.setWarn("The window is too short to show the history")
+		return m, nil
+	}
+	if m.zoom && m.focus != focusHistory {
+		// The review has the whole window, so the history is not on screen
+		// whatever histOpen says, and the key is asking to see it.
+		m.histOpen = true
+	} else {
+		m.histOpen = !m.histOpen
+	}
+	if !m.histOpen && m.focus == focusHistory {
+		m, _ = m.takeFocus(focusReview)
+	}
+	m.zoom = false
+	m.layout()
+	return m, nil
 }
 
 // abbrevHash shortens a hash for a message, matching what the history shows.
@@ -1040,14 +1047,12 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Quit):
 		return m.doQuit()
 	case key.Matches(msg, m.keys.Help):
-		m.dialog = textDialog("discobox-review — keys", helpText())
+		m.dialog = textDialog("Discobox Review — keys", helpText())
 		return m, nil
 	case key.Matches(msg, m.keys.Post):
 		return m.doPost()
 	case key.Matches(msg, m.keys.Rescan):
 		return m.doRescan()
-	case key.Matches(msg, m.keys.FocusFiles):
-		return m.setFocus(focusFiles)
 	case key.Matches(msg, m.keys.FocusReview):
 		return m.setFocus(focusReview)
 	case key.Matches(msg, m.keys.FocusHistory):
@@ -1055,6 +1060,13 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.setError("This branch has no commits of its own")
 			return m, nil
 		}
+		if !m.zoom && !m.historyFits() {
+			// Nowhere to go: the layout would send the focus straight back.
+			m.setWarn("The window is too short to show the history")
+			return m, nil
+		}
+		// Going to a history that is folded away is asking to see it.
+		m.histOpen = true
 		return m.setFocus(focusHistory)
 	case key.Matches(msg, m.keys.NextPane):
 		return m.setFocus(m.stepPane(1))
@@ -1086,7 +1098,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.QuitKey):
 		return m.doQuit()
 	case key.Matches(msg, m.keys.HelpKey):
-		m.dialog = textDialog("discobox-review — keys", helpText())
+		m.dialog = textDialog("Discobox Review — keys", helpText())
 		return m, nil
 	case key.Matches(msg, m.keys.RescanKey):
 		return m.doRescan()
@@ -1126,10 +1138,8 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.changeContext(-1)
 	case key.Matches(msg, m.keys.MoreContextKey):
 		return m.changeContext(+1)
-	case key.Matches(msg, m.keys.NarrowerKey):
-		return m.doResizeLeft(-resizeStep)
-	case key.Matches(msg, m.keys.WiderKey):
-		return m.doResizeLeft(+resizeStep)
+	case key.Matches(msg, m.keys.HistoryKey):
+		return m.doToggleHistory()
 	}
 
 	switch m.focus {
@@ -1138,60 +1148,13 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case focusHistory:
 		return m.historyKey(msg)
 	}
-	return m.filesKey(msg)
+	return m, nil
 }
 
 func (m Model) doRescan() (tea.Model, tea.Cmd) {
 	m.setOK("Rescanning…")
 	m.rescanning = true
 	return m, m.rescanCmd()
-}
-
-// filesKey drives the contents page. Moving the cursor scrolls the review to
-// that file, which is the whole point of the pane.
-func (m Model) filesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	moved := true
-	switch {
-	case key.Matches(msg, m.keys.Up):
-		if m.files.cursor <= 0 {
-			return m, nil
-		}
-		m.files.move(-1)
-	case key.Matches(msg, m.keys.Down):
-		if m.files.cursor >= len(m.files.entries)-1 {
-			if t, ok := m.paneBelow(m.focus); ok {
-				return m.enterPane(t, entryTop)
-			}
-			return m, nil
-		}
-		m.files.move(1)
-	case key.Matches(msg, m.keys.PageUp):
-		m.files.move(-max(m.files.height-1, 1))
-	case key.Matches(msg, m.keys.PageDown):
-		m.files.move(max(m.files.height-1, 1))
-	case key.Matches(msg, m.keys.Home):
-		m.files.moveTo(0)
-	case key.Matches(msg, m.keys.End):
-		m.files.moveTo(len(m.files.entries) - 1)
-	case key.Matches(msg, m.keys.Right), key.Matches(msg, m.keys.Toggle),
-		key.Matches(msg, m.keys.Act):
-		// Right, Space and Enter all mean "show me this one", and land in the
-		// review with the file at the top of the pane.
-		m.view.jumpToFile(m.files.currentPath())
-		return m.setFocus(focusReview)
-	case key.Matches(msg, m.keys.NextFile):
-		m.files.move(1)
-	case key.Matches(msg, m.keys.PrevFile):
-		m.files.move(-1)
-	case key.Matches(msg, m.keys.ZoomKey):
-		return m.toggleZoom(m.focus)
-	default:
-		moved = false
-	}
-	if moved {
-		m.view.jumpToFile(m.files.currentPath())
-	}
-	return m, nil
 }
 
 // historyKey drives the commits. Moving the cursor changes what the review
@@ -1201,10 +1164,9 @@ func (m Model) historyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Up):
 		if m.history.cursor <= 0 {
-			if t, ok := m.paneAbove(m.focus); ok {
-				return m.enterPane(t, entryBottom)
-			}
-			return m, nil
+			// Off the top of the history is back into the review, where
+			// the reader was: the cursor there has not moved.
+			return m.setFocus(focusReview)
 		}
 		m.history.move(-1)
 	case key.Matches(msg, m.keys.Down):
@@ -1274,10 +1236,10 @@ func (m Model) reviewKey(msg tea.KeyPressMsg, count string) (tea.Model, tea.Cmd)
 		switch {
 		case key.Matches(msg, m.keys.Up):
 			m.view.move(-1)
-			return m.follow(), nil
+			return m, nil
 		case key.Matches(msg, m.keys.Down):
 			m.view.move(1)
-			return m.follow(), nil
+			return m, nil
 		case key.Matches(msg, m.keys.Left):
 			m.view.scrollH(-hScrollStep)
 			return m, nil
@@ -1302,15 +1264,7 @@ func (m Model) reviewKey(msg tea.KeyPressMsg, count string) (tea.Model, tea.Cmd)
 		}
 		m.view.move(1)
 	case key.Matches(msg, m.keys.Left):
-		// Left runs the code back to the margin before it means the pane on
-		// the left, the way down runs to the last row before it means the one
-		// below.
-		if m.view.scrollH(-hScrollStep) {
-			return m, nil
-		}
-		if t, ok := m.paneLeft(m.focus); ok {
-			return m.enterPane(t, entryKeep)
-		}
+		m.view.scrollH(-hScrollStep)
 		return m, nil
 	case key.Matches(msg, m.keys.Right):
 		m.view.scrollH(hScrollStep)
@@ -1340,10 +1294,12 @@ func (m Model) reviewKey(msg tea.KeyPressMsg, count string) (tea.Model, tea.Cmd)
 	case key.Matches(msg, m.keys.PrevFile):
 		m.view.jumpFile(-1)
 	case key.Matches(msg, m.keys.NextThread):
+		m.unfoldOpenThreads()
 		if !m.view.jumpThread(1, m.rv) {
 			m.setOK("No open comment below here")
 		}
 	case key.Matches(msg, m.keys.PrevThread):
+		m.unfoldOpenThreads()
 		if !m.view.jumpThread(-1, m.rv) {
 			m.setOK("No open comment above here")
 		}
@@ -1359,7 +1315,23 @@ func (m Model) reviewKey(msg tea.KeyPressMsg, count string) (tea.Model, tea.Cmd)
 	default:
 		return m, nil
 	}
-	return m.follow(), nil
+	return m, nil
+}
+
+// unfoldOpenThreads opens every folded file somebody is still waiting for an
+// answer in. A file opens folded, so its conversations are not rows until it
+// is read — and t, which goes looking for the next one, would otherwise walk
+// straight past the files it was asked about and report that there were none.
+func (m *Model) unfoldOpenThreads() {
+	changed := false
+	for _, f := range m.view.files {
+		if f.folded && f.open > 0 {
+			m.folds[f.path], changed = false, true
+		}
+	}
+	if changed {
+		m.rebuild()
+	}
 }
 
 // lineCount reads a typed count, refusing one too large to be a line number in
@@ -1389,6 +1361,12 @@ func (m Model) gotoLine(n int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	f := m.view.files[r.file]
+	if f.folded {
+		// A line of a folded file is not drawn anywhere to go to, and asking
+		// for one by number is asking to see it.
+		m.folds[f.path] = false
+		m.rebuild()
+	}
 	row, exact, found := m.view.lineRow(r.file, n)
 	if !found {
 		m.setError(f.path + " has no line " + itoa(n) + " in this diff")
@@ -1410,14 +1388,7 @@ func (m Model) gotoLine(n int) (tea.Model, tea.Cmd) {
 	} else {
 		m.setOK(f.path + ":" + itoa(n))
 	}
-	return m.follow(), nil
-}
-
-// follow keeps the contents page on the file the cursor has reached, so the
-// two halves of the window never disagree about where you are.
-func (m Model) follow() Model {
-	m.files.selectPath(m.view.pathAt())
-	return m
+	return m, nil
 }
 
 // doToggle is Space in the review: it opens or shuts whatever the cursor is
@@ -1596,12 +1567,11 @@ func (m Model) doSide() (tea.Model, tea.Cmd) {
 // read your way down to nothing. Anything still open decides which way it
 // goes, so the first press always tidies.
 //
-// Opening them again steps over the ones that are done with. A file folds
-// itself away once it has been approved with nothing outstanding on it, and
-// "show me everything" plainly means everything there is still something to
-// do about — undoing that would hand back the pile the folding was clearing.
-// So opening hands each file to the rule rather than forcing it open, and only
-// the files that rule does not fold come back.
+// Opening them again steps over the ones that are done with — approved, with
+// nothing outstanding on them. "Show me everything" plainly means everything
+// there is still something to do about, and undoing that would hand back the
+// pile the approving was clearing. So those are left to the rule, which folds
+// them, and only the rest are opened.
 func (m Model) doFoldAll() (tea.Model, tea.Cmd) {
 	if len(m.view.files) == 0 {
 		return m, nil
@@ -1641,7 +1611,6 @@ func (m Model) doFoldAll() (tea.Model, tea.Cmd) {
 	// The file you were reading is the one to still be looking at, whichever
 	// way it went.
 	m.view.jumpToFile(path)
-	m.files.selectPath(path)
 	switch {
 	case fold:
 		m.setOK("Folded " + plural(len(m.view.files), "file", "files"))
@@ -1658,49 +1627,15 @@ func (m Model) doFoldAll() (tea.Model, tea.Cmd) {
 // Panes
 // ---------------------------------------------------------------------------
 
-// leftPanes is the left column from top to bottom, holding only what is on
-// screen.
-func (m *Model) leftPanes() []focusArea {
-	out := []focusArea{focusFiles}
-	if m.showHistory() {
-		out = append(out, focusHistory)
-	}
-	return out
-}
-
 // showHistory reports whether the branch has any commits of its own to list.
 func (m *Model) showHistory() bool { return len(m.history.commits) > 0 }
-
-func (m *Model) paneAbove(f focusArea) (focusArea, bool) {
-	if f == focusCompose {
-		return focusReview, true
-	}
-	panes := m.leftPanes()
-	for i, p := range panes {
-		if p == f && i > 0 {
-			return panes[i-1], true
-		}
-	}
-	return f, false
-}
-
-func (m *Model) paneBelow(f focusArea) (focusArea, bool) {
-	if f == focusReview {
-		return f, false
-	}
-	panes := m.leftPanes()
-	for i, p := range panes {
-		if p == f && i+1 < len(panes) {
-			return panes[i+1], true
-		}
-	}
-	return f, false
-}
 
 func (m *Model) paneVisible(f focusArea) bool {
 	switch f {
 	case focusHistory:
-		return m.showHistory()
+		// Unfolded, and with a row to be on: a window too short for any of
+		// it draws the title alone, which is nowhere to put a cursor.
+		return m.showHistory() && m.histOpen && m.history.height > 0
 	case focusCompose:
 		return m.compose != nil
 	}
@@ -1717,51 +1652,6 @@ func (m *Model) stepPane(delta int) focusArea {
 		}
 	}
 	return m.focus
-}
-
-// paneLeft is which pane the review hands the cursor back to.
-func (m *Model) paneLeft(f focusArea) (focusArea, bool) {
-	switch f {
-	case focusReview, focusCompose:
-		return focusFiles, true
-	}
-	return f, false
-}
-
-// entry says where the cursor lands when navigation moves into a pane.
-type entry int
-
-const (
-	entryKeep entry = iota
-	entryTop
-	entryBottom
-)
-
-func (m Model) enterPane(f focusArea, e entry) (tea.Model, tea.Cmd) {
-	switch f {
-	case focusFiles:
-		switch e {
-		case entryTop:
-			m.files.moveTo(0)
-		case entryBottom:
-			m.files.moveTo(len(m.files.entries) - 1)
-		}
-	case focusHistory:
-		switch e {
-		case entryTop:
-			m.history.moveTo(0)
-		case entryBottom:
-			m.history.moveTo(m.history.rows() - 1)
-		}
-	case focusReview:
-		switch e {
-		case entryTop:
-			m.view.moveTo(0)
-		case entryBottom:
-			m.view.moveTo(len(m.view.rows) - 1)
-		}
-	}
-	return m.setFocus(f)
 }
 
 func (m Model) setFocus(f focusArea) (tea.Model, tea.Cmd) {
@@ -1803,14 +1693,8 @@ func (m Model) changeContext(delta int) (tea.Model, tea.Cmd) {
 }
 
 // target is the file a file-level command acts on: the one the review cursor
-// is in, or the one the contents page has picked when that is where you are.
+// is in.
 func (m *Model) target() (string, bool) {
-	if m.focus == focusFiles {
-		if p := m.files.currentPath(); p != "" {
-			return p, true
-		}
-		return "", false
-	}
 	if f, ok := m.view.file(); ok {
 		return f.path, true
 	}
@@ -1830,12 +1714,15 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 		m.setError("No file to approve")
 		return m, nil
 	}
-	// Deciding about a file hands its fold back to the rule that folds what is
-	// done with, so a file approved after F opened everything still goes away.
-	delete(m.folds, path)
 	if m.rv.Approved(path) {
+		// Withdrawing an approval is having more to say about the file, so it
+		// opens rather than going back to how the window started.
+		undo := m.keepFolds(path)
+		m.folds[path] = false
 		if m.mutate(func(st *review.State) { st.Unapprove(path) }) {
 			m.setOK("Approval withdrawn from " + path)
+		} else {
+			undo()
 		}
 		return m, nil
 	}
@@ -1844,11 +1731,39 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 		m.setError(path + " is not part of this review")
 		return m, nil
 	}
+	// Approving a file hands its fold back to the rule every file starts
+	// with, so one approved after F opened everything still goes away.
+	undo := m.keepFolds(path)
+	delete(m.folds, path)
 	digest, author := f.digest, m.author
 	if m.mutate(func(st *review.State) { st.Approve(path, digest, author) }) {
 		m.setOK("Approved " + path)
+	} else {
+		undo()
 	}
 	return m, nil
+}
+
+// keepFolds remembers how the reader left some files folded, and hands back
+// what puts that right again. A fold changes with a verdict, and the rows are
+// laid out as the verdict is saved — so the fold is set first, and undone if
+// the save did not happen: a verdict that was not recorded moved nothing.
+func (m *Model) keepFolds(paths ...string) func() {
+	type fold struct{ folded, set bool }
+	was := make(map[string]fold, len(paths))
+	for _, p := range paths {
+		v, ok := m.folds[p]
+		was[p] = fold{v, ok}
+	}
+	return func() {
+		for p, f := range was {
+			if f.set {
+				m.folds[p] = f.folded
+			} else {
+				delete(m.folds, p)
+			}
+		}
+	}
 }
 
 // doApproveAll signs off everything still outstanding, which is worth having
@@ -1888,10 +1803,6 @@ type approveAllMsg struct {
 
 // doComment starts a conversation about the line under the cursor.
 func (m Model) doComment() (tea.Model, tea.Cmd) {
-	if m.focus == focusFiles {
-		m.setError("Comments go on lines — press → for the review first")
-		return m, nil
-	}
 	f, l, span, last, ok := m.view.commentTarget()
 	if !ok {
 		m.setError("Put the cursor on a line of the diff to comment on it")
@@ -2258,7 +2169,7 @@ func commitItem(c git.Commit) string {
 }
 
 const (
-	autoBase   = "(let discobox-review choose)"
+	autoBase   = "(let Discobox Review choose)"
 	commitBase = "Pick a commit…"
 	otherBase  = "Other ref…"
 )

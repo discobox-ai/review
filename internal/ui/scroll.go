@@ -2,16 +2,9 @@ package ui
 
 // The scrollbars: a light rule for the track and a solid block for the thumb,
 // both in grey, so they read as furniture rather than as part of the pane.
-//
-// The lists use no track at all. They sit in the left column, where the pane
-// separator is already a rule down the very edge the bar wants, and two rules
-// side by side read as a border rather than as a scrollbar — so the thumb
-// slides along the separator instead. The diff has nothing but the window edge
-// there, so it draws its own.
 const (
 	vertTrack  = "│"
 	horzTrack  = "─"
-	blankTrack = " "
 	thumbGlyph = "█"
 )
 

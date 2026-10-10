@@ -58,12 +58,6 @@ func (m *Model) vbar(f focusArea) (bar, bool) {
 	}
 	b := bar{pos: r.x + r.w - 1, lo: r.y + 1}
 	switch f {
-	case focusFiles:
-		if !m.files.scrolls() {
-			return bar{}, false
-		}
-		b.length, b.total = m.files.height, len(m.files.entries)
-		b.offset, b.max = m.files.offset, m.files.maxOffset()
 	case focusHistory:
 		if !m.history.scrolls() {
 			return bar{}, false
@@ -198,8 +192,6 @@ func (m *Model) scrollTo(f focusArea, axis barAxis, offset int) {
 		return
 	}
 	switch f {
-	case focusFiles:
-		m.files.offset = min(max(offset, 0), m.files.maxOffset())
 	case focusHistory:
 		m.history.offset = min(max(offset, 0), m.history.maxOffset())
 	case focusReview:

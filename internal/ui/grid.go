@@ -51,6 +51,15 @@ type selectable interface {
 	contentRows() int
 }
 
+// contentXAt is contentX for one line, for the pane whose rows do not all
+// start their content in the same column.
+func contentXAt(p selectable, line int) int {
+	if s, ok := p.(interface{ contentXAt(line int) int }); ok {
+		return s.contentXAt(line)
+	}
+	return p.contentX()
+}
+
 // paneGrid adapts a pane to [selection.Grid] by rendering a row and reading
 // the cells back out of it.
 //
@@ -157,7 +166,7 @@ func paintSelection(view string, sel *selection.Model, pane selectable) string {
 		return view
 	}
 	rows := strings.Split(view, "\n")
-	offset, x0 := pane.contentOffset(), pane.contentX()
+	offset := pane.contentOffset()
 	// Row 0 is the pane's title, and rows past its body are whatever it draws
 	// under them — the reader's hint line — so only the body is painted.
 	last := min(len(rows)-1, pane.contentRows())
@@ -167,6 +176,7 @@ func paintSelection(view string, sel *selection.Model, pane selectable) string {
 		if !ok {
 			continue
 		}
+		x0 := contentXAt(pane, offset+j-1)
 		rows[j] = highlightSpan(rows[j], x0+start, x0+end)
 		touched = true
 	}

@@ -60,7 +60,7 @@ const focusReader focusArea = -1
 // keeps its own [selection.Model], because the click counter that tells a
 // double click from two clicks is part of that model. Sharing one across panes
 // would let a press in the diff be counted against the press that came before
-// it in a file list, and turn an ordinary click into a word select.
+// it in the history, and turn an ordinary click into a word select.
 type mouseState struct {
 	sels  map[focusArea]*selection.Model
 	grids map[focusArea]*paneGrid
@@ -221,8 +221,6 @@ func (m *Model) rectOf(f focusArea) rect {
 // selectableFor is a pane's content, or nil when it has none to select.
 func (m *Model) selectableFor(f focusArea) selectable {
 	switch f {
-	case focusFiles:
-		return listSel{m.files}
 	case focusHistory:
 		return commitsSel{m.history}
 	case focusReview:
@@ -254,8 +252,6 @@ func (m *Model) scrollPane(f focusArea, delta int) {
 		case m.file != nil:
 			m.file.scroll(delta)
 		}
-	case focusFiles:
-		m.files.scroll(delta)
 	case focusHistory:
 		m.history.scroll(delta)
 	case focusReview:
@@ -285,17 +281,10 @@ func (m Model) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if m.dragBar(msg.X, msg.Y) {
 			return m, nil
 		}
-		if m.dragRule(msg.X) {
-			return m, nil
-		}
 		return m.mouseDrag(msg.X, msg.Y)
 	case tea.MouseReleaseMsg:
 		if m.bar != nil {
 			m.bar = nil
-			return m, nil
-		}
-		if m.rule != nil {
-			m.rule = nil
 			return m, nil
 		}
 		return m.mouseRelease()
@@ -316,32 +305,13 @@ func (m Model) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 // mouseWheel scrolls whatever is under the pointer, and takes the focus there:
 // a pane being scrolled is the pane being looked at, and the keys that follow
-// are meant for it. The cursor stays where it was, except in the file list.
+// are meant for it. The cursor stays where it was.
 func (m Model) mouseWheel(x, y int, button tea.MouseButton) (tea.Model, tea.Cmd) {
 	f, _, _, ok := m.hit(x, y)
 	if !ok {
 		return m, nil
 	}
 	m, cmd := m.focusUnder(f)
-	// The file list is a table of contents, and wheeling through it is
-	// leafing through the change: each tick moves to the next file and shows
-	// it, the same as a press of up or down. A file per tick rather than
-	// wheelLines of them, since the whole point is to stop on each one.
-	if f == focusFiles && (button == tea.MouseWheelUp || button == tea.MouseWheelDown) {
-		delta := 1
-		if button == tea.MouseWheelUp {
-			delta = -1
-		}
-		// Past either end the cursor stays put, and so does the review: a
-		// wheel overshooting the last file must not pull the reader back to
-		// the top of it.
-		was := m.files.cursor
-		m.files.move(delta)
-		if m.files.cursor != was {
-			m.view.jumpToFile(m.files.currentPath())
-		}
-		return m, cmd
-	}
 	switch button {
 	case tea.MouseWheelUp:
 		m.scrollPane(f, -wheelLines)
@@ -356,12 +326,9 @@ func (m Model) mouseWheel(x, y int, button tea.MouseButton) (tea.Model, tea.Cmd)
 }
 
 // focusUnder moves the focus to the pane the pointer is working in, for the
-// gestures that scroll a pane rather than pick anything in it. It must come
-// before the scroll, and it lays the window out again only when the focus
-// change reshapes it: laying out brings every cursor back on screen, which
-// would undo a scroll made in this pane or any other. The one focus change
-// that reshapes the window is on a narrow one, where the left column folds
-// away while the review has the focus and comes back when it leaves.
+// gestures that scroll a pane rather than pick anything in it. It does not
+// lay the window out again: laying out brings every cursor back on screen,
+// which would undo a scroll made in this pane or any other.
 //
 // The reader is not a pane and never takes the focus, and a comment being
 // written lives inside the review, so scrolling the review around it leaves
@@ -370,20 +337,10 @@ func (m Model) focusUnder(f focusArea) (Model, tea.Cmd) {
 	if f == focusReader || f == m.focus || (f == focusReview && m.focus == focusCompose) {
 		return m, nil
 	}
-	folds := m.foldsFor(f)
-	m, cmd := m.takeFocus(f)
-	if folds {
-		m.layout()
+	if !m.paneVisible(f) {
+		return m, nil // the history folded to its title: nothing there to be in
 	}
-	return m, cmd
-}
-
-// foldsFor reports whether moving the focus to a pane folds the left column
-// away or brings it back, reshaping everything on screen.
-func (m Model) foldsFor(f focusArea) bool {
-	collapsed := m.leftCollapsed()
-	m.focus = f
-	return m.leftCollapsed() != collapsed
+	return m.takeFocus(f)
 }
 
 // scrollPaneH slides a pane sideways. Only the review has anywhere to go: it
@@ -406,26 +363,12 @@ func (m Model) mousePress(x, y int, block bool) (tea.Model, tea.Cmd) {
 	}
 	// A scrollbar is taken hold of before anything else looks at the press: it
 	// is drawn over the pane's own right edge and foot, so whatever is behind
-	// it must not answer for it.
-	//
-	// Taking hold of a bar takes the focus too, unless that would fold the
-	// left column: the fold moves and resizes the bar the press just landed
-	// on, so a press on the thumb would end up on the track and jump the
-	// pane. On a narrow window the bar is held and the focus stays put.
+	// it must not answer for it. Taking hold of a bar takes the focus too.
 	if f, _, _, ok := m.barAt(x, y); ok {
 		m.mouse.clear()
-		var cmd tea.Cmd
-		if !m.foldsFor(f) {
-			m, cmd = m.focusUnder(f)
-		}
+		m, cmd := m.focusUnder(f)
 		m.grabBar(x, y)
 		return m, cmd
-	}
-	// The rule between the columns belongs to neither of them, so it is
-	// answered here rather than by a pane.
-	if m.grabRule(x, y) {
-		m.mouse.clear()
-		return m, nil
 	}
 	f, r, p, ok := m.hit(x, y)
 	if !ok {
@@ -440,6 +383,14 @@ func (m Model) mousePress(x, y int, block bool) (tea.Model, tea.Cmd) {
 	// and the base do on the bar above.
 	if y == r.y && f != focusReader {
 		m.mouse.clear()
+		// The button on the history's title folds it and unfolds it. Folded,
+		// the title is all there is of the pane, so the whole of it is the
+		// button — and a window with no row for the history draws it folded
+		// whatever histOpen says, so the same goes there.
+		if f == focusHistory && !m.zoom &&
+			(m.history.buttonHit(x-r.x) || !m.histOpen || !m.historyFits()) {
+			return m.doToggleHistory()
+		}
 		if f == focusReview && m.view.modeHit(x-r.x) {
 			mdl, cmd := m.setFocus(f)
 			m = mdl.(Model)
@@ -465,7 +416,7 @@ func (m Model) mousePress(x, y int, block bool) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	line := p.contentOffset() + row
-	col := x - r.x - p.contentX()
+	col := x - r.x - contentXAt(p, line)
 
 	if first, count := p.contentLines(); line >= first+count {
 		// Empty space below the last row. Take the focus, but leave the cursor
@@ -521,8 +472,6 @@ func (m Model) clickRow(f focusArea, line int) (Model, tea.Cmd) {
 	case focusReader:
 		// The reader has no cursor; a click there only starts a selection.
 		return m, nil
-	case focusFiles:
-		m.files.moveTo(line)
 	case focusHistory:
 		m.history.moveTo(line)
 	case focusReview:
@@ -536,17 +485,10 @@ func (m Model) clickRow(f focusArea, line int) (Model, tea.Cmd) {
 
 	mdl, cmd := m.setFocus(f)
 	m = mdl.(Model)
-	switch f {
-	case focusFiles:
-		// Clicking a file is asking to see it, the same as moving the cursor
-		// onto it with the keyboard.
-		m.view.jumpToFile(m.files.currentPath())
-	case focusHistory:
+	if f == focusHistory {
 		// Moving this cursor is what changes whether the review pane holds
 		// the whole change or one commit of it.
 		cmd = tea.Batch(cmd, m.selectedCommitCmd())
-	case focusReview:
-		m = m.follow()
 	}
 	return m, cmd
 }
@@ -572,7 +514,8 @@ func (m Model) mouseDrag(x, y int) (tea.Model, tea.Cmd) {
 		m.scrollPane(f, row-rows+1)
 		row = rows - 1
 	}
-	at := [2]int{p.contentOffset() + row, x - r.x - p.contentX()}
+	line := p.contentOffset() + row
+	at := [2]int{line, x - r.x - contentXAt(p, line)}
 	if at != m.mouse.foldAt {
 		// The pointer has left the cell it went down on, so this is a drag
 		// over the file's name rather than a click on its heading.
@@ -668,48 +611,4 @@ func copyToClipboard(text string) tea.Cmd {
 
 func osc52(text string) string {
 	return "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\a"
-}
-
-// ---------------------------------------------------------------------------
-// The rule between the columns
-// ---------------------------------------------------------------------------
-
-// ruleDrag is the divider being dragged: where the press landed and how wide
-// the left column was when it did, so the rule keeps its place under the
-// pointer however far the hand wanders.
-type ruleDrag struct{ from, at int }
-
-// ruleX is the column the divider is drawn in, and whether it is drawn at all.
-func (m *Model) ruleX() (int, bool) {
-	if !m.ready || m.zoom || m.leftCollapsed() {
-		return 0, false
-	}
-	return m.leftWidth(), true
-}
-
-// grabRule takes hold of the divider. Only the column the rule is actually
-// drawn in counts: the cells either side of it belong to the panes, and a
-// press on a row of the review has to reach that row rather than a handle
-// nobody was aiming at.
-func (m *Model) grabRule(x, y int) bool {
-	col, ok := m.ruleX()
-	if !ok || x != col {
-		return false
-	}
-	if y < 1 || y >= 1+max(m.height-2, 4) {
-		return false
-	}
-	m.rule = &ruleDrag{from: x, at: col}
-	return true
-}
-
-// dragRule follows the pointer while the divider is held. Only the column
-// matters: a divider runs the height of the window, so there is nowhere for it
-// to go vertically.
-func (m *Model) dragRule(x int) bool {
-	if m.rule == nil {
-		return false
-	}
-	m.setLeftWidth(m.rule.at + x - m.rule.from)
-	return true
 }

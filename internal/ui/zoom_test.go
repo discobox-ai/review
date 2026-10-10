@@ -8,13 +8,13 @@ import (
 )
 
 // z gives the focused pane the whole window: nothing else is drawn, and the
-// pane is as wide as the terminal.
+// pane is as tall as the terminal has room for.
 func TestZoomGivesThePaneTheWholeWindow(t *testing.T) {
-	m := drive(t, newTestModel(t), altKey("2"))
+	m := drive(t, newTestModel(t), altKey("1"))
 	if m.focus != focusReview {
 		t.Fatalf("focus = %v, want the review", m.focus)
 	}
-	narrow := m.view.width
+	short := m.view.height
 
 	m = drive(t, m, letterKey("z"))
 	if !m.zoom {
@@ -23,13 +23,13 @@ func TestZoomGivesThePaneTheWholeWindow(t *testing.T) {
 	if m.view.width != m.width {
 		t.Errorf("zoomed review is %d columns, want the full %d", m.view.width, m.width)
 	}
-	if m.view.width <= narrow {
-		t.Errorf("zoomed review (%d) is no wider than it was (%d)", m.view.width, narrow)
+	if m.view.height <= short {
+		t.Errorf("zoomed review (%d rows) is no taller than it was (%d)", m.view.height, short)
 	}
 
 	view := m.frame()
-	if strings.Contains(ansi.Strip(view), "Changed Files") {
-		t.Error("the left column is still drawn while zoomed")
+	if strings.Contains(ansi.Strip(view), "History") {
+		t.Error("the history is still drawn while zoomed")
 	}
 	if lines := strings.Split(view, "\n"); len(lines) != m.height {
 		t.Errorf("zoomed frame has %d rows, want %d", len(lines), m.height)
@@ -45,17 +45,17 @@ func TestZoomGivesThePaneTheWholeWindow(t *testing.T) {
 	if m.zoom {
 		t.Fatal("z did not unzoom")
 	}
-	if m.view.width != narrow {
-		t.Errorf("unzoomed review is %d columns, want %d back", m.view.width, narrow)
+	if m.view.height != short {
+		t.Errorf("unzoomed review is %d rows, want %d back", m.view.height, short)
 	}
-	if !strings.Contains(ansi.Strip(m.frame()), "Changed Files") {
-		t.Error("the left column did not come back")
+	if !strings.Contains(ansi.Strip(m.frame()), "History") {
+		t.Error("the history did not come back")
 	}
 }
 
 // With one pane on screen there is nowhere else for the mouse to land either.
 func TestZoomLeavesOnlyOnePaneClickable(t *testing.T) {
-	m := drive(t, newTestModel(t), altKey("1"), letterKey("z"))
+	m := drive(t, newTestModel(t), altKey("2"), letterKey("z"))
 	for f := focusArea(0); f < focusCount; f++ {
 		if f == m.focus {
 			if m.rects[f].w == 0 {
@@ -73,11 +73,11 @@ func TestZoomLeavesOnlyOnePaneClickable(t *testing.T) {
 // is how a window ends up ignoring keys for no reason anyone can see. So the
 // zoom follows the focus, and z is always the way back out.
 func TestTheZoomFollowsTheFocus(t *testing.T) {
-	m := drive(t, newTestModel(t), altKey("1"), letterKey("z"))
-	if !m.zoom || m.focus != focusFiles {
+	m := drive(t, newTestModel(t), altKey("2"), letterKey("z"))
+	if !m.zoom || m.focus != focusHistory {
 		t.Fatalf("zoom=%v focus=%v", m.zoom, m.focus)
 	}
-	m = drive(t, m, altKey("2"))
+	m = drive(t, m, altKey("1"))
 	if !m.zoom {
 		t.Error("moving the focus unzoomed")
 	}
@@ -116,9 +116,9 @@ func TestAltZZoomsTheComposer(t *testing.T) {
 // manager taught.
 func TestDoubleClickOnATitleZooms(t *testing.T) {
 	m := newTestModel(t)
-	r := m.rects[focusFiles]
-	m = drive(t, m, pressAt(r.x+2, r.y), pressAt(r.x+2, r.y))
-	if !m.zoom || m.focus != focusFiles {
+	r := m.rects[focusHistory]
+	m = drive(t, m, pressAt(r.x+8, r.y), pressAt(r.x+8, r.y)) // past the fold button
+	if !m.zoom || m.focus != focusHistory {
 		t.Errorf("zoom=%v focus=%v after a double click on the title", m.zoom, m.focus)
 	}
 }
@@ -132,23 +132,5 @@ func TestZoomRefusesAPaneThatIsNotShown(t *testing.T) {
 	mdl, _ := m.toggleZoom(focusCompose)
 	if mdl.(Model).zoom {
 		t.Error("a pane that is not drawn was zoomed")
-	}
-}
-
-// Zooming re-wraps the comments, which are drawn to the width of the pane
-// they are in.
-func TestZoomRebuildsTheRows(t *testing.T) {
-	m := newTestModel(t)
-	m = onLine(t, m, "foo.txt", '+', "FOUR")
-	m = comment(t, m, strings.Repeat("a long remark that has to wrap somewhere ", 6))
-
-	narrowRows := len(m.view.rows)
-	m = drive(t, m, letterKey("z"))
-	if !m.zoom {
-		t.Fatal("z did not zoom")
-	}
-	if len(m.view.rows) >= narrowRows {
-		t.Errorf("zoomed to full width the comment still takes %d rows, was %d",
-			len(m.view.rows), narrowRows)
 	}
 }
