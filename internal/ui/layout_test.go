@@ -291,6 +291,14 @@ func TestAWindowTooShortForTheHistoryFoldsIt(t *testing.T) {
 	if !m.histOpen || !strings.Contains(m.status, "too short") {
 		t.Errorf("H on a short window left open=%v status=%q", m.histOpen, m.status)
 	}
+	// Alt-2 has nowhere to go either, and must not unfold a history the
+	// reader folded for when the room comes back.
+	m.status, m.histOpen = "", false
+	m = drive(t, m, altKey("2"))
+	if m.histOpen || m.focus != focusReview || !strings.Contains(m.status, "too short") {
+		t.Errorf("Alt-2 on a short window left open=%v focus=%v status=%q", m.histOpen, m.focus, m.status)
+	}
+	m.histOpen = true
 	// So does a click anywhere on the title, which is the whole of the pane
 	// here and so the whole of the button.
 	m.status = ""

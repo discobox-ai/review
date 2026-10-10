@@ -1060,6 +1060,11 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.setError("This branch has no commits of its own")
 			return m, nil
 		}
+		if !m.zoom && !m.historyFits() {
+			// Nowhere to go: the layout would send the focus straight back.
+			m.setWarn("The window is too short to show the history")
+			return m, nil
+		}
 		// Going to a history that is folded away is asking to see it.
 		m.histOpen = true
 		return m.setFocus(focusHistory)
