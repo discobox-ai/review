@@ -814,13 +814,33 @@ func (m *Model) reconcile() {
 	for _, f := range m.work {
 		digests[f.path] = f.digest
 	}
+	// The same for the hunks: an approval of a run of lines that is no longer
+	// in the change is dropped, rather than left to match again if the edit
+	// that removed it is ever undone.
+	present := make(map[string]map[string]bool, len(m.work))
+	for _, f := range m.work {
+		runs := map[string]bool{}
+		for _, d := range slices.Concat(f.blocks...) {
+			runs[d] = true
+		}
+		present[f.path] = runs
+	}
+	verdict := func(st *review.State) (changed bool, nullified []string) {
+		changed, nullified = st.Reconcile(digests)
+		for path, runs := range present {
+			if st.PruneHunks(path, runs) {
+				changed = true
+			}
+		}
+		return changed, nullified
+	}
 	// Asked of a copy, so that the screen changes only once the verdict is
 	// saved: one that could not be written must not be shown as if it stood.
 	probe, err := review.Parse(m.rv.Bytes())
 	if err != nil {
 		return
 	}
-	changed, nullified := probe.Reconcile(digests)
+	changed, nullified := verdict(probe)
 	if !changed {
 		return
 	}
@@ -832,7 +852,7 @@ func (m *Model) reconcile() {
 	// something else has the lock this instant, the stamp is forgotten and the
 	// next tick reads the file as new and comes back here. Any other failure
 	// is not going to mend itself in a second, and is said once.
-	err = m.update(0, func(st *review.State) { st.Reconcile(digests) })
+	err = m.update(0, func(st *review.State) { verdict(st) })
 	switch {
 	case errors.Is(err, git.ErrLocked):
 		m.stamp = git.Stamp{}

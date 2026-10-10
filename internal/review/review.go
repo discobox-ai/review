@@ -306,6 +306,32 @@ func (s *State) SetHunks(path string, digests []string) {
 	s.entryFor(path).Hunks = digests
 }
 
+// PruneHunks drops the hunk approvals of a path that are of changes no longer
+// there, given the runs of changed lines the path has now, and reports whether
+// it dropped any.
+//
+// Without it an approval of an edit that was then undone would lie in wait and
+// come back with the edit, signed off by nobody who read it the second time.
+// A file's approval does not come back that way, and nor should a hunk's.
+func (s *State) PruneHunks(path string, present map[string]bool) bool {
+	f := s.FileFor(path)
+	if f == nil || len(f.Hunks) == 0 {
+		return false
+	}
+	kept := f.Hunks[:0]
+	for _, d := range f.Hunks {
+		if present[d] {
+			kept = append(kept, d)
+		}
+	}
+	changed := len(kept) != len(f.Hunks)
+	f.Hunks = kept
+	if len(f.Hunks) == 0 {
+		f.Hunks = nil
+	}
+	return changed
+}
+
 // Reconcile checks every approval against the change now in front of the
 // reviewer, and reports whether anything moved.
 //

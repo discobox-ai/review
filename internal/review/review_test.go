@@ -705,3 +705,22 @@ func TestHunkDigestsDoNotDependOnContext(t *testing.T) {
 		t.Error("two different runs share a digest")
 	}
 }
+
+// A hunk approval of a change that is no longer there is dropped, so that it
+// cannot come back with the change.
+func TestPruneHunksDropsWhatIsGone(t *testing.T) {
+	s := &State{}
+	s.SetHunks("f", []string{"aaa", "bbb"})
+	if !s.PruneHunks("f", map[string]bool{"bbb": true}) {
+		t.Fatal("nothing was pruned")
+	}
+	if got := s.FileFor("f").Hunks; len(got) != 1 || got[0] != "bbb" {
+		t.Errorf("hunks are %v, want [bbb]", got)
+	}
+	if s.PruneHunks("f", map[string]bool{"bbb": true}) {
+		t.Error("a second prune reported a change")
+	}
+	if s.PruneHunks("f", nil); s.FileFor("f").Hunks != nil {
+		t.Error("the last hunk gone did not leave the list empty")
+	}
+}

@@ -268,8 +268,9 @@ stops depends on how much context was asked for, and the changed lines do not.
 Turn the context up until two hunks join and the joined hunk is approved only
 if both halves were. An edit to the file nullifies the file's approval and the
 hunks the edit touched — or moved, since a line's number is part of what was
-read — and leaves the rest signed off. That holds for an approval given in the
-window; `discobox-review approve` records the file alone, so one given there
+read — and leaves the rest signed off. A hunk's approval that falls
+stays fallen, as a file's does: undoing the edit does not bring it back. That
+holds for an approval given in the window; `discobox-review approve` records the file alone, so one given there
 falls whole. While a single commit is being read there are no hunk approvals:
 a commit's hunks are not the review's, so `a` there is the file from anywhere.
 
