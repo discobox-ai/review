@@ -285,6 +285,12 @@ func TestAWindowTooShortForTheHistoryFoldsIt(t *testing.T) {
 	if m.focus != focusReview {
 		t.Errorf("Tab went to %v", m.focus)
 	}
+	// H cannot show it and does not pretend to: it says why, and leaves the
+	// history as it was for when there is room again.
+	m = drive(t, m, letterKey("H"))
+	if !m.histOpen || !strings.Contains(m.status, "too short") {
+		t.Errorf("H on a short window left open=%v status=%q", m.histOpen, m.status)
+	}
 	// And it comes back with the room.
 	m = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	if !strings.Contains(plain(m), "[-] History") {
@@ -302,5 +308,29 @@ func TestTheHistoryTakesAThirdAtMost(t *testing.T) {
 		if got := m.rects[focusHistory].h; got > max(body/3, 2) {
 			t.Errorf("at %d rows the history takes %d of the %d under the bars", h, got, body)
 		}
+	}
+}
+
+// A window of nothing but headings has nothing running past its right margin,
+// however long the lines inside the folded files are, so it wears no bar along
+// its foot.
+func TestFoldedFilesAskForNoHorizontalBar(t *testing.T) {
+	m := newTestModel(t)
+	writeFile(t, m.repo.Dir, "wide.txt", strings.Repeat("a very long line ", 40)+"\n")
+	m = drive(t, m, m.rescanCmd()())
+	if !fileIn(t, m, "wide.txt").folded {
+		t.Fatal("the new file did not arrive folded")
+	}
+	for _, f := range m.view.files {
+		m.folds[f.path] = true
+	}
+	m.rebuild()
+	if _, horz := m.view.bars(); horz {
+		t.Error("a window of folded files is wearing a horizontal bar")
+	}
+
+	m = onLine(t, m, "wide.txt", '+', "a very long line")
+	if _, horz := m.view.bars(); !horz {
+		t.Error("the open file's long line did not bring the bar back")
 	}
 }

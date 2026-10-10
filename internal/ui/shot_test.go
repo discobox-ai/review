@@ -423,8 +423,8 @@ func TestWriteScreenshots(t *testing.T) {
 		// the picture is of.
 		take func(t *testing.T, m Model) Model
 	}{{
-		// The window itself: the list, the history, the stack, an approval,
-		// an argument, and the margin down the side of what is not committed.
+		// The window itself: the stack, the history under it, an approval, an
+		// argument, and the margin down the side of what is not committed.
 		name: "review", w: 128, h: 38,
 		take: func(t *testing.T, m Model) Model {
 			return onLine(t, m, "internal/server/limit.go", '+', "buckets map[string]bucket")
@@ -440,23 +440,24 @@ func TestWriteScreenshots(t *testing.T) {
 			return wheel(t, m, 2)
 		},
 	}, {
-		// Every file at once: what F leaves you with, and what a review looks
+		// Every file at once: how the window opens, and what a review looks
 		// like from above.
 		name: "folded", w: 128, h: 18,
-		take: func(t *testing.T, m Model) Model { return drive(t, m, letterKey("F")) },
+		take: func(t *testing.T, m Model) Model { return m },
 	}, {
 		// One commit on its own, with a remark made against the whole review
 		// carried back to the line that introduced it.
 		name: "commit", w: 128, h: 28,
 		take: func(t *testing.T, m Model) Model {
-			return selectCommit(t, m, "add a token bucket")
+			// F opens what the commit touched: a window opens folded.
+			return drive(t, selectCommit(t, m, "add a token bucket"), letterKey("F"))
 		},
 	}, {
 		// And the other half of that: a commit this remark is not about keeps
 		// it under the file's heading rather than putting it on a wrong line.
 		name: "loose", w: 128, h: 20,
 		take: func(t *testing.T, m Model) Model {
-			return selectCommit(t, m, "turn the limiter on for reads")
+			return drive(t, selectCommit(t, m, "turn the limiter on for reads"), letterKey("F"))
 		},
 	}, {
 		// Side by side, with the panes out of the way. No s: a review opens

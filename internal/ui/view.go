@@ -55,7 +55,7 @@ func (m *Model) layoutStacked(body int) {
 			histH = 1 + min(max(body/3-1, 1), m.history.rows())
 			histH = min(histH, max(body-3, 1))
 		}
-		if histH < 2 {
+		if !m.historyFits() {
 			// No room for a row of it. It is drawn as folded because it is,
 			// and the keyboard cannot be left in something with no rows.
 			m.history.button = "[+] "
@@ -72,6 +72,10 @@ func (m *Model) layoutStacked(body int) {
 	}
 	m.clampPanes()
 }
+
+// historyFits reports whether the window has room for a row of history under
+// the review, which keeps three rows of its own whatever else is asked for.
+func (m *Model) historyFits() bool { return max(m.height-2, 4)-3 >= 2 }
 
 // layoutZoom gives the focused pane the whole window. Nothing else is drawn,
 // so nothing else is laid out and nothing else can be clicked.

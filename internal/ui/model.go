@@ -980,10 +980,10 @@ func (m Model) doToggleHistory() (tea.Model, tea.Cmd) {
 		m.setError("This branch has no commits of its own")
 		return m, nil
 	}
-	if !m.zoom && m.histOpen && m.history.height <= 0 {
-		// Unfolded already, on a window with no row to draw it in. Flipping
-		// it would change nothing on screen now and fold it later, when the
-		// room came back.
+	if !m.zoom && !m.historyFits() {
+		// No row to draw it in, folded or not. Flipping it would change
+		// nothing on screen now and something later, when the room came
+		// back, so the key says why instead.
 		m.setWarn("The window is too short to show the history")
 		return m, nil
 	}

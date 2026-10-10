@@ -540,7 +540,12 @@ func (v *reviewView) build() {
 	v.numW, v.long = 0, 0
 	for _, f := range v.files {
 		v.numW = max(v.numW, numberWidth(f.lines))
-		v.long = max(v.long, longestLine(f.texts))
+		// Only what is drawn can run past the margin: a folded file's long
+		// lines are not on screen to be scrolled to, and a bar along the foot
+		// of a window showing nothing but headings would be a bar for nothing.
+		if !f.folded {
+			v.long = max(v.long, longestLine(f.texts))
+		}
 	}
 
 	rows := make([]reviewRow, 0, 256)
