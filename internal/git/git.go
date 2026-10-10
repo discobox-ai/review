@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Repo is a handle on a working tree, reached through a System.
@@ -812,15 +813,25 @@ func (r *Repo) ReadStateFile(name string) (string, bool) {
 }
 
 // WriteStateFile writes a file into the git directory, through a temporary
-// file of its own so that a reader never catches a half written one. An agent
-// polling the review has no way to lock it, so the write has to be the thing
-// that is indivisible.
+// file of its own so that a reader never catches a half written one. Reading
+// takes no lock, so the write has to be the thing that is indivisible.
+//
+// The temporary file has one name, so two writers of the same file must not
+// be at it together: see LockStateFile.
 func (r *Repo) WriteStateFile(name, content string) error {
 	tmp := filepath.Join(r.GitDir, name+".tmp")
 	if err := r.sys.WriteFile(tmp, []byte(content)); err != nil {
 		return err
 	}
 	return r.sys.Rename(tmp, filepath.Join(r.GitDir, name))
+}
+
+// LockStateFile takes the lock that a git directory file stands for, waiting
+// up to wait for whoever holds it — see [System.Lock] — and returns what lets
+// go of it. Whoever reads a state file in order to write it back holds one
+// from the read to the write.
+func (r *Repo) LockStateFile(name string, wait time.Duration) (func(), error) {
+	return r.sys.Lock(filepath.Join(r.GitDir, name), wait)
 }
 
 // RemoveStateFile deletes a file from the git directory, ignoring a missing

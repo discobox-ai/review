@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/discobox-ai/review/internal/git"
 	"github.com/discobox-ai/review/internal/review"
@@ -176,6 +177,15 @@ func Is(word string) bool {
 	return word == "help"
 }
 
+// lockWait is how long a command waits for the review's lock before giving
+// up. Nobody is watching a command wait, and what is ahead of it is other
+// commands that each hold the lock for one read and one write, so it can
+// afford to queue behind a great many of them. It gives up at all so that a
+// holder that has stopped — a suspended process, an editor left open under
+// the lock — ends in an error that says so rather than in a script that never
+// comes back.
+const lockWait = time.Minute
+
 // Run carries out one subcommand. args is the command and its arguments.
 func Run(repo *git.Repo, args []string, out io.Writer) error {
 	if len(args) == 0 || (args[0] == "help" && len(args) == 1) {
@@ -215,47 +225,60 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 	}
 
 	branch := repo.CurrentBranch()
-	st, err := review.Load(repo, branch)
-	if err != nil {
-		return fmt.Errorf("%s: %w", review.FileName, err)
-	}
 
+	// The commands that only read work from a copy of the review. What they
+	// write — see reconcile — goes through review.Update like any other
+	// write, rather than this copy going back over whatever landed since.
 	switch cmd {
-	case "diff":
-		return diff(out, repo, st, opts)
-	case "list":
-		return list(out, st, opts)
-	case "status":
-		return status(out, repo, st, branch, opts)
-	case "show":
+	case "diff", "list", "status", "show":
+		st, err := review.Load(repo, branch, lockWait)
+		if err != nil {
+			return fmt.Errorf("%s: %w", review.FileName, err)
+		}
+		switch cmd {
+		case "diff":
+			return diff(out, repo, st, opts)
+		case "list":
+			return list(out, st, opts)
+		case "status":
+			return status(out, repo, st, branch, opts)
+		}
 		return show(out, st, rest)
 	}
 
-	// The rest change something, so they save.
-	var note string
-	switch cmd {
-	case "comment":
-		note, err = comment(st, repo, rest, opts)
-	case "reply":
-		note, err = reply(st, repo, rest, opts)
-	case "resolve":
-		note, err = setResolved(st, rest, true)
-	case "reopen":
-		note, err = setResolved(st, rest, false)
-	case "base":
-		note, err = setBase(out, st, rest, opts)
-	case "delete":
-		note, err = remove(st, rest)
-	case "approve":
-		note, err = setApproved(st, repo, rest, opts, true)
-	case "unapprove":
-		note, err = setApproved(st, repo, rest, opts, false)
+	// The rest change something. Each is applied to the review as it stands
+	// at that moment and saved before anything else can write, so that
+	// commands run at the same time all land.
+	var (
+		note   string
+		cmdErr error
+	)
+	err = review.Update(repo, branch, lockWait, func(st *review.State) error {
+		switch cmd {
+		case "comment":
+			note, cmdErr = comment(st, repo, rest, opts)
+		case "reply":
+			note, cmdErr = reply(st, repo, rest, opts)
+		case "resolve":
+			note, cmdErr = setResolved(st, rest, true)
+		case "reopen":
+			note, cmdErr = setResolved(st, rest, false)
+		case "base":
+			note, cmdErr = setBase(out, st, rest, opts)
+		case "delete":
+			note, cmdErr = remove(st, rest)
+		case "approve":
+			note, cmdErr = setApproved(st, repo, rest, opts, true)
+		case "unapprove":
+			note, cmdErr = setApproved(st, repo, rest, opts, false)
+		}
+		return cmdErr
+	})
+	if cmdErr != nil {
+		return cmdErr
 	}
 	if err != nil {
-		return err
-	}
-	if err := review.Save(repo, branch, st); err != nil {
-		return err
+		return fmt.Errorf("%s: %w", review.FileName, err)
 	}
 	if note != "" {
 		fmt.Fprintln(out, note)
@@ -716,10 +739,17 @@ func reconcile(repo *git.Repo, branch string, st *review.State, patches []*git.P
 			digests[p.Path] = review.Digest(p)
 		}
 	}
-	if changed, _ := st.Reconcile(digests); changed {
-		return review.Save(repo, branch, st)
+	if changed, _ := st.Reconcile(digests); !changed {
+		return nil
 	}
-	return nil
+	// st was read before the diff was taken, and anything may have been
+	// written since. So the verdict is given again on the review as it stands
+	// now, and that is what the caller goes on to report.
+	return review.Update(repo, branch, lockWait, func(now *review.State) error {
+		now.Reconcile(digests)
+		*st = *now
+		return nil
+	})
 }
 
 func nameOr(s, fallback string) string {

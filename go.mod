@@ -12,6 +12,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/discobox-ai/x v0.0.0-20260828205057-2567df0ccf27
 	github.com/mattn/go-runewidth v0.0.27
+	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.31.0
 )
 
@@ -36,6 +37,5 @@ require (
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	golang.org/x/net v0.39.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 )

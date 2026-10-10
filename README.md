@@ -653,6 +653,33 @@ comment added a moment ago is not quietly dropped by the next approval — and i
 writes the whole file through a temporary file and a rename, so a reader
 polling it never catches half of one.
 
+Between that re-read and that write it **holds a lock**, on
+`discobox-review.json.lock` beside the review, and so does every command that
+writes — the ones that only read included, at the moment they stamp a digest
+into an approval. So any number of commands and windows can be at one review at
+once and everything they write lands: thirty `comment`s started together leave
+thirty comments. Nothing has to be wrapped in a lock of the caller's own.
+Reading takes no lock and waits for nobody.
+
+The lock goes with the process that took it, so one that died holds nothing,
+and the lock file is simply left where it is. Nothing waits for it for ever
+either: a command gives up after a minute and says the review is locked, and
+the window after two seconds, with what was being written still in its box.
+
+That covers what discobox-review writes. Something editing the JSON by hand is
+outside it, and can lose a write or cause one to be lost as before; where that
+matters, use the commands. Where it has to be an edit, and the system has
+`flock(1)` — Linux does, macOS and Windows do not — hold the same lock around
+it, briefly, since every command and window that wants to write waits while
+it is held:
+
+```sh
+flock "$(git rev-parse --absolute-git-dir)/discobox-review.json.lock" ./edit-the-review
+```
+
+Do not run discobox-review itself under that lock: it would be waiting for
+its own caller to let go.
+
 A file caught halfway through being written leaves what is on screen alone and
 says so in the status bar. An agent mid-save is a moment, not a reason to lose
 a review.
@@ -1157,10 +1184,11 @@ carries a comment in and out of it.
 | --- | --- |
 | `cmd/discobox-review/main.go` | Flag parsing, program startup, and whether there is a terminal to draw in |
 | `internal/git/system.go` | The whole system boundary: running git, and file access |
+| `internal/git/system_flock.go`, `system_fcntl.go`, `system_windows.go` | The one call each kind of system spells its own way: locking a file |
 | `internal/git/git.go` | Every git invocation, the scan, the base and the history |
 | `internal/git/patch.go` | Unified diff parsing, splitting one diff into many files, and carrying a line number across a diff |
 | `internal/review/review.go` | The review document: approvals, digests, threads, and the JSON they live in |
-| `internal/review/store.go` | Reading and writing it, and the branch swap — shared by the window and the commands |
+| `internal/review/store.go` | Reading and writing it, the lock that makes the two one step, and the branch swap — shared by the window and the commands |
 | `internal/cli/cli.go` | discobox-review without the window: the subcommands |
 | `internal/ui/model.go` | The Bubble Tea model: state, keys, actions |
 | `internal/ui/view.go` | Where each pane goes, the bars above and below them, and what the view asks of the screen |

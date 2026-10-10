@@ -4,7 +4,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -126,6 +128,42 @@ func TestSubcommandsWorkWithNoTerminal(t *testing.T) {
 	// looking like it worked.
 	if _, stderr, code := runBin(t, dir, "show", "nope"); code == 0 {
 		t.Errorf("a bad command exited 0, saying %q", stderr)
+	}
+}
+
+// Programs run at the same moment against one repository all land: each is
+// its own process with its own copy of the review, so this is the one place
+// that can say they do not write those copies over each other.
+func TestProgramsRunTogetherAllLand(t *testing.T) {
+	dir := repoDir(t)
+	if _, _, code := runBin(t, dir, "base", "main"); code != 0 {
+		t.Fatalf("base exited %d", code)
+	}
+
+	const n = 30
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	for i := range codes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cmd := exec.Command(binary, "comment", "--by", "a"+strconv.Itoa(i%3), "a.txt:1", "c"+strconv.Itoa(i))
+			cmd.Dir = dir
+			if err := cmd.Run(); err != nil {
+				codes[i] = 1
+			}
+		}()
+	}
+	wg.Wait()
+	for i, code := range codes {
+		if code != 0 {
+			t.Errorf("comment %d failed", i)
+		}
+	}
+
+	out, _, _ := runBin(t, dir, "status")
+	if !strings.Contains(out, "comments    "+strconv.Itoa(n)+"\n") {
+		t.Errorf("want all %d comments kept:\n%s", n, out)
 	}
 }
 

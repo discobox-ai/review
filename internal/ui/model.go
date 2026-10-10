@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -464,24 +465,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.pickUpChanges(), reloadTick())
 
 	case approveAllMsg:
-		m.mutate(func(st *review.State) {
+		if !m.mutate(func(st *review.State) {
 			for _, p := range msg.paths {
 				st.Approve(p, msg.digests[p], msg.by)
 			}
-		})
+		}) {
+			return m, nil
+		}
 		m.setOK("Approved " + plural(len(msg.paths), "file", "files"))
 		return m, nil
 
 	case deleteMsg:
 		if msg.comment < 0 {
-			m.mutate(func(st *review.State) { st.Remove(msg.id) })
-			m.setOK("Deleted " + msg.id)
+			if m.mutate(func(st *review.State) { st.Remove(msg.id) }) {
+				m.setOK("Deleted " + msg.id)
+			}
 			return m, nil
 		}
 		gone := false
-		m.mutate(func(st *review.State) {
+		if !m.mutate(func(st *review.State) {
 			_, gone = st.RemoveComment(msg.id, msg.comment)
-		})
+		}) {
+			return m, nil
+		}
 		if gone {
 			m.setOK("Deleted the last comment, and " + msg.id + " with it")
 		} else {
@@ -605,7 +611,12 @@ func (m Model) onCommitFiles(msg commitFilesMsg) (tea.Model, tea.Cmd) {
 // is always at one path, holding one review, in the flattest shape an agent
 // could ask for — which is the whole reason the state is a file at all.
 func (m *Model) adoptReview() {
-	review.Adopt(m.repo, m.branch)
+	if err := review.Adopt(m.repo, m.branch, lockWait); err != nil {
+		// What is at the path may be another branch's review still, so it is
+		// left unread; the next scan asks again.
+		m.setError("Reading the review: " + firstLine(err.Error()))
+		return
+	}
 	if saved := m.readReview(); !m.basePinned {
 		m.baseRef = saved
 	}
@@ -638,32 +649,61 @@ func (m *Model) readReview() (base string) {
 	return m.rv.Base
 }
 
-// writeReview saves the review, and remembers what it wrote so that the next
-// tick does not mistake discobox-review's own write for somebody else's.
-func (m *Model) writeReview() {
-	m.rv.Branch = m.branch
-	m.rv.Base = m.baseRef
-	if err := m.repo.WriteStateFile(review.FileName, string(m.rv.Bytes())); err != nil {
-		m.setError("Saving the review: " + firstLine(err.Error()))
-		return
+// lockWait is how long the window waits for the review's lock when the person
+// at it has asked for something. The window cannot draw or take a key while
+// it waits, so this is short: long enough to queue behind commands that each
+// hold the lock for one read and one write, and not long enough to look
+// stopped when something is sitting on it.
+const lockWait = 2 * time.Second
+
+// update is every write the window makes: the review is read again, handed to
+// change, and saved if that left it different, all under the review's lock —
+// see [review.Update], which the commands write through as well. When it
+// fails, nothing has changed anywhere.
+//
+// That is what lets the window and any number of commands work on the same
+// review at the same time. All of them write the file whole, so a change has
+// to be applied to what is on disk right now — rather than to what was on disk
+// when the window was last drawn — and nothing else may write between that
+// read and this write, or a comment somebody added a moment ago is quietly
+// dropped.
+func (m *Model) update(wait time.Duration, change func(*review.State)) error {
+	var now *review.State
+	err := review.Update(m.repo, m.branch, wait, func(st *review.State) error {
+		change(st)
+		// A base chosen here, in this session, is the window's to say. Any
+		// other is the file's: one set by a command a moment ago, which the
+		// poll has not got to yet, must not be put back by this write.
+		if m.basePinned {
+			st.Base = m.baseRef
+		}
+		now = st
+		return nil
+	})
+	if err != nil {
+		return err
 	}
+	m.rv, m.rvErr = now, ""
 	m.stamp = m.repo.StateFileStamp(review.FileName)
+	if !m.basePinned && now.Base != m.baseRef {
+		// The base moved under the window. Every diff on screen is measured
+		// from the old one, which is the poll's business to put right: with
+		// no stamp to recognise the file by, the next tick takes it for new.
+		m.stamp = git.Stamp{}
+	}
+	return nil
 }
 
-// mutate changes the review and saves it, re-reading first.
-//
-// The re-read is what makes discobox-review and an agent able to work on the same
-// review at the same time. Neither can lock the file, but both write it whole,
-// so a change applied to what is on disk right now — rather than to what was
-// on disk when the window was last drawn — cannot quietly drop a comment
-// somebody else added a moment ago.
-func (m *Model) mutate(fn func(*review.State)) {
-	if m.stamp != m.repo.StateFileStamp(review.FileName) {
-		m.readReview()
+// mutate changes the review at the asking of whoever is at the window, and
+// reports whether the change was saved. When it was not, it was not made
+// either: the status bar says why, and the caller has nothing to announce.
+func (m *Model) mutate(fn func(*review.State)) bool {
+	if err := m.update(lockWait, fn); err != nil {
+		m.setError("Saving the review: " + firstLine(err.Error()))
+		return false
 	}
-	fn(m.rv)
-	m.writeReview()
 	m.rebuild()
+	return true
 }
 
 // pickUpChanges is the poll: it notices the review file being written by
@@ -705,7 +745,23 @@ func (m *Model) reconcile() {
 	if !changed {
 		return
 	}
-	m.writeReview()
+	// What fell, fell from the copy on screen. The file may have moved on
+	// since that was read, so the same verdict is given again on what is
+	// there now, and that is what is saved.
+	//
+	// Nobody asked for this write, so it does not make them wait for it: if
+	// something else has the lock this instant, the stamp is forgotten and the
+	// next tick reads the file as new and comes back here. Any other failure
+	// is not going to mend itself in a second, and is said once.
+	err := m.update(0, func(st *review.State) { st.Reconcile(digests) })
+	switch {
+	case errors.Is(err, git.ErrLocked):
+		m.stamp = git.Stamp{}
+		return
+	case err != nil:
+		m.setError("Saving the review: " + firstLine(err.Error()))
+		return
+	}
 	switch len(nullified) {
 	case 0:
 	case 1:
@@ -1751,8 +1807,9 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 	// done with, so a file approved after F opened everything still goes away.
 	delete(m.folds, path)
 	if m.rv.Approved(path) {
-		m.mutate(func(st *review.State) { st.Unapprove(path) })
-		m.setOK("Approval withdrawn from " + path)
+		if m.mutate(func(st *review.State) { st.Unapprove(path) }) {
+			m.setOK("Approval withdrawn from " + path)
+		}
 		return m, nil
 	}
 	f := m.workBy[path]
@@ -1761,8 +1818,9 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	digest, author := f.digest, m.author
-	m.mutate(func(st *review.State) { st.Approve(path, digest, author) })
-	m.setOK("Approved " + path)
+	if m.mutate(func(st *review.State) { st.Approve(path, digest, author) }) {
+		m.setOK("Approved " + path)
+	}
 	return m, nil
 }
 
@@ -2015,17 +2073,25 @@ func (m Model) doPost() (tea.Model, tea.Cmd) {
 	}
 	c, author := m.compose, m.author
 	id := c.thread
+	saved := false
 	if c.thread != "" {
-		m.mutate(func(st *review.State) { st.Reply(c.thread, author, body) })
-		m.setOK("Replied to " + c.thread)
+		saved = m.mutate(func(st *review.State) { st.Reply(c.thread, author, body) })
 	} else {
-		m.mutate(func(st *review.State) {
+		saved = m.mutate(func(st *review.State) {
 			t := st.Start(&review.Thread{
 				Path: c.path, Side: c.side, Line: c.line, Lines: c.span,
 				Text: c.text, Origin: c.origin,
 			}, author, body)
 			id = t.ID
 		})
+	}
+	if !saved {
+		// What was written is still in the box, to be posted again.
+		return m.setFocus(focusCompose)
+	}
+	if c.thread != "" {
+		m.setOK("Replied to " + c.thread)
+	} else {
 		m.setOK("Commented on " + c.path + " as " + id)
 	}
 	m.closeDraft(id)
@@ -2045,7 +2111,9 @@ func (m Model) doResolve() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	want := !t.Resolved
-	m.mutate(func(st *review.State) { st.SetResolved(id, want) })
+	if !m.mutate(func(st *review.State) { st.SetResolved(id, want) }) {
+		return m, nil
+	}
 	if want {
 		delete(m.view.expanded, id)
 		m.setOK("Resolved " + id)
@@ -2189,11 +2257,15 @@ func (m Model) onBaseChosen(ref string) (tea.Model, tea.Cmd) {
 		m.baseRef = ref
 	}
 	m.basePinned = true
-	m.mutate(func(*review.State) {})
-	if m.baseRef == "" {
-		m.setOK("Base: whatever this branch is built on")
-	} else {
-		m.setOK("Base: " + m.baseRef)
+	// Unsaved, the base still holds for this session, which is what was asked
+	// for first: it is written with the next thing that is, and meanwhile the
+	// status bar says the saving failed.
+	if m.mutate(func(*review.State) {}) {
+		if m.baseRef == "" {
+			m.setOK("Base: whatever this branch is built on")
+		} else {
+			m.setOK("Base: " + m.baseRef)
+		}
 	}
 	m.rescanning = true
 	return m, m.rescanCmd()
