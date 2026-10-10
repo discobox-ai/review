@@ -4002,3 +4002,27 @@ func TestApprovingAHunkKeepsWhatTheContextHides(t *testing.T) {
 			"approving FIFTY dropped FOUR", n, of)
 	}
 }
+
+// A decision about one hunk is made against the review as it stands on disk,
+// so a hunk something else signed off since the window last read it — an
+// agent, another window — is not written over with this window's older picture.
+func TestApprovingAHunkKeepsWhatAnotherWriterSigned(t *testing.T) {
+	m := modelFor(t, changedRepo(t, 60, map[int]string{4: "FOUR", 20: "TWENTY", 50: "FIFTY"}))
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey("a"))
+
+	// Somebody else signs off the last hunk, and this window has not looked.
+	other := fileIn(t, m, "foo.txt").blocks[2]
+	st := reviewJSON(t, m.repo)
+	st.SetHunks("foo.txt", append(st.FileFor("foo.txt").Hunks, other...))
+	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+
+	m = onLine(t, m, "foo.txt", '+', "TWENTY")
+	m = drive(t, m, letterKey("a"))
+	if !m.rv.Approved("foo.txt") {
+		t.Errorf("the third hunk signed off elsewhere was lost: %v (status %q)",
+			reviewJSON(t, m.repo).FileFor("foo.txt").Hunks, m.status)
+	}
+}

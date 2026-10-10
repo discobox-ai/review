@@ -1646,50 +1646,58 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	path, digest, author := f.path, f.digest, m.author
 	withdraw := f.approved || f.hunkApproved(hunk)
 
+	// The decision is made against the review as it is read back inside
+	// mutate, not as it was last drawn: something else — an agent, another
+	// window — may have signed off or taken back a different hunk since, and
+	// writing this window's picture of the file over that would undo it.
+	//
 	// Run by run, not hunk by hunk: at this context a hunk may be two that
 	// were apart when one of them was signed off, and that half is still
 	// signed off though the hunk as drawn is not.
-	var keep []string
-	left := 0
-	for h, blocks := range f.blocks {
-		whole := true
-		for _, d := range blocks {
-			ok := f.approved || f.signed[d]
-			if h == hunk {
-				ok = !withdraw
+	all := f.blocks
+	left, promoted := 0, false
+	m.mutate(func(st *review.State) {
+		approved, signed := st.Approved(path), st.ApprovedHunks(path)
+		var keep []string
+		for h, blocks := range all {
+			whole := true
+			for _, d := range blocks {
+				ok := approved || signed[d]
+				if h == hunk {
+					ok = !withdraw
+				}
+				if ok {
+					keep = append(keep, d)
+				} else {
+					whole = false
+				}
 			}
-			if ok {
-				keep = append(keep, d)
-			} else {
-				whole = false
+			if !whole {
+				left++
 			}
 		}
-		if !whole {
-			left++
-		}
-	}
-
-	wasApproved := f.approved
-	switch {
-	case withdraw:
-		m.mutate(func(st *review.State) {
+		switch {
+		case withdraw:
 			// Only a file that is approved has an approval to take back; one
 			// whose approval already fell keeps saying that it did.
-			if wasApproved {
+			if approved {
 				st.Unapprove(path)
 			}
-			st.SetHunks(path, keep)
-		})
-		m.setOK("Approval withdrawn from this hunk of " + path)
-	case left == 0:
-		delete(m.folds, path)
-		m.mutate(func(st *review.State) {
+		case left == 0:
 			st.Approve(path, digest, author)
-			st.SetHunks(path, keep)
-		})
+			promoted = true
+		}
+		st.SetHunks(path, keep)
+	})
+	switch {
+	case withdraw:
+		m.setOK("Approval withdrawn from this hunk of " + path)
+	case promoted:
+		// Deciding about a file hands its fold back to the rule too.
+		delete(m.folds, path)
+		m.rebuild()
 		m.setOK("Approved " + path)
 	default:
-		m.mutate(func(st *review.State) { st.SetHunks(path, keep) })
 		m.setOK("Approved a hunk of " + path + " · " + plural(left, "hunk", "hunks") + " to go")
 	}
 	m.view.goToDiffLine(path, head)
