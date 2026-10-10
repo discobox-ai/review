@@ -1247,6 +1247,35 @@ func TestTheLastBranchsReviewIsNotKeptForTheNext(t *testing.T) {
 	}
 }
 
+// A thread deleted by something else while a reply to it was being written
+// takes the reply's place with it, not the reply: that stays in the box.
+func TestAReplyToAThreadThatHasGoneIsNotThrownAway(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "mine")
+	id := reviewJSON(t, m.repo).Threads[0].ID
+
+	m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == id })
+	m = drive(t, m, letterKey("r"))
+	m = typeText(t, m, "an answer")
+
+	err := review.Update(m.repo, m.branch, 0, func(st *review.State) error {
+		st.Remove(id)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = drive(t, m, ctrlKey("s"))
+
+	if m.focus != focusCompose || m.editor.Value() != "an answer" {
+		t.Errorf("the reply was thrown away: focus = %v, text = %q", m.focus, m.editor.Value())
+	}
+	if !m.statusEr {
+		t.Errorf("status = %q, want it to say the thread has gone", m.status)
+	}
+}
+
 // The review is of a branch, so checking out another one puts this one away
 // and brings that one back.
 func TestEachBranchKeepsItsOwnReview(t *testing.T) {

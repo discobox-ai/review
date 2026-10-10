@@ -2102,7 +2102,14 @@ func (m Model) doPost() (tea.Model, tea.Cmd) {
 	id := c.thread
 	saved := false
 	if c.thread != "" {
-		saved = m.mutate(func(st *review.State) { st.Reply(c.thread, author, body) })
+		there := false
+		saved = m.mutate(func(st *review.State) { there = st.Reply(c.thread, author, body) })
+		if saved && !there {
+			// Deleted by something else while the reply was being written.
+			// The reply stays in the box: it is the only copy of it.
+			m.setError(c.thread + " is no longer there to reply to")
+			return m.setFocus(focusCompose)
+		}
 	} else {
 		saved = m.mutate(func(st *review.State) {
 			t := st.Start(&review.Thread{

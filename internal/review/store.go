@@ -71,16 +71,19 @@ func legacyArchiveName(branch string) string {
 // It is done a branch at a time, at the moment that branch is looked at, which
 // is the only moment the name of its archive is known — and the only moment
 // anybody would notice it missing.
-func migrate(fs Files, branch string) {
+func migrate(fs Files, branch string) error {
 	if !fs.StateFileExists(FileName) && fs.StateFileExists(legacyFileName) {
-		_ = fs.RenameStateFile(legacyFileName, FileName)
+		if err := fs.RenameStateFile(legacyFileName, FileName); err != nil {
+			return err
+		}
 	}
 	if branch == "" {
-		return
+		return nil
 	}
 	if !fs.StateFileExists(ArchiveName(branch)) && fs.StateFileExists(legacyArchiveName(branch)) {
-		_ = fs.RenameStateFile(legacyArchiveName(branch), ArchiveName(branch))
+		return fs.RenameStateFile(legacyArchiveName(branch), ArchiveName(branch))
 	}
+	return nil
 }
 
 // Adopt makes the file at [FileName] the review of branch.
@@ -105,8 +108,7 @@ func Adopt(fs Files, branch string, wait time.Duration) error {
 		return err
 	}
 	defer unlock()
-	adopt(fs, branch)
-	return nil
+	return adopt(fs, branch)
 }
 
 // settled reports whether the review at [FileName] is already the one for
@@ -130,21 +132,27 @@ func settled(fs Files, branch string) bool {
 }
 
 // adopt is Adopt for a caller that holds the lock.
-func adopt(fs Files, branch string) {
-	migrate(fs, branch)
-	if branch == "" {
-		return
+//
+// It stops at the first move that fails. The move after it would otherwise
+// bring this branch's review in over one that had not been put away, which is
+// the only copy of it there is.
+func adopt(fs Files, branch string) error {
+	if err := migrate(fs, branch); err != nil || branch == "" {
+		return err
 	}
 	if data, ok := fs.ReadStateFile(FileName); ok {
 		st, err := Parse([]byte(data))
 		if err != nil || st.Branch == "" || st.Branch == branch {
-			return
+			return nil
 		}
-		_ = fs.RenameStateFile(FileName, ArchiveName(st.Branch))
+		if err := fs.RenameStateFile(FileName, ArchiveName(st.Branch)); err != nil {
+			return err
+		}
 	}
 	if fs.StateFileExists(ArchiveName(branch)) {
-		_ = fs.RenameStateFile(ArchiveName(branch), FileName)
+		return fs.RenameStateFile(ArchiveName(branch), FileName)
 	}
+	return nil
 }
 
 // Load reads the review of a branch, adopting it first. A review that is not
@@ -207,7 +215,9 @@ func Update(fs Files, branch string, wait time.Duration, change func(*State) err
 	}
 	defer unlock()
 
-	adopt(fs, branch)
+	if err := adopt(fs, branch); err != nil {
+		return err
+	}
 	before, existed := fs.ReadStateFile(FileName)
 	st := New(branch)
 	if existed {

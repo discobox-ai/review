@@ -640,6 +640,39 @@ func TestAReaderCaughtMidSwapDoesNotReportAnEmptyReview(t *testing.T) {
 	}
 }
 
+// stuckFiles is a git directory in which a review cannot be put away.
+type stuckFiles struct{ fakeFiles }
+
+func (f stuckFiles) RenameStateFile(from, to string) error {
+	if from == FileName {
+		return errors.New("cannot move " + from)
+	}
+	return f.fakeFiles.RenameStateFile(from, to)
+}
+
+// Bringing a branch's review back goes over whatever is at the path, so it is
+// not done unless what was there has been put away first: that is the only
+// copy of the other branch's review.
+func TestAReviewThatCannotBePutAwayIsNotOverwritten(t *testing.T) {
+	theirs := New("feature/x")
+	theirs.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "about feature/x")
+	fs := stuckFiles{fakeFiles{
+		FileName:            string(theirs.Bytes()),
+		ArchiveName("main"): string(New("main").Bytes()),
+	}}
+
+	if err := Adopt(fs, "main", 0); err == nil {
+		t.Error("the swap was reported as done")
+	}
+	wrote := false
+	if err := Update(fs, "main", 0, func(*State) error { wrote = true; return nil }); err == nil || wrote {
+		t.Errorf("an update went ahead on a review that is not main's: err = %v", err)
+	}
+	if st, err := Parse([]byte(fs.fakeFiles[FileName])); err != nil || len(st.Threads) != 1 {
+		t.Errorf("feature/x's review was overwritten: %q", fs.fakeFiles[FileName])
+	}
+}
+
 func keysOf(fs fakeFiles) []string {
 	var out []string
 	for k := range fs {
