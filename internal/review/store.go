@@ -1,6 +1,9 @@
 package review
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Reading and writing the review, without touching a file.
 //
@@ -155,10 +158,21 @@ func Load(fs Files, branch string, wait time.Duration) (*State, error) {
 	// wait. One that is not, and could not be swapped for this branch's, is
 	// not read at all: it is some other branch's review, and handing it back
 	// would be answering a different question.
-	if err := Adopt(fs, branch, wait); err != nil {
-		return nil, err
+	//
+	// The read comes after the lock is let go of, so something else can swap
+	// the file in between. What was read says which branch it is of, and a
+	// wrong one is put right and read again — a few times, not for ever.
+	var st *State
+	for range 3 {
+		err := Adopt(fs, branch, wait)
+		if err != nil {
+			return nil, err
+		}
+		if st, err = read(fs, branch); err != nil || st.Of(branch) {
+			return st, err
+		}
 	}
-	return read(fs, branch)
+	return nil, fmt.Errorf("it is the review of %s, not of %s", st.Branch, branch)
 }
 
 func read(fs Files, branch string) (*State, error) {

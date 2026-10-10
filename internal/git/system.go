@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -174,9 +175,12 @@ func (Local) Lock(path string, wait time.Duration) (func(), error) {
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		ok, err := tryLockFile(f)
+		ok, err := tryLockPath(path, f)
 		if err == nil && ok {
-			return func() { _ = f.Close() }, nil
+			return func() {
+				_ = f.Close()
+				inProcess.Delete(path)
+			}, nil
 		}
 		if err == nil && !time.Now().Before(deadline) {
 			err = fmt.Errorf("%s: %w", filepath.Base(path), ErrLocked)
@@ -187,6 +191,28 @@ func (Local) Lock(path string, wait time.Duration) (func(), error) {
 		}
 		time.Sleep(lockPoll)
 	}
+}
+
+// inProcess is the paths this process holds a lock on.
+//
+// The system's lock keeps other processes out. Whether it keeps out a second
+// taker in this one depends on the system: flock's does, fcntl's belongs to
+// the process and is granted to it again — and then closing either file lets
+// go of both. So the process keeps its own account first, and the lock means
+// the same thing everywhere.
+var inProcess sync.Map
+
+// tryLockPath takes the lock on path, through the file f opened on it, if
+// nobody in this process or any other has it.
+func tryLockPath(path string, f *os.File) (bool, error) {
+	if _, held := inProcess.LoadOrStore(path, struct{}{}); held {
+		return false, nil
+	}
+	ok, err := tryLockFile(f)
+	if !ok || err != nil {
+		inProcess.Delete(path)
+	}
+	return ok, err
 }
 
 // WriteTempFile puts data in a read-only file of its own under the system

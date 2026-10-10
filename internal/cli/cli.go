@@ -229,8 +229,13 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 	// The commands that only read work from a copy of the review. What they
 	// write — see reconcile — goes through review.Update like any other
 	// write, rather than this copy going back over whatever landed since.
+	// base with nothing after it is one of them: it says what the base is.
+	reads := cmd == "base" && len(rest) == 0 && !opts.auto
 	switch cmd {
 	case "diff", "list", "status", "show":
+		reads = true
+	}
+	if reads {
 		st, err := review.Load(repo, branch, lockWait)
 		if err != nil {
 			return fmt.Errorf("%s: %w", review.FileName, err)
@@ -242,6 +247,9 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 			return list(out, st, opts)
 		case "status":
 			return status(out, repo, st, branch, opts)
+		case "base":
+			_, err := setBase(out, st, rest, opts)
+			return err
 		}
 		return show(out, st, rest)
 	}

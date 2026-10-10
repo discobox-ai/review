@@ -1180,6 +1180,73 @@ func TestAHalfWrittenReviewIsNotWrittenOver(t *testing.T) {
 	}
 }
 
+// A verdict that could not be saved is not shown as if it stood: the screen
+// goes on saying what the file says.
+func TestAStampThatCannotBeSavedIsNotShown(t *testing.T) {
+	m := newTestModel(t)
+	st := review.New(m.branch)
+	st.Base = m.baseRef
+	st.Approve("beta.go", "", "claude")
+	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	m.readReview()
+
+	// The file stops being one that can be written back to.
+	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+		t.Fatal(err)
+	}
+	m.reconcile()
+
+	if got := m.rv.FileFor("beta.go"); got == nil || got.Digest != "" {
+		t.Errorf("the screen shows a stamp nothing saved: %+v", got)
+	}
+	if !m.statusEr {
+		t.Errorf("status = %q, want it to say the review could not be saved", m.status)
+	}
+}
+
+// After a checkout something else can swap the new branch's review in before
+// this window has scanned and noticed. That review is not this window's to
+// show under the old branch's name.
+func TestAnotherBranchsReviewIsNotPutOnScreen(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "mine")
+
+	theirs := review.New("some-other-branch")
+	theirs.Start(&review.Thread{Path: "bar.txt", Side: review.SideNew, Line: 1}, "claude", "theirs")
+	if err := m.repo.WriteStateFile(review.FileName, string(theirs.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	m.pickUpChanges()
+
+	if len(m.rv.Threads) != 1 || m.rv.Threads[0].Comments[0].Body != "mine" {
+		t.Errorf("the window took up another branch's review: %+v", m.rv.Threads)
+	}
+}
+
+// Nor is the last branch's review kept on screen under the new branch's name
+// when the new branch's own could not be read. Threads are numbered from one
+// in every review, so acting on one would act on a stranger.
+func TestTheLastBranchsReviewIsNotKeptForTheNext(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "on the feature branch")
+
+	// The window is told of a checkout, and the file it then reads is still
+	// not the new branch's.
+	m.branch = "elsewhere"
+	m.readReview()
+
+	if len(m.rv.Threads) != 0 || m.rv.Branch != "elsewhere" {
+		t.Errorf("the screen still shows %q's review: %+v", m.rv.Branch, m.rv.Threads)
+	}
+	if m.rvErr == "" {
+		t.Error("nothing says the review could not be read")
+	}
+}
+
 // The review is of a branch, so checking out another one puts this one away
 // and brings that one back.
 func TestEachBranchKeepsItsOwnReview(t *testing.T) {

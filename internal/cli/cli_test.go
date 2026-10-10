@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/discobox-ai/review/internal/git"
 	"github.com/discobox-ai/review/internal/review"
@@ -418,6 +419,34 @@ func TestAReadingCommandDoesNotUndoWhatWasWrittenMeanwhile(t *testing.T) {
 	// And it reports the review it left behind, not the one it started with.
 	if got := fields(t, out.String()); got["comments"] != "1" {
 		t.Errorf("status reported comments = %q, want the one that is there", got["comments"])
+	}
+}
+
+// Asking what the base is changes nothing, so it waits for nobody: it answers
+// while something else holds the lock, where setting one would queue.
+func TestShowingTheBaseTakesNoLock(t *testing.T) {
+	repo := testRepo(t)
+	unlock, err := review.Lock(repo, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	answered := make(chan string, 1)
+	go func() {
+		var out strings.Builder
+		if err := Run(repo, []string{"base"}, &out); err != nil {
+			out.WriteString(err.Error())
+		}
+		answered <- out.String()
+	}()
+	select {
+	case got := <-answered:
+		if strings.TrimSpace(got) != "main" {
+			t.Errorf("base printed %q, want main", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("base is waiting for a lock it has no use for")
 	}
 }
 

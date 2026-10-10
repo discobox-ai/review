@@ -615,6 +615,7 @@ func (m *Model) adoptReview() {
 		// What is at the path may be another branch's review still, so it is
 		// left unread; the next scan asks again.
 		m.setError("Reading the review: " + firstLine(err.Error()))
+		m.keepOwnReview()
 		return
 	}
 	if saved := m.readReview(); !m.basePinned {
@@ -644,6 +645,13 @@ func (m *Model) readReview() (base string) {
 		m.rvErr = "the review file will not parse: " + firstLine(err.Error())
 		return m.baseRef
 	}
+	if !st.Of(m.branch) {
+		// Another branch's review, swapped in by something that has seen a
+		// checkout this window has not scanned yet. It is not this window's
+		// to show; the scan that notices the checkout asks for the right one.
+		m.keepOwnReview()
+		return m.baseRef
+	}
 	m.rv, m.rvErr = st, ""
 	m.stamp = m.repo.StateFileStamp(review.FileName)
 	return m.rv.Base
@@ -655,6 +663,19 @@ func (m *Model) readReview() (base string) {
 // hold the lock for one read and one write, and not long enough to look
 // stopped when something is sitting on it.
 const lockWait = 2 * time.Second
+
+// keepOwnReview is what happens to the screen when this branch's review could
+// not be read: it keeps the review it has, if that is this branch's, and
+// otherwise shows none. The one it must not keep is the last branch's. Threads
+// are numbered from one in every review, so a reply to t2 on a screen showing
+// that review would land on this branch's t2.
+func (m *Model) keepOwnReview() {
+	if m.rv != nil && m.rv.Branch == m.branch {
+		return
+	}
+	m.rv, m.stamp = review.New(m.branch), git.Stamp{}
+	m.rvErr = "this branch's review could not be read"
+}
 
 // update is every write the window makes: the review is read again, handed to
 // change, and saved if that left it different, all under the review's lock —
@@ -741,7 +762,13 @@ func (m *Model) reconcile() {
 	for _, f := range m.work {
 		digests[f.path] = f.digest
 	}
-	changed, nullified := m.rv.Reconcile(digests)
+	// Asked of a copy, so that the screen changes only once the verdict is
+	// saved: one that could not be written must not be shown as if it stood.
+	probe, err := review.Parse(m.rv.Bytes())
+	if err != nil {
+		return
+	}
+	changed, nullified := probe.Reconcile(digests)
 	if !changed {
 		return
 	}
@@ -753,7 +780,7 @@ func (m *Model) reconcile() {
 	// something else has the lock this instant, the stamp is forgotten and the
 	// next tick reads the file as new and comes back here. Any other failure
 	// is not going to mend itself in a second, and is said once.
-	err := m.update(0, func(st *review.State) { st.Reconcile(digests) })
+	err = m.update(0, func(st *review.State) { st.Reconcile(digests) })
 	switch {
 	case errors.Is(err, git.ErrLocked):
 		m.stamp = git.Stamp{}

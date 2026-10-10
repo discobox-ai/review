@@ -576,6 +576,38 @@ func TestAnotherBranchsReviewIsNotReadAsThisOnes(t *testing.T) {
 	}
 }
 
+// swappedFiles is a git directory in which something else swaps another
+// branch's review in at the worst moment: between a reader finding the review
+// settled and reading it.
+type swappedFiles struct {
+	fakeFiles
+	reads int
+}
+
+func (f *swappedFiles) ReadStateFile(name string) (string, bool) {
+	if f.reads++; f.reads == 2 {
+		f.fakeFiles[ArchiveName("main")] = f.fakeFiles[FileName]
+		f.fakeFiles[FileName] = string(New("feature").Bytes())
+	}
+	return f.fakeFiles.ReadStateFile(name)
+}
+
+// The read comes after the lock, so the file can be swapped in between. A
+// reader that gets another branch's review notices, and asks again.
+func TestAReviewSwappedUnderAReaderIsReadAgain(t *testing.T) {
+	mine := New("main")
+	mine.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "about main")
+	fs := &swappedFiles{fakeFiles: fakeFiles{FileName: string(mine.Bytes())}}
+
+	st, err := Load(fs, "main", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Branch != "main" || len(st.Threads) != 1 {
+		t.Errorf("main was handed the review of %q: %+v", st.Branch, st.Threads)
+	}
+}
+
 func keysOf(fs fakeFiles) []string {
 	var out []string
 	for k := range fs {

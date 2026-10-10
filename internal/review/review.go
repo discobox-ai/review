@@ -72,6 +72,12 @@ type State struct {
 	Threads []*Thread `json:"threads"`
 }
 
+// Of reports whether this can be the review of branch. One that names no
+// branch — written by hand, or with no branch checked out — is anybody's.
+func (s *State) Of(branch string) bool {
+	return s.Branch == "" || branch == "" || s.Branch == branch
+}
+
 // File is what the review says about one path.
 //
 // Approved is a claim about a particular set of changes, not about a name:
