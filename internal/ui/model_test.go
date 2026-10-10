@@ -4073,3 +4073,26 @@ func TestGapLinesLoseTheirCarriageReturns(t *testing.T) {
 		t.Errorf("the gaps let out %d lines, want 3", n)
 	}
 }
+
+// Deciding about a hunk hands its fold back to the rule, but only once the
+// decision is saved. One that could not be written leaves the hunk folded the
+// way the reader had it, and says so rather than announcing an approval.
+func TestAHunkApprovalThatIsNotSavedMovesNoFold(t *testing.T) {
+	m := modelFor(t, changedRepo(t, 60, map[int]string{4: "FOUR", 50: "FIFTY"}))
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	f := fileIn(t, m, "foo.txt")
+	k := m.hunkKeys(f)[0]
+	m.hunks[k] = false
+
+	// A review caught halfway through being written cannot be saved over.
+	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+		t.Fatal(err)
+	}
+	m = drive(t, m, letterKey("a"))
+	if !m.statusEr {
+		t.Fatalf("status = %q, want it to say the approval was not saved", m.status)
+	}
+	if v, ok := m.hunks[k]; !ok || v {
+		t.Errorf("the fold the reader set was not put back: hunks[%v] = %v, %v", k, v, ok)
+	}
+}

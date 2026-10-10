@@ -1686,9 +1686,14 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// Deciding about a hunk hands its fold back to the rule, as it does for a
-	// file.
+	// file — and gets it back if the decision is not saved.
+	undo := func() {}
 	if keys := m.hunkKeys(f); hunk < len(keys) {
-		delete(m.hunks, keys[hunk])
+		k := keys[hunk]
+		if was, set := m.hunks[k]; set {
+			undo = func() { m.hunks[k] = was }
+		}
+		delete(m.hunks, k)
 	}
 	path, digest, author := f.path, f.digest, m.author
 	withdraw := f.approved || f.hunkApproved(hunk)
@@ -1703,7 +1708,7 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	// signed off though the hunk as drawn is not.
 	all := f.blocks
 	left, promoted := 0, false
-	m.mutate(func(st *review.State) {
+	if !m.mutate(func(st *review.State) {
 		approved, signed := st.Approved(path), st.ApprovedHunks(path)
 		var keep []string
 		for h, blocks := range all {
@@ -1735,7 +1740,10 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 			promoted = true
 		}
 		st.SetHunks(path, keep)
-	})
+	}) {
+		undo()
+		return m, nil
+	}
 	switch {
 	case withdraw:
 		m.setOK("Approval withdrawn from this hunk of " + path)
