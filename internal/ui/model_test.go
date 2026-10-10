@@ -4026,3 +4026,25 @@ func TestApprovingAHunkKeepsWhatAnotherWriterSigned(t *testing.T) {
 			reviewJSON(t, m.repo).FileFor("foo.txt").Hunks, m.status)
 	}
 }
+
+// The unchanged lines of a file are read from its new side, so a patch that
+// has none to read — a link, a deletion, a file a link has replaced — is told
+// apart by what git says about it and not by what the file is called.
+func TestNoNewSide(t *testing.T) {
+	for _, c := range []struct {
+		name, preamble string
+		want           bool
+	}{
+		{"an edit", "diff --git a/f b/f\nindex 1111111..2222222 100644\n--- a/f\n+++ b/f", false},
+		{"a new file", "diff --git a/f b/f\nnew file mode 100644\nindex 0000000..2222222\n--- /dev/null\n+++ b/f", false},
+		{"a file called like a mode", "diff --git a/mode 120000 b/mode 120000\nindex 1111111..2222222 100644\n--- a/mode 120000\n+++ b/mode 120000", false},
+		{"a new link", "diff --git a/l b/l\nnew file mode 120000\nindex 0000000..2222222\n--- /dev/null\n+++ b/l", true},
+		{"a link pointed elsewhere", "diff --git a/l b/l\nindex 1111111..2222222 120000\n--- a/l\n+++ b/l", true},
+		{"a deleted file", "diff --git a/f b/f\ndeleted file mode 100644\nindex 1111111..0000000\n--- a/f\n+++ /dev/null", true},
+	} {
+		p := &git.Patch{Preamble: strings.Split(c.preamble, "\n")}
+		if got := noNewSide(p); got != c.want {
+			t.Errorf("%s: noNewSide is %v, want %v", c.name, got, c.want)
+		}
+	}
+}

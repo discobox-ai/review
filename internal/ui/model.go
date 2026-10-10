@@ -392,17 +392,38 @@ func buildFiles(diff, pending string, states map[string]git.State) []*reviewFile
 // cannot be read has none marked, and is drawn the way it always was.
 func addGaps(repo *git.Repo, commit string, files []*reviewFile) {
 	for _, f := range files {
-		// A link's content is the name it points at, and reading it from the
-		// working tree would read the file at the other end instead.
-		if f.patch == nil || slices.ContainsFunc(f.patch.Preamble, func(l string) bool {
-			return strings.Contains(l, "120000")
-		}) {
+		// Nothing is read for a file with no hunks — a binary, a change of
+		// mode — since it has no gaps to count and may be very large.
+		if f.patch == nil || len(f.patch.Hunks) == 0 || noNewSide(f.patch) {
 			continue
 		}
 		if text, err := repo.FileContent(commit, f.path); err == nil {
 			f.addGaps(text)
 		}
 	}
+}
+
+// noNewSide reports whether there is no file to read the unchanged lines of a
+// patch from: it is of a symbolic link, whose content is the name it points
+// at, so that reading it from the working tree would read the file at the
+// other end instead; or it deletes the file — and a file replaced by a link is
+// told as exactly that, a deletion and then a new link under the same name.
+//
+// Git says both on lines of its own in front of the diff. They are matched by
+// how they begin, since the lines that name the file end in whatever the file
+// is called.
+func noNewSide(p *git.Patch) bool {
+	for _, l := range p.Preamble {
+		if strings.HasPrefix(l, "deleted file mode ") {
+			return true
+		}
+		for _, mode := range []string{"index ", "new file mode ", "old mode ", "new mode "} {
+			if strings.HasPrefix(l, mode) && strings.HasSuffix(l, " 120000") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // lexAll highlights every file, several at a time.
