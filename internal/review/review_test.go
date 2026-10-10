@@ -681,3 +681,27 @@ func keysOf(fs fakeFiles) []string {
 	sort.Strings(out)
 	return out
 }
+
+// A hunk's approval is recorded against the runs of changed lines in it, so
+// the same runs come out whether the context has them in one hunk or two.
+func TestHunkDigestsDoNotDependOnContext(t *testing.T) {
+	apart := git.ParsePatch("--- a/f\n+++ b/f\n" +
+		"@@ -2,3 +2,3 @@\n two\n-three\n+THREE\n four\n" +
+		"@@ -8,3 +8,3 @@\n eight\n-nine\n+NINE\n ten\n")
+	joined := git.ParsePatch("--- a/f\n+++ b/f\n" +
+		"@@ -2,9 +2,9 @@\n two\n-three\n+THREE\n four\n five\n six\n seven\n eight\n-nine\n+NINE\n ten\n")
+
+	a, j := HunkDigests(apart), HunkDigests(joined)
+	if len(a) != 2 || len(a[0]) != 1 || len(a[1]) != 1 {
+		t.Fatalf("two hunks of one run each came out as %v", a)
+	}
+	if len(j) != 1 || len(j[0]) != 2 {
+		t.Fatalf("one hunk of two runs came out as %v", j)
+	}
+	if a[0][0] != j[0][0] || a[1][0] != j[0][1] {
+		t.Errorf("the runs changed with the context: %v apart, %v joined", a, j)
+	}
+	if a[0][0] == a[1][0] {
+		t.Error("two different runs share a digest")
+	}
+}

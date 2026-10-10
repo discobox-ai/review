@@ -3302,55 +3302,49 @@ func TestRelayKeepsTheCursorOnTheSameConversation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Space discloses; Enter acts
+// Space discloses, and Enter is the same key
 // ---------------------------------------------------------------------------
 
-// Space inside a file's content folds that file, from wherever in it you have
-// got to. It used to share a key with Enter, so reading down a file with the
-// key that folds one opened a comment box on every line of the diff instead.
-func TestSpaceInsideAFileFoldsIt(t *testing.T) {
-	m := newTestModel(t)
-	m = onLine(t, m, "foo.txt", '+', "FOUR")
-	if fileIn(t, m, "foo.txt").folded {
-		t.Fatal("foo.txt is folded before we start")
-	}
+// Space on a line folds the hunk the line is in and leaves the file open, and
+// writes nothing. Enter is the same key.
+func TestSpaceInsideAFileFoldsTheHunk(t *testing.T) {
+	for _, k := range []tea.KeyPressMsg{letterKey(" "), namedKey(tea.KeyEnter)} {
+		m := newTestModel(t)
+		m = onLine(t, m, "foo.txt", '+', "FOUR")
+		_, before := hunkRows(m, "foo.txt")
 
-	m = drive(t, m, letterKey(" "))
-	if !fileIn(t, m, "foo.txt").folded {
-		t.Errorf("Space on a line of foo.txt did not fold it (status %q)", m.status)
-	}
-	if m.compose != nil {
-		t.Error("Space opened a comment box on a line of the diff")
-	}
-	if m.view.draft != nil {
-		t.Error("Space left a draft in the stack")
-	}
-	// Nothing was written, and nothing is waiting to be. Read from the review
-	// in hand rather than from the file, which correctly does not exist yet.
-	if n := len(m.rv.Threads); n != 0 {
-		t.Errorf("%d threads after pressing Space, want 0", n)
-	}
+		m = drive(t, m, k)
+		if fileIn(t, m, "foo.txt").folded {
+			t.Errorf("%s on a line folded the whole file", k)
+		}
+		if _, n := hunkRows(m, "foo.txt"); n != 0 {
+			t.Errorf("%s left %d of the hunk's %d lines showing (status %q)", k, n, before, m.status)
+		}
+		if m.compose != nil || m.view.draft != nil {
+			t.Errorf("%s opened a comment box on a line of the diff", k)
+		}
+		if n := len(m.rv.Threads); n != 0 {
+			t.Errorf("%d threads after pressing %s, want 0", n, k)
+		}
 
-	// And Space again opens it, without having to find the heading first.
-	m = drive(t, m, letterKey(" "))
-	if fileIn(t, m, "foo.txt").folded {
-		t.Errorf("Space did not open foo.txt again (status %q)", m.status)
+		// And again opens it: the cursor was left on the header.
+		m = drive(t, m, k)
+		if _, n := hunkRows(m, "foo.txt"); n != before {
+			t.Errorf("%s again showed %d lines, want %d", k, n, before)
+		}
 	}
 }
 
-// Enter is the half that acts, and c is the letter for it.
-func TestEnterAndCBothStartAComment(t *testing.T) {
-	for _, k := range []tea.KeyPressMsg{namedKey(tea.KeyEnter), letterKey("c")} {
-		m := newTestModel(t)
-		m = onLine(t, m, "foo.txt", '+', "FOUR")
-		m = drive(t, m, k)
-		if m.compose == nil {
-			t.Errorf("%v did not open the composer (status %q)", k.Code, m.status)
-			continue
-		}
-		if m.compose.line != 4 || m.compose.side != review.SideNew {
-			t.Errorf("%v aimed at %s:%d, want new:4", k.Code, m.compose.side, m.compose.line)
-		}
+// c is how a comment begins, and the only way.
+func TestCStartsAComment(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey("c"))
+	if m.compose == nil {
+		t.Fatalf("c did not open the composer (status %q)", m.status)
+	}
+	if m.compose.line != 4 || m.compose.side != review.SideNew {
+		t.Errorf("c aimed at %s:%d, want new:4", m.compose.side, m.compose.line)
 	}
 }
 
@@ -3388,36 +3382,29 @@ func TestSpaceStillFoldsAndUnfolds(t *testing.T) {
 	}
 }
 
-// An open conversation is part of its file's section, so Space folds the file
-// rather than replying to it — replying is writing, and Space never writes.
+// An open conversation is part of the hunk it hangs off, so Space and Enter
+// fold that rather than replying to it — replying is writing, and neither of
+// them ever writes. r is the one that replies.
 func TestSpaceOnAnOpenCommentDoesNotReply(t *testing.T) {
-	m := newTestModel(t)
-	m = onLine(t, m, "foo.txt", '+', "TWO")
-	m = comment(t, m, "why shout?")
-	id := reviewJSON(t, m.repo).Threads[0].ID
-	m = cursorTo(t, m, func(r reviewRow) bool {
-		return r.kind == rowThread && r.thread == id && r.first
-	})
+	for _, k := range []tea.KeyPressMsg{letterKey(" "), namedKey(tea.KeyEnter)} {
+		m := newTestModel(t)
+		m = onLine(t, m, "foo.txt", '+', "TWO")
+		m = comment(t, m, "why shout?")
+		id := reviewJSON(t, m.repo).Threads[0].ID
+		m = cursorTo(t, m, func(r reviewRow) bool {
+			return r.kind == rowThread && r.thread == id && r.first
+		})
 
-	m = drive(t, m, letterKey(" "))
-	if m.compose != nil {
-		t.Error("Space opened a reply box on an open conversation")
-	}
-	if !fileIn(t, m, "foo.txt").folded {
-		t.Error("Space on a conversation did not fold the file it is in")
-	}
-
-	// Enter is the one that replies.
-	m = drive(t, m, letterKey(" ")) // open the file again
-	m = cursorTo(t, m, func(r reviewRow) bool {
-		return r.kind == rowThread && r.thread == id && r.first
-	})
-	m = drive(t, m, namedKey(tea.KeyEnter))
-	if m.compose == nil {
-		t.Fatalf("Enter did not open a reply (status %q)", m.status)
-	}
-	if m.compose.thread != id {
-		t.Errorf("Enter replied to %q, want %q", m.compose.thread, id)
+		m = drive(t, m, k)
+		if m.compose != nil {
+			t.Errorf("%s opened a reply box on an open conversation", k)
+		}
+		if fileIn(t, m, "foo.txt").folded {
+			t.Errorf("%s on a conversation folded the whole file", k)
+		}
+		if _, n := hunkRows(m, "foo.txt"); n != 0 {
+			t.Errorf("%s on a conversation did not fold the hunk it is in", k)
+		}
 	}
 }
 
@@ -3710,5 +3697,308 @@ func TestFilesAreSortedByPath(t *testing.T) {
 	want := []string{"aardvark.go", "internal/aaa.go", "internal/mid.go", "zz/last.go"}
 	if !slices.Equal(got, want) {
 		t.Errorf("the stack is in %v, want %v", got, want)
+	}
+}
+
+// hunkRows counts the rows a file is drawing: its hunk headers, and the lines
+// of code under them.
+func hunkRows(m Model, path string) (heads, code int) {
+	for _, r := range m.view.rows {
+		if r.kind != rowDiff || r.file < 0 || m.view.files[r.file].path != path {
+			continue
+		}
+		switch l, _ := m.view.files[r.file].rowLine(r.line); {
+		case l.Kind == '@':
+			heads++
+		case isCodeLine(l.Kind):
+			code++
+		}
+	}
+	return heads, code
+}
+
+// twoHunkRepo is a review of two files, one of them changed in two places far
+// enough apart to be a hunk each.
+func twoHunkRepo(t *testing.T) *git.Repo {
+	t.Helper()
+	return changedRepo(t, 40, map[int]string{4: "FOUR", 36: "THIRTY-SIX"})
+}
+
+// changedRepo is a review of two files: foo.txt, so many numbered lines long
+// with some of them rewritten, and bar.txt with its one line changed.
+func changedRepo(t *testing.T, lines int, changes map[int]string) *git.Repo {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main"},
+		{"config", "user.name", "Test"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "commit.gpgsign", "false"},
+	} {
+		gitRun(t, dir, args...)
+	}
+	var was, is strings.Builder
+	for i := 1; i <= lines; i++ {
+		line := "line " + itoa(i)
+		was.WriteString(line + "\n")
+		if to, ok := changes[i]; ok {
+			line = to
+		}
+		is.WriteString(line + "\n")
+	}
+	writeFile(t, dir, "foo.txt", was.String())
+	writeFile(t, dir, "bar.txt", "alpha\n")
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "commit", "-q", "-m", "initial")
+	gitRun(t, dir, "checkout", "-q", "-b", "feature")
+	writeFile(t, dir, "foo.txt", is.String())
+	writeFile(t, dir, "bar.txt", "beta\n")
+	r, err := git.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// Space folds the hunk the cursor is in and nothing else: the file stays open,
+// the cursor lands on the header that is left, and the same key opens it again.
+func TestSpaceFoldsJustTheHunk(t *testing.T) {
+	for _, k := range []tea.KeyPressMsg{letterKey(" "), namedKey(tea.KeyEnter)} {
+		m := modelFor(t, twoHunkRepo(t))
+		heads, before := hunkRows(m, "foo.txt")
+		if heads != 2 {
+			t.Fatalf("foo.txt has %d hunks, want 2", heads)
+		}
+		_, others := hunkRows(m, "bar.txt")
+
+		m = onLine(t, m, "foo.txt", '+', "FOUR")
+		m = drive(t, m, k)
+		if fileIn(t, m, "foo.txt").folded {
+			t.Fatalf("%s folded the whole file", k)
+		}
+		heads, after := hunkRows(m, "foo.txt")
+		if heads != 2 || after == 0 || after >= before {
+			t.Errorf("%s left %d hunks and %d of %d lines, want both hunks and one's lines (status %q)",
+				k, heads, after, before, m.status)
+		}
+		if _, n := hunkRows(m, "bar.txt"); n != others {
+			t.Errorf("%s folded a hunk of bar.txt too", k)
+		}
+		if _, l, ok := m.view.line(); !ok || l.Kind != '@' {
+			t.Errorf("%s left the cursor off the folded hunk's header", k)
+		}
+		if !strings.Contains(plain(m), "10 lines folded") {
+			t.Errorf("the folded hunk does not say what it is holding back:\n%s", plain(m))
+		}
+
+		// More context joins the two hunks into one, and the fold goes with
+		// the first line it changed rather than with a position that moved.
+		m = drive(t, m, letterKey("="))
+		m = drive(t, m, letterKey("-"))
+		if _, n := hunkRows(m, "foo.txt"); n != after {
+			t.Errorf("changing the context left %d lines showing, want %d", n, after)
+		}
+
+		m = drive(t, m, k)
+		if _, n := hunkRows(m, "foo.txt"); n != before {
+			t.Errorf("%s again showed %d lines, want %d", k, n, before)
+		}
+	}
+}
+
+// A fold must not be how a comment gets missed: the header of a folded hunk
+// says when there is one in there still waiting.
+func TestAFoldedHunkSaysItHoldsAnOpenComment(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey("c"))
+	m = typeText(t, m, "why")
+	m = drive(t, m, ctrlKey("s"))
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey(" "))
+	if !strings.Contains(plain(m), "1 open comment") {
+		t.Errorf("the folded hunk hides its comment without a word:\n%s", plain(m))
+	}
+	for _, r := range m.view.rows {
+		if r.kind == rowThread {
+			t.Fatal("a thread is still drawn under a folded hunk")
+		}
+	}
+}
+
+// a inside a hunk signs off that hunk: it folds, the file says how far along
+// it is, and the file itself is not approved until the last of them is.
+func TestAApprovesJustTheHunk(t *testing.T) {
+	m := modelFor(t, twoHunkRepo(t))
+	_, before := hunkRows(m, "foo.txt")
+
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey("a"))
+	if m.rv.Approved("foo.txt") {
+		t.Fatal("approving one hunk of two approved the file")
+	}
+	if n := len(reviewJSON(t, m.repo).Files[0].Hunks); n != 1 {
+		t.Errorf("the review records %d approved hunks, want 1", n)
+	}
+	if _, n := hunkRows(m, "foo.txt"); n == 0 || n >= before {
+		t.Errorf("the approved hunk did not fold: %d of %d lines showing", n, before)
+	}
+	for _, want := range []string{"✓ approved", "✓ 1/2 hunks"} {
+		if !strings.Contains(plain(m), want) {
+			t.Errorf("the window does not say %q:\n%s", want, plain(m))
+		}
+	}
+
+	// More context joins the two hunks into one that is only half read, so it
+	// is not approved; less puts them back, and the approval with them.
+	for i := 0; i < 40; i++ {
+		m = drive(t, m, letterKey("="))
+	}
+	if n, of := fileIn(t, m, "foo.txt").hunksApproved(); n != 0 || of != 1 {
+		t.Errorf("with the hunks joined, %d of %d are approved, want 0 of 1", n, of)
+	}
+	for i := 0; i < 40; i++ {
+		m = drive(t, m, letterKey("-"))
+	}
+	if n, of := fileIn(t, m, "foo.txt").hunksApproved(); n != 1 || of != 2 {
+		t.Errorf("with the hunks apart again, %d of %d are approved, want 1 of 2", n, of)
+	}
+
+	// a again takes it back.
+	m = onLine(t, m, "foo.txt", '@', "-1,")
+	m = drive(t, m, letterKey("a"))
+	if n, _ := fileIn(t, m, "foo.txt").hunksApproved(); n != 0 {
+		t.Errorf("a on an approved hunk left %d approved", n)
+	}
+
+	// The last hunk approved is the file approved.
+	m = drive(t, m, letterKey("a"))
+	m = onLine(t, m, "foo.txt", '+', "THIRTY-SIX")
+	m = drive(t, m, letterKey("a"))
+	if !m.rv.Approved("foo.txt") {
+		t.Fatalf("approving every hunk did not approve the file (status %q)", m.status)
+	}
+
+	// And a hunk taken back out of an approved file leaves the other standing.
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowFile && m.view.files[r.file].path == "foo.txt"
+	})
+	m = drive(t, m, letterKey(" ")) // open the file the approval folded
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey("a"))
+	if m.rv.Approved("foo.txt") {
+		t.Error("withdrawing a hunk left the file approved")
+	}
+	if n, of := fileIn(t, m, "foo.txt").hunksApproved(); n != 1 || of != 2 {
+		t.Errorf("%d of %d hunks approved after withdrawing one, want 1 of 2", n, of)
+	}
+}
+
+// a on a file's heading is still the whole file, whatever its hunks.
+func TestAOnTheHeadingApprovesTheFile(t *testing.T) {
+	m := modelFor(t, twoHunkRepo(t))
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowFile && m.view.files[r.file].path == "foo.txt"
+	})
+	m = drive(t, m, letterKey("a"))
+	if !m.rv.Approved("foo.txt") {
+		t.Fatalf("a on the heading did not approve the file (status %q)", m.status)
+	}
+	m = drive(t, m, letterKey("a"))
+	if m.rv.Approved("foo.txt") {
+		t.Error("a on the heading did not take the approval back")
+	}
+	if n, _ := fileIn(t, m, "foo.txt").hunksApproved(); n != 0 {
+		t.Errorf("withdrawing the file's approval left %d hunks approved", n)
+	}
+}
+
+// gapLines counts the lines of a file that an opened gap has let out.
+func gapLines(m Model, path string) int {
+	n := 0
+	f := m.view.files[m.view.byPath[path]]
+	for i, l := range f.lines {
+		if _, ok := f.gapAt(i); ok && l.Kind == ' ' {
+			n++
+		}
+	}
+	return n
+}
+
+// Where the diff skips part of a file there is a row saying how much, and
+// Enter or Space on it shows those lines and puts them away again.
+func TestTheGapBetweenHunksOpens(t *testing.T) {
+	for _, k := range []tea.KeyPressMsg{namedKey(tea.KeyEnter), letterKey(" ")} {
+		m := modelFor(t, twoHunkRepo(t))
+		if !strings.Contains(plain(m), "▸ 21 unchanged lines") {
+			t.Fatalf("the gap between the hunks is not counted:\n%s", plain(m))
+		}
+		m = onLine(t, m, "foo.txt", 'g', "")
+		m = drive(t, m, k)
+		if n := gapLines(m, "foo.txt"); n != 21 {
+			t.Fatalf("%s on the gap let out %d lines, want 21 (status %q)", k, n, m.status)
+		}
+		if fileIn(t, m, "foo.txt").folded {
+			t.Fatalf("%s on the gap folded the file", k)
+		}
+		for _, want := range []string{"▾ 21 unchanged lines", "line 10", "line 20"} {
+			if !strings.Contains(plain(m), want) {
+				t.Errorf("the opened gap does not show %q:\n%s", want, plain(m))
+			}
+		}
+
+		// The lines are numbered, so one can be gone to and commented on.
+		m = onLine(t, m, "foo.txt", ' ', "line 20")
+		if _, l, ok := m.view.line(); !ok || l.New != 20 || l.Old != 20 {
+			t.Errorf("line 20 of the gap is numbered %d/%d", l.Old, l.New)
+		}
+
+		// It stays open when the diff is read again with other context, and
+		// has fewer lines to show for it.
+		m = drive(t, m, letterKey("="))
+		if n := gapLines(m, "foo.txt"); n != 19 {
+			t.Errorf("after more context the gap shows %d lines, want 19", n)
+		}
+
+		// And from any line of it, the same key puts it away.
+		m = onLine(t, m, "foo.txt", ' ', "line 20")
+		m = drive(t, m, k)
+		if n := gapLines(m, "foo.txt"); n != 0 {
+			t.Errorf("%s on a line of the gap left %d lines out", k, n)
+		}
+		if _, l, ok := m.view.line(); !ok || l.Kind != 'g' {
+			t.Errorf("%s left the cursor off the gap's row", k)
+		}
+	}
+}
+
+// An approval is of runs of changed lines, and one the present context has
+// joined into a hunk that is only half read must survive a decision made
+// about another hunk of the same file while it is hidden there.
+func TestApprovingAHunkKeepsWhatTheContextHides(t *testing.T) {
+	m := modelFor(t, changedRepo(t, 60, map[int]string{4: "FOUR", 20: "TWENTY", 50: "FIFTY"}))
+	if n, of := fileIn(t, m, "foo.txt").hunksApproved(); n != 0 || of != 3 {
+		t.Fatalf("foo.txt starts with %d of %d hunks approved, want 0 of 3", n, of)
+	}
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey("a"))
+
+	// Enough context that the first two hunks join, into one that is only
+	// half read, and the third stays apart.
+	for i := 0; i < 3; i++ {
+		m = drive(t, m, letterKey("="))
+	}
+	if n, of := fileIn(t, m, "foo.txt").hunksApproved(); n != 0 || of != 2 {
+		t.Fatalf("with the context up, %d of %d hunks are approved, want 0 of 2", n, of)
+	}
+	m = onLine(t, m, "foo.txt", '+', "FIFTY")
+	m = drive(t, m, letterKey("a"))
+
+	for i := 0; i < 3; i++ {
+		m = drive(t, m, letterKey("-"))
+	}
+	if n, of := fileIn(t, m, "foo.txt").hunksApproved(); n != 2 || of != 3 {
+		t.Errorf("%d of %d hunks approved once they are apart again, want 2 of 3: "+
+			"approving FIFTY dropped FOUR", n, of)
 	}
 }

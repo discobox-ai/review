@@ -188,8 +188,8 @@ than one that says it could not do as it was told.
 
 ## Approving
 
-**`a`** signs off the file the cursor is in. **`A`** signs off every file at
-once, after asking.
+**`a`** signs off the hunk the cursor is in, or the whole file from the file's
+heading. **`A`** signs off every file at once, after asking.
 
 What is approved is **the change, not the name**. A digest of that file's whole
 change from the base goes into the review with the approval, so a file edited
@@ -228,6 +228,50 @@ A press that stays in the cell it went down on is a click and folds; one that
 moves off it is a drag and copies. Two quick clicks are two folds, so a file
 you shut by mistake opens again on the next click rather than selecting the
 word under the pointer.
+
+**`Space` folds the hunk you are in** and leaves the rest of the file open
+around it — for the hunk that has been read, or the hundred generated lines in
+the middle of a file worth reading. It works from anywhere in the hunk, and
+what is left is the hunk's header, saying how many lines it is holding back and
+whether any of them has a comment still open on it:
+
+```
+▸ @@ -40,9 +40,31 @@ func build()  · 37 lines folded · 1 open comment
+```
+
+`Space` there opens it again, and `Space` on the file's heading folds the whole
+file. The fold is kept by the first line the hunk changes rather than by its
+position, so asking for more or less context does not undo it.
+
+Between the hunks, and above the first and below the last, a row counts what
+the diff left out because nothing in it changed:
+
+```
+▸ 21 unchanged lines
+```
+
+`Space` on it puts those lines into the stack, and `Space` on the row or on any
+of them puts them away again. They are context lines like the ones a hunk
+carries, so `c` comments on one; a comment on a line that has been put away
+again is shown under the file's heading until the gap is reopened. An opened
+gap stays open across a rescan and across a change of context.
+
+**`a` follows the same reach**: inside a hunk it approves the hunk, and on the
+file's heading the file. An approved hunk folds away as an approved file does,
+its header says `✓ approved`, and the file's heading counts them — `✓ 2/5
+hunks`. Approving the last hunk approves the file; `a` on a hunk of an approved
+file takes that one hunk back and leaves the others standing.
+
+What is recorded is not the hunk but the **runs of changed lines** inside it,
+for the reason the file's digest leaves context out: where a hunk starts and
+stops depends on how much context was asked for, and the changed lines do not.
+Turn the context up until two hunks join and the joined hunk is approved only
+if both halves were. An edit to the file nullifies the file's approval and the
+hunks the edit touched — or moved, since a line's number is part of what was
+read — and leaves the rest signed off. That holds for an approval given in the
+window; `discobox-review approve` records the file alone, so one given there
+falls whole. While a single commit is being read there are no hunk approvals:
+a commit's hunks are not the review's, so `a` there is the file from anywhere.
 
 **`F` folds every file**, turning a long review into a list of its headings,
 and folds them all open again once they are shut. It is one key rather than
@@ -498,6 +542,7 @@ This is the review the pictures above were taken of, as it stands on disk:
 | `branch`, `base` | What this review is of, and what it is measured from |
 | `files[].approved` | Whether the file has been signed off |
 | `files[].digest` | The change that was signed off; see [Approving](#approving) |
+| `files[].hunks` | The parts of the change signed off one hunk at a time: a digest for each run of changed lines |
 | `files[].nullified` | The approval fell because the file moved, rather than never being given |
 | `threads[].side` | `new` for a working-tree line, `old` for one the change removed |
 | `threads[].line` | The line number in that space, or `0` for a comment with no line left |
@@ -709,15 +754,15 @@ agent could ask for — which is the whole reason the state is a file.
 ## Keys
 
 Every command is **one letter**, and no two commands share one. A key may act
-on whatever is under the cursor — `Space` folds a file in the review and
-unfolds a closed comment — but that is one verb reaching
+on whatever is under the cursor — `Space` folds a hunk or a file in the review
+and unfolds a closed comment — but that is one verb reaching
 different objects, not a letter meaning two unrelated things.
 `TestNoTwoCommandsShareAKey` keeps it that way.
 
 | | | | |
 | --- | --- | --- | --- |
-| `a` | approve this file | `A` | approve every file |
-| `Space` | fold this file | `F` | fold every file, or open them all |
+| `a` | approve this hunk, or the file from its heading | `A` | approve every file |
+| `Space` | fold this hunk, or the file from its heading | `F` | fold every file, or open them all |
 | `f` | hide the files that are done with | `z` | zoom the pane |
 | `H` | show the history, or hide it | | |
 | `s` | unify the diff, or split it | `S` | cross a split row, to the other side |
@@ -729,15 +774,11 @@ different objects, not a letter meaning two unrelated things.
 | `V` | select a run of lines | `R` | rescan (also `F5`) |
 | `-` | less diff context | `=` | more diff context |
 
-`Space` and `Enter` are the two halves of one verb. **`Space` discloses** and
-never writes anything: it folds the file you are reading — from a line two
-hundred rows down as readily as from its heading, since having to scroll back
-up to put a file away is an errand nobody should be sent on — and opens it
-again. On a resolved conversation it opens that instead, which is the one thing
-in a file's section that is not the file. **`Enter` acts**: it comments on a
-line, replies to a conversation, folds a file. So reading down a diff and
-pressing `Space` puts the file away, and does not start remarks you had not
-asked to write; `c` or `Enter` is how a comment begins.
+**`Space` discloses** and never writes anything. It reaches the smallest thing
+the cursor is in: the hunk from any line of it, the file from the file's
+heading, and a resolved conversation from the line it has collapsed to.
+**`Enter` is the same key.** A comment begins with `c` and with nothing else,
+so no key pressed while reading starts a remark you had not asked to write.
 
 `Ctrl-C` or `q` quits, `F1` or `?` shows the keys.
 
