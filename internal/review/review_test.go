@@ -608,6 +608,38 @@ func TestAReviewSwappedUnderAReaderIsReadAgain(t *testing.T) {
 	}
 }
 
+// midSwapFiles is a git directory caught halfway through a branch swap by a
+// reader: the last branch's review has been put away and this branch's not
+// yet brought back, so for a moment there is nothing at the path.
+type midSwapFiles struct {
+	fakeFiles
+	reads int
+}
+
+func (f *midSwapFiles) ReadStateFile(name string) (string, bool) {
+	if f.reads++; f.reads == 2 {
+		f.fakeFiles[ArchiveName("main")] = f.fakeFiles[FileName]
+		delete(f.fakeFiles, FileName)
+	}
+	return f.fakeFiles.ReadStateFile(name)
+}
+
+// A swap is two moves, and between them the path is empty. A reader landing
+// there has not found a branch with no review: it waits for the swap.
+func TestAReaderCaughtMidSwapDoesNotReportAnEmptyReview(t *testing.T) {
+	mine := New("main")
+	mine.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "about main")
+	fs := &midSwapFiles{fakeFiles: fakeFiles{FileName: string(mine.Bytes())}}
+
+	st, err := Load(fs, "main", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Threads) != 1 {
+		t.Errorf("the reader was told main has no review: %+v", st)
+	}
+}
+
 func keysOf(fs fakeFiles) []string {
 	var out []string
 	for k := range fs {

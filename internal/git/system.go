@@ -166,54 +166,59 @@ const lockPoll = 5 * time.Millisecond
 // enough where the system allows it: a lock file left behind by another user
 // of the same repository must not shut this one out.
 func (Local) Lock(path string, wait time.Duration) (func(), error) {
+	deadline := time.Now().Add(wait)
+	locked := func() error { return fmt.Errorf("%s: %w", filepath.Base(path), ErrLocked) }
+
+	// This process's own turn comes first, and is kept until the file is
+	// closed again: see inProcess.
+	for {
+		if _, held := inProcess.LoadOrStore(path, struct{}{}); !held {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			return nil, locked()
+		}
+		time.Sleep(lockPoll)
+	}
+
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if os.IsPermission(err) {
 		f, err = os.OpenFile(path, os.O_RDONLY, 0)
 	}
 	if err != nil {
+		inProcess.Delete(path)
 		return nil, err
 	}
-	deadline := time.Now().Add(wait)
+	unlock := func() {
+		_ = f.Close()
+		inProcess.Delete(path)
+	}
 	for {
-		ok, err := tryLockPath(path, f)
+		ok, err := tryLockFile(f)
 		if err == nil && ok {
-			return func() {
-				_ = f.Close()
-				inProcess.Delete(path)
-			}, nil
+			return unlock, nil
 		}
 		if err == nil && !time.Now().Before(deadline) {
-			err = fmt.Errorf("%s: %w", filepath.Base(path), ErrLocked)
+			err = locked()
 		}
 		if err != nil {
-			_ = f.Close()
+			unlock()
 			return nil, err
 		}
 		time.Sleep(lockPoll)
 	}
 }
 
-// inProcess is the paths this process holds a lock on.
+// inProcess is the paths this process holds a lock on, or is in the middle of
+// taking one on.
 //
-// The system's lock keeps other processes out. Whether it keeps out a second
-// taker in this one depends on the system: flock's does, fcntl's belongs to
-// the process and is granted to it again — and then closing either file lets
-// go of both. So the process keeps its own account first, and the lock means
-// the same thing everywhere.
+// The system's lock keeps other processes out. What it does about a second
+// taker in this one depends on the system: flock's keeps it out, but fcntl's
+// belongs to the process, is granted to it again — and is let go of when any
+// file open on that path is closed, the holder's or not. So the process keeps
+// its own account, and nothing so much as opens the lock file without being
+// in it: the lock then means the same thing everywhere.
 var inProcess sync.Map
-
-// tryLockPath takes the lock on path, through the file f opened on it, if
-// nobody in this process or any other has it.
-func tryLockPath(path string, f *os.File) (bool, error) {
-	if _, held := inProcess.LoadOrStore(path, struct{}{}); held {
-		return false, nil
-	}
-	ok, err := tryLockFile(f)
-	if !ok || err != nil {
-		inProcess.Delete(path)
-	}
-	return ok, err
-}
 
 // WriteTempFile puts data in a read-only file of its own under the system
 // temporary directory. Keeping the given name, rather than the mangled one

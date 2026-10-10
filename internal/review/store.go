@@ -160,17 +160,26 @@ func Load(fs Files, branch string, wait time.Duration) (*State, error) {
 	// would be answering a different question.
 	//
 	// The read comes after the lock is let go of, so something else can swap
-	// the file in between. What was read says which branch it is of, and a
-	// wrong one is put right and read again — a few times, not for ever.
+	// the file in between, or be halfway through doing so. What was read
+	// says which branch it is of, and a wrong one is put right and read again
+	// — a few times, not for ever.
 	var st *State
 	for range 3 {
 		err := Adopt(fs, branch, wait)
 		if err != nil {
 			return nil, err
 		}
-		if st, err = read(fs, branch); err != nil || st.Of(branch) {
-			return st, err
+		if st, err = read(fs, branch); err != nil {
+			return nil, err
 		}
+		// Settled still, and not caught halfway through a swap, when the
+		// path is empty for a moment with this branch's review beside it.
+		if st.Of(branch) && settled(fs, branch) {
+			return st, nil
+		}
+	}
+	if st.Of(branch) {
+		return st, nil
 	}
 	return nil, fmt.Errorf("it is the review of %s, not of %s", st.Branch, branch)
 }
