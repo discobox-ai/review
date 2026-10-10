@@ -4048,3 +4048,28 @@ func TestNoNewSide(t *testing.T) {
 		}
 	}
 }
+
+// A gap's lines come from the file as it is on disk, carriage returns and
+// all, and none of those may reach the terminal.
+func TestGapLinesLoseTheirCarriageReturns(t *testing.T) {
+	f := &reviewFile{path: "f.txt", patch: git.ParsePatch("--- a/f.txt\n+++ b/f.txt\n@@ -3,1 +3,1 @@\n-c\r\n+C\r\n")}
+	f.lines = f.patch.Render()
+	f.texts = make([]string, len(f.lines))
+	f.addGaps("a\r\nb\r\nC\r\nd\r\n")
+	for g := range f.gaps {
+		f.setGap(g, true)
+	}
+	n := 0
+	for i, l := range f.lines {
+		if _, ok := f.gapAt(i); !ok || l.Kind != ' ' {
+			continue
+		}
+		n++
+		if strings.Contains(l.Text, "\r") || strings.Contains(f.texts[i], "\r") {
+			t.Errorf("gap line %q still ends in a carriage return", l.Text)
+		}
+	}
+	if n != 3 {
+		t.Errorf("the gaps let out %d lines, want 3", n)
+	}
+}

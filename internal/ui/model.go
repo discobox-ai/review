@@ -387,6 +387,10 @@ func buildFiles(diff, pending string, states map[string]git.State) []*reviewFile
 	return files
 }
 
+// maxGapBytes is the largest file whose unchanged lines are offered. Every
+// changed file under it is held in memory whole for as long as its diff is.
+const maxGapBytes = 4 << 20
+
 // addGaps reads each file as the diff's new side has it — the working tree, or
 // a commit — and marks the stretches of it the diff leaves out. A file that
 // cannot be read has none marked, and is drawn the way it always was.
@@ -397,7 +401,9 @@ func addGaps(repo *git.Repo, commit string, files []*reviewFile) {
 		if f.patch == nil || len(f.patch.Hunks) == 0 || noNewSide(f.patch) {
 			continue
 		}
-		if text, err := repo.FileContent(commit, f.path); err == nil {
+		// The text is kept, to open a gap from without reading again, so a
+		// file too big to be worth keeping goes without its gaps.
+		if text, err := repo.FileContent(commit, f.path); err == nil && len(text) <= maxGapBytes {
 			f.addGaps(text)
 		}
 	}

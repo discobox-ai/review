@@ -423,7 +423,9 @@ func (f *reviewFile) setGap(g int, open bool) {
 	}
 	lines, texts := make([]git.DiffLine, gp.n), make([]string, gp.n)
 	for k := range lines {
-		s := f.full[gp.new-1+k]
+		// A file with DOS line endings keeps its carriage returns when it is
+		// read whole, and one sent to the terminal moves the cursor.
+		s := strings.TrimSuffix(f.full[gp.new-1+k], "\r")
 		lines[k] = git.DiffLine{
 			Text: " " + s, Kind: ' ', Hunk: -1, Line: g,
 			Old: gp.old + k, New: gp.new + k, Seam: gp.new + k,
