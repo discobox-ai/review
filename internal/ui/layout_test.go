@@ -291,6 +291,14 @@ func TestAWindowTooShortForTheHistoryFoldsIt(t *testing.T) {
 	if !m.histOpen || !strings.Contains(m.status, "too short") {
 		t.Errorf("H on a short window left open=%v status=%q", m.histOpen, m.status)
 	}
+	// So does a click anywhere on the title, which is the whole of the pane
+	// here and so the whole of the button.
+	m.status = ""
+	r := m.rects[focusHistory]
+	m = drive(t, m, pressAt(r.x+20, r.y), releaseAt(r.x+20, r.y))
+	if !m.histOpen || m.focus != focusReview || !strings.Contains(m.status, "too short") {
+		t.Errorf("a click on the title left open=%v focus=%v status=%q", m.histOpen, m.focus, m.status)
+	}
 	// And it comes back with the room.
 	m = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	if !strings.Contains(plain(m), "[-] History") {

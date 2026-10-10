@@ -385,9 +385,10 @@ func (m Model) mousePress(x, y int, block bool) (tea.Model, tea.Cmd) {
 		m.mouse.clear()
 		// The button on the history's title folds it and unfolds it. Folded,
 		// the title is all there is of the pane, so the whole of it is the
-		// button.
+		// button — and a window with no row for the history draws it folded
+		// whatever histOpen says, so the same goes there.
 		if f == focusHistory && !m.zoom &&
-			(m.history.buttonHit(x-r.x) || !m.histOpen) {
+			(m.history.buttonHit(x-r.x) || !m.histOpen || !m.historyFits()) {
 			return m.doToggleHistory()
 		}
 		if f == focusReview && m.view.modeHit(x-r.x) {
