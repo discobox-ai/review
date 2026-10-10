@@ -2,6 +2,7 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -1007,6 +1009,270 @@ func TestAConcurrentEditIsNotClobbered(t *testing.T) {
 	}
 	if !back.Approved("beta.go") {
 		t.Error("the approval was lost to the re-read")
+	}
+}
+
+// Stamping a digest into an approval, or letting one fall, is a write the
+// window makes without being asked. It goes onto the review as it stands, not
+// onto the copy on screen: a comment that landed since the last tick must not
+// be undone by it.
+func TestStampingAnApprovalDoesNotClobberAConcurrentEdit(t *testing.T) {
+	m := newTestModel(t)
+
+	// An approval given without a digest, which the window has read but not
+	// yet stamped.
+	st := review.New(m.branch)
+	st.Base = m.baseRef
+	st.Approve("beta.go", "", "claude")
+	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	m.readReview()
+
+	// A comment lands before the window gets to it.
+	st.Start(&review.Thread{Path: "bar.txt", Side: review.SideNew, Line: 1}, "claude", "theirs")
+	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+
+	m.reconcile()
+
+	back := reviewJSON(t, m.repo)
+	if len(back.Threads) != 1 {
+		t.Fatalf("the stamp was written over the comment: threads = %+v", back.Threads)
+	}
+	if back.FileFor("beta.go").Digest == "" {
+		t.Error("the approval was not stamped")
+	}
+	if len(m.rv.Threads) != 1 {
+		t.Error("the comment is on disk but not on screen")
+	}
+}
+
+// The window is one more writer of the review, so it waits its turn like the
+// commands do: while something else holds the lock it writes nothing, and what
+// it then writes is on top of whatever that something did.
+func TestTheWindowWaitsForTheLock(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "mine")
+
+	unlock, err := review.Lock(m.repo, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		m.mutate(func(st *review.State) { st.Approve("beta.go", "d", "Test") })
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("the window wrote while something else held the lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Whoever holds the lock finishes what it was doing.
+	st := reviewJSON(t, m.repo)
+	st.Start(&review.Thread{Path: "bar.txt", Side: review.SideNew, Line: 1}, "claude", "theirs")
+	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the window never got the lock")
+	}
+	back := reviewJSON(t, m.repo)
+	if len(back.Threads) != 2 || !back.Approved("beta.go") {
+		t.Errorf("want both comments and the approval, got %d threads, approved = %v",
+			len(back.Threads), back.Approved("beta.go"))
+	}
+}
+
+// A window that waited for the lock for as long as it was held would be a
+// window that had stopped. It gives up, says so, and has changed nothing —
+// and what was being written is still in the box to post again.
+func TestALockThatIsNotLetGoOfDoesNotStopTheWindow(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "mine")
+
+	unlock, err := review.Lock(m.repo, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	err = m.update(0, func(st *review.State) { st.Approve("beta.go", "d", "Test") })
+	if !errors.Is(err, git.ErrLocked) {
+		t.Fatalf("err = %v, want the window told the review is locked", err)
+	}
+	if m.rv.Approved("beta.go") || reviewJSON(t, m.repo).Approved("beta.go") {
+		t.Error("the approval shows although it was never saved")
+	}
+
+	// The same from the keyboard: a comment that cannot be posted is not
+	// thrown away, and is not announced as posted.
+	m = onLine(t, m, "beta.go", '+', "package beta")
+	m = drive(t, m, letterKey("c"))
+	m = typeText(t, m, "still in the box")
+	m = drive(t, m, ctrlKey("s"))
+	if m.focus != focusCompose || m.editor.Value() != "still in the box" {
+		t.Errorf("the draft was closed: focus = %v, text = %q", m.focus, m.editor.Value())
+	}
+	if !m.statusEr {
+		t.Errorf("status = %q, want the failure and not a success", m.status)
+	}
+	if n := len(reviewJSON(t, m.repo).Threads); n != 1 {
+		t.Errorf("threads on disk = %d, want only the first", n)
+	}
+}
+
+// A base set from a command a moment ago, which the window has not yet seen,
+// is not put back by the window's next write: the window takes it up instead.
+func TestAWriteDoesNotPutBackABaseSomethingElseChanged(t *testing.T) {
+	m := newTestModel(t)
+	m.basePinned = false
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "mine")
+
+	st := reviewJSON(t, m.repo)
+	st.Base = "main~0"
+	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+
+	m = onLine(t, m, "beta.go", '+', "package beta")
+	m = drive(t, m, letterKey("a"))
+
+	back := reviewJSON(t, m.repo)
+	if back.Base != "main~0" {
+		t.Errorf("base on disk = %q: the window wrote its own over the one just set", back.Base)
+	}
+	if !back.Approved("beta.go") {
+		t.Error("the approval was not saved")
+	}
+	// And the poll goes on to measure from it.
+	m.pickUpChanges()
+	if m.baseRef != "main~0" {
+		t.Errorf("the window still measures from %q", m.baseRef)
+	}
+}
+
+// A review caught halfway through being written is somebody else's to finish.
+// The window does not write its own copy over it.
+func TestAHalfWrittenReviewIsNotWrittenOver(t *testing.T) {
+	m := newTestModel(t)
+	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+		t.Fatal(err)
+	}
+	m = onLine(t, m, "beta.go", '+', "package beta")
+	m = drive(t, m, letterKey("a"))
+
+	if body, _ := m.repo.ReadStateFile(review.FileName); body != `{"version":1,` {
+		t.Errorf("the file was overwritten: %q", body)
+	}
+	if !m.statusEr {
+		t.Errorf("status = %q, want it to say the approval was not saved", m.status)
+	}
+}
+
+// A verdict that could not be saved is not shown as if it stood: the screen
+// goes on saying what the file says.
+func TestAStampThatCannotBeSavedIsNotShown(t *testing.T) {
+	m := newTestModel(t)
+	st := review.New(m.branch)
+	st.Base = m.baseRef
+	st.Approve("beta.go", "", "claude")
+	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	m.readReview()
+
+	// The file stops being one that can be written back to.
+	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+		t.Fatal(err)
+	}
+	m.reconcile()
+
+	if got := m.rv.FileFor("beta.go"); got == nil || got.Digest != "" {
+		t.Errorf("the screen shows a stamp nothing saved: %+v", got)
+	}
+	if !m.statusEr {
+		t.Errorf("status = %q, want it to say the review could not be saved", m.status)
+	}
+}
+
+// After a checkout something else can swap the new branch's review in before
+// this window has scanned and noticed. That review is not this window's to
+// show under the old branch's name.
+func TestAnotherBranchsReviewIsNotPutOnScreen(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "mine")
+
+	theirs := review.New("some-other-branch")
+	theirs.Start(&review.Thread{Path: "bar.txt", Side: review.SideNew, Line: 1}, "claude", "theirs")
+	if err := m.repo.WriteStateFile(review.FileName, string(theirs.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	m.pickUpChanges()
+
+	if len(m.rv.Threads) != 1 || m.rv.Threads[0].Comments[0].Body != "mine" {
+		t.Errorf("the window took up another branch's review: %+v", m.rv.Threads)
+	}
+}
+
+// Nor is the last branch's review kept on screen under the new branch's name
+// when the new branch's own could not be read. Threads are numbered from one
+// in every review, so acting on one would act on a stranger.
+func TestTheLastBranchsReviewIsNotKeptForTheNext(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "on the feature branch")
+
+	// The window is told of a checkout, and the file it then reads is still
+	// not the new branch's.
+	m.branch = "elsewhere"
+	m.readReview()
+
+	if len(m.rv.Threads) != 0 || m.rv.Branch != "elsewhere" {
+		t.Errorf("the screen still shows %q's review: %+v", m.rv.Branch, m.rv.Threads)
+	}
+	if m.rvErr == "" {
+		t.Error("nothing says the review could not be read")
+	}
+}
+
+// A thread deleted by something else while a reply to it was being written
+// takes the reply's place with it, not the reply: that stays in the box.
+func TestAReplyToAThreadThatHasGoneIsNotThrownAway(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = comment(t, m, "mine")
+	id := reviewJSON(t, m.repo).Threads[0].ID
+
+	m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == id })
+	m = drive(t, m, letterKey("r"))
+	m = typeText(t, m, "an answer")
+
+	err := review.Update(m.repo, m.branch, 0, func(st *review.State) error {
+		st.Remove(id)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = drive(t, m, ctrlKey("s"))
+
+	if m.focus != focusCompose || m.editor.Value() != "an answer" {
+		t.Errorf("the reply was thrown away: focus = %v, text = %q", m.focus, m.editor.Value())
+	}
+	if !m.statusEr {
+		t.Errorf("status = %q, want it to say the thread has gone", m.status)
 	}
 }
 

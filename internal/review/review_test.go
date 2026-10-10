@@ -2,9 +2,11 @@ package review
 
 import (
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/discobox-ai/review/internal/git"
 )
@@ -407,70 +409,267 @@ func (f fakeFiles) RenameStateFile(from, to string) error {
 	return nil
 }
 func (f fakeFiles) StateFileExists(name string) bool { _, ok := f[name]; return ok }
+func (f fakeFiles) LockStateFile(string, time.Duration) (func(), error) {
+	return func() {}, nil
+}
 
-// A review written when the program went by another name is still a review.
-func TestAReviewUnderTheOldNameIsCarriedOver(t *testing.T) {
-	old := New("main")
-	old.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "written long ago")
+// loggedFiles is fakeFiles that writes down what was asked of it, for the
+// tests that are about the order things happen in.
+type loggedFiles struct {
+	fakeFiles
+	log []string
+}
 
-	fs := fakeFiles{legacyFileName: string(old.Bytes())}
-	st, err := Load(fs, "main")
+func (f *loggedFiles) ReadStateFile(name string) (string, bool) {
+	f.log = append(f.log, "read "+name)
+	return f.fakeFiles.ReadStateFile(name)
+}
+func (f *loggedFiles) WriteStateFile(name, content string) error {
+	f.log = append(f.log, "write "+name)
+	return f.fakeFiles.WriteStateFile(name, content)
+}
+func (f *loggedFiles) RenameStateFile(from, to string) error {
+	f.log = append(f.log, "rename "+from)
+	return f.fakeFiles.RenameStateFile(from, to)
+}
+func (f *loggedFiles) LockStateFile(name string, _ time.Duration) (func(), error) {
+	f.log = append(f.log, "lock "+name)
+	return func() { f.log = append(f.log, "unlock") }, nil
+}
+
+// An update reads the review and writes it back with the lock held from the
+// one to the other, which is the whole of what stops two of them losing each
+// other's work.
+func TestAnUpdateHoldsTheLockFromTheReadToTheWrite(t *testing.T) {
+	fs := &loggedFiles{fakeFiles: fakeFiles{FileName: string(New("main").Bytes())}}
+
+	err := Update(fs, "main", 0, func(st *State) error {
+		st.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "a remark")
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st.Threads) != 1 || st.Threads[0].Comments[0].Body != "written long ago" {
-		t.Fatalf("the old review did not come across: %+v", st.Threads)
+
+	log := strings.Join(fs.log, ", ")
+	if fs.log[0] != "lock "+LockName || fs.log[len(fs.log)-1] != "unlock" {
+		t.Errorf("the lock does not go round everything: %s", log)
 	}
-	if _, still := fs[legacyFileName]; still {
-		t.Error("it was copied rather than moved, so there are now two")
+	read, wrote := strings.Index(log, "read "+FileName), strings.Index(log, "write "+FileName)
+	if read < 0 || wrote < read {
+		t.Errorf("want the review read and then written, got: %s", log)
 	}
-	if _, ok := fs[FileName]; !ok {
-		t.Errorf("it is not under the new name: %v", keysOf(fs))
+	if strings.Count(log, "lock "+LockName) != 1 {
+		t.Errorf("the lock was taken more than once, and it is not re-entrant: %s", log)
+	}
+	if st, _ := Load(fs, "main", 0); len(st.Threads) != 1 {
+		t.Errorf("the change was not saved: %+v", st.Threads)
 	}
 }
 
-// An archive comes over the first time its branch is looked at, which is the
-// only moment its name is known.
-func TestAnOldArchiveIsCarriedOverWhenItsBranchIsLookedAt(t *testing.T) {
-	old := New("feature/x")
-	old.Approve("a.go", "d", "Darren")
-	fs := fakeFiles{legacyArchiveName("feature/x"): string(old.Bytes())}
+// The file moves only when the review does: a change that changed nothing, or
+// one that failed, writes nothing.
+func TestAnUpdateThatChangesNothingWritesNothing(t *testing.T) {
+	fs := &loggedFiles{fakeFiles: fakeFiles{FileName: string(New("main").Bytes())}}
 
-	// Another branch: nothing of feature/x's is touched yet.
-	if _, err := Load(fs, "main"); err != nil {
+	if err := Update(fs, "main", 0, func(*State) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if !fs.StateFileExists(legacyArchiveName("feature/x")) {
-		t.Error("another branch's archive was moved before anybody asked for it")
+	refused := errors.New("no such thread")
+	err := Update(fs, "main", 0, func(st *State) error {
+		st.Approve("a.go", "d", "Darren")
+		return refused
+	})
+	if err != refused {
+		t.Errorf("err = %v, want the change's own error handed back", err)
+	}
+	if log := strings.Join(fs.log, ", "); strings.Contains(log, "write") {
+		t.Errorf("the file was written: %s", log)
 	}
 
-	st, err := Load(fs, "feature/x")
-	if err != nil {
+	// A review that is not there yet is written by the first thing that asks,
+	// so that there is a file saying which branch it is of.
+	empty := &loggedFiles{fakeFiles: fakeFiles{}}
+	if err := Update(empty, "main", 0, func(*State) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if !st.Approved("a.go") {
-		t.Errorf("the branch's own review did not come back: %v", keysOf(fs))
+	if !empty.StateFileExists(FileName) {
+		t.Error("no review file was started")
 	}
 }
 
-// A review already under the new name is left alone: an old one beside it is
-// older, and the newer must not be overwritten by it.
-func TestTheNewNameWinsOverTheOld(t *testing.T) {
-	current := New("main")
-	current.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "current")
-	stale := New("main")
-	stale.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "stale")
-
-	fs := fakeFiles{
-		FileName:       string(current.Bytes()),
-		legacyFileName: string(stale.Bytes()),
+// A review that will not parse is somebody else's half-finished write, and an
+// update must not go over it with an empty one.
+func TestAnUpdateLeavesAnUnreadableReviewAlone(t *testing.T) {
+	fs := fakeFiles{FileName: `{"version":1,`}
+	called := false
+	err := Update(fs, "main", 0, func(*State) error { called = true; return nil })
+	if err == nil || called {
+		t.Errorf("err = %v, change called = %v; want it refused before anything is changed", err, called)
 	}
-	st, err := Load(fs, "main")
+	if fs[FileName] != `{"version":1,` {
+		t.Errorf("the file was overwritten: %q", fs[FileName])
+	}
+}
+
+// Putting one branch's review away and bringing another's back moves files,
+// so it is done under the lock like any other write.
+func TestTheBranchSwapIsDoneUnderTheLock(t *testing.T) {
+	other := New("feature/x")
+	fs := &loggedFiles{fakeFiles: fakeFiles{FileName: string(other.Bytes())}}
+
+	if err := Adopt(fs, "main", 0); err != nil {
+		t.Fatal(err)
+	}
+	log := strings.Join(fs.log, ", ")
+	locked, moved := strings.Index(log, "lock "+LockName), strings.Index(log, "rename "+FileName)
+	if locked < 0 || moved < locked || fs.log[len(fs.log)-1] != "unlock" {
+		t.Errorf("want the review moved aside with the lock held, got: %s", log)
+	}
+}
+
+// Looking at a review whose branch is the one checked out moves nothing, so it
+// waits for nobody: a reader is not held up by whoever is writing.
+func TestReadingASettledReviewTakesNoLock(t *testing.T) {
+	fs := &loggedFiles{fakeFiles: fakeFiles{
+		FileName:               string(New("main").Bytes()),
+		ArchiveName("feature"): string(New("feature").Bytes()),
+	}}
+	if _, err := Load(fs, "main", 0); err != nil {
+		t.Fatal(err)
+	}
+	if log := strings.Join(fs.log, ", "); strings.Contains(log, "lock") || strings.Contains(log, "rename") {
+		t.Errorf("a plain read took the lock or moved a file: %s", log)
+	}
+
+	// The same question on a review with nothing written yet.
+	empty := &loggedFiles{fakeFiles: fakeFiles{}}
+	if _, err := Load(empty, "main", 0); err != nil {
+		t.Fatal(err)
+	}
+	if log := strings.Join(empty.log, ", "); strings.Contains(log, "lock") {
+		t.Errorf("reading a review that is not there took the lock: %s", log)
+	}
+}
+
+// lockedFiles is a git directory whose lock somebody else is sitting on.
+type lockedFiles struct{ fakeFiles }
+
+func (lockedFiles) LockStateFile(string, time.Duration) (func(), error) {
+	return nil, errors.New("locked by another program")
+}
+
+// After a checkout the file at the path is still the last branch's review
+// until it is swapped. A reader that cannot swap it says so, rather than
+// reporting that branch's review as this one's.
+func TestAnotherBranchsReviewIsNotReadAsThisOnes(t *testing.T) {
+	theirs := New("feature/x")
+	theirs.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "about feature/x")
+	fs := lockedFiles{fakeFiles{FileName: string(theirs.Bytes())}}
+
+	if st, err := Load(fs, "main", 0); err == nil {
+		t.Errorf("main was handed feature/x's review: %+v", st.Threads)
+	}
+	// Its own review needs nothing moved, so the lock does not come into it.
+	if st, err := Load(fs, "feature/x", 0); err != nil || len(st.Threads) != 1 {
+		t.Errorf("feature/x could not read its own review: %v", err)
+	}
+}
+
+// swappedFiles is a git directory in which something else swaps another
+// branch's review in at the worst moment: between a reader finding the review
+// settled and reading it.
+type swappedFiles struct {
+	fakeFiles
+	reads int
+}
+
+func (f *swappedFiles) ReadStateFile(name string) (string, bool) {
+	if f.reads++; f.reads == 2 {
+		f.fakeFiles[ArchiveName("main")] = f.fakeFiles[FileName]
+		f.fakeFiles[FileName] = string(New("feature").Bytes())
+	}
+	return f.fakeFiles.ReadStateFile(name)
+}
+
+// The read comes after the lock, so the file can be swapped in between. A
+// reader that gets another branch's review notices, and asks again.
+func TestAReviewSwappedUnderAReaderIsReadAgain(t *testing.T) {
+	mine := New("main")
+	mine.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "about main")
+	fs := &swappedFiles{fakeFiles: fakeFiles{FileName: string(mine.Bytes())}}
+
+	st, err := Load(fs, "main", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Threads[0].Comments[0].Body != "current" {
-		t.Error("the older file overwrote the newer one")
+	if st.Branch != "main" || len(st.Threads) != 1 {
+		t.Errorf("main was handed the review of %q: %+v", st.Branch, st.Threads)
+	}
+}
+
+// midSwapFiles is a git directory caught halfway through a branch swap by a
+// reader: the last branch's review has been put away and this branch's not
+// yet brought back, so for a moment there is nothing at the path.
+type midSwapFiles struct {
+	fakeFiles
+	reads int
+}
+
+func (f *midSwapFiles) ReadStateFile(name string) (string, bool) {
+	if f.reads++; f.reads == 2 {
+		f.fakeFiles[ArchiveName("main")] = f.fakeFiles[FileName]
+		delete(f.fakeFiles, FileName)
+	}
+	return f.fakeFiles.ReadStateFile(name)
+}
+
+// A swap is two moves, and between them the path is empty. A reader landing
+// there has not found a branch with no review: it waits for the swap.
+func TestAReaderCaughtMidSwapDoesNotReportAnEmptyReview(t *testing.T) {
+	mine := New("main")
+	mine.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "about main")
+	fs := &midSwapFiles{fakeFiles: fakeFiles{FileName: string(mine.Bytes())}}
+
+	st, err := Load(fs, "main", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Threads) != 1 {
+		t.Errorf("the reader was told main has no review: %+v", st)
+	}
+}
+
+// stuckFiles is a git directory in which a review cannot be put away.
+type stuckFiles struct{ fakeFiles }
+
+func (f stuckFiles) RenameStateFile(from, to string) error {
+	if from == FileName {
+		return errors.New("cannot move " + from)
+	}
+	return f.fakeFiles.RenameStateFile(from, to)
+}
+
+// Bringing a branch's review back goes over whatever is at the path, so it is
+// not done unless what was there has been put away first: that is the only
+// copy of the other branch's review.
+func TestAReviewThatCannotBePutAwayIsNotOverwritten(t *testing.T) {
+	theirs := New("feature/x")
+	theirs.Start(&Thread{Path: "a.go", Line: 1}, "Darren", "about feature/x")
+	fs := stuckFiles{fakeFiles{
+		FileName:            string(theirs.Bytes()),
+		ArchiveName("main"): string(New("main").Bytes()),
+	}}
+
+	if err := Adopt(fs, "main", 0); err == nil {
+		t.Error("the swap was reported as done")
+	}
+	wrote := false
+	if err := Update(fs, "main", 0, func(*State) error { wrote = true; return nil }); err == nil || wrote {
+		t.Errorf("an update went ahead on a review that is not main's: err = %v", err)
+	}
+	if st, err := Parse([]byte(fs.fakeFiles[FileName])); err != nil || len(st.Threads) != 1 {
+		t.Errorf("feature/x's review was overwritten: %q", fs.fakeFiles[FileName])
 	}
 }
 

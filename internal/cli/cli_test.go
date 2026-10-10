@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/discobox-ai/review/internal/git"
 	"github.com/discobox-ai/review/internal/review"
@@ -384,6 +385,120 @@ func TestStatusNullifiesAStaleApproval(t *testing.T) {
 	// The diff heading says so too.
 	if out := run(t, repo, "diff", "--stat"); !strings.Contains(out, "nullified") {
 		t.Errorf("diff --stat = %q", out)
+	}
+}
+
+// A reading command writes too — it stamps the digest into an approval given
+// without one — and it reads the review long before it does. What it writes
+// must be that stamp and nothing else: not the copy it read, laid back over a
+// remark that arrived while it was working out the diff.
+func TestAReadingCommandDoesNotUndoWhatWasWrittenMeanwhile(t *testing.T) {
+	repo := testRepo(t)
+	run(t, repo, "approve", "--by", "git-user", "server.go")
+
+	// status, caught between reading the review and stamping it.
+	branch := repo.CurrentBranch()
+	stale, err := review.Load(repo, branch, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "comment", "--by", "claude", "server.go:4", "arrived meanwhile")
+
+	var out strings.Builder
+	if err := status(&out, repo, stale, branch, options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	st := stored(t, repo)
+	if len(st.Threads) != 1 {
+		t.Fatalf("status wrote its stale copy over the comment: threads = %+v", st.Threads)
+	}
+	if st.FileFor("server.go").Digest == "" {
+		t.Error("the approval was not stamped")
+	}
+	// And it reports the review it left behind, not the one it started with.
+	if got := fields(t, out.String()); got["comments"] != "1" {
+		t.Errorf("status reported comments = %q, want the one that is there", got["comments"])
+	}
+}
+
+// Asking what the base is changes nothing, so it waits for nobody: it answers
+// while something else holds the lock, where setting one would queue.
+func TestShowingTheBaseTakesNoLock(t *testing.T) {
+	repo := testRepo(t)
+	unlock, err := review.Lock(repo, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	answered := make(chan string, 1)
+	go func() {
+		var out strings.Builder
+		if err := Run(repo, []string{"base"}, &out); err != nil {
+			out.WriteString(err.Error())
+		}
+		answered <- out.String()
+	}()
+	select {
+	case got := <-answered:
+		if strings.TrimSpace(got) != "main" {
+			t.Errorf("base printed %q, want main", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("base is waiting for a lock it has no use for")
+	}
+}
+
+// Commands run at the same moment all land. Each has its own view of the
+// repository, as separate processes would; the lock is on the file, so it
+// holds between them here just as it does there.
+func TestCommandsRunTogetherAllLand(t *testing.T) {
+	repo := testRepo(t)
+	run(t, repo, "approve", "--by", "git-user", "server.go")
+
+	const n = 24
+	errs := make(chan error, 2*n)
+	for i := 0; i < n; i++ {
+		go func() {
+			r, err := git.Open(repo.Dir)
+			if err != nil {
+				errs <- err
+				return
+			}
+			var out strings.Builder
+			errs <- Run(r, []string{"comment", "--by", "a" + strconv.Itoa(i%3), "server.go:4", "c" + strconv.Itoa(i)}, &out)
+		}()
+		// And readers among them, each with a digest to stamp or find stamped.
+		go func() {
+			r, err := git.Open(repo.Dir)
+			if err != nil {
+				errs <- err
+				return
+			}
+			var out strings.Builder
+			errs <- Run(r, []string{"status"}, &out)
+		}()
+	}
+	for i := 0; i < 2*n; i++ {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+
+	st := stored(t, repo)
+	if len(st.Threads) != n {
+		t.Errorf("%d of %d comments were kept", len(st.Threads), n)
+	}
+	seen := map[string]bool{}
+	for _, th := range st.Threads {
+		if seen[th.ID] {
+			t.Errorf("two threads were both given the id %s", th.ID)
+		}
+		seen[th.ID] = true
+	}
+	if f := st.FileFor("server.go"); f == nil || !f.Approved || f.Digest == "" {
+		t.Errorf("the approval did not come through stamped: %+v", f)
 	}
 }
 

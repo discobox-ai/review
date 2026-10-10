@@ -382,20 +382,22 @@ func shotReview(t *testing.T, m Model) Model {
 	m = comment(t, m, "This map only grows: one entry per address, kept for "+
 		"the life of the process. A busy afternoon is a memory leak.")
 
-	st := reviewJSON(t, m.repo)
-	for _, f := range st.Files {
-		f.By, f.At = "darren", "2026-08-28T19:41:02+01:00"
-	}
-	for _, th := range st.Threads {
-		th.Comments[0].By = "darren"
-		th.Comments[0].At = "2026-08-28T19:59:14+01:00"
-		th.Comments = append(th.Comments, review.Comment{
-			By: "claude", At: "2026-08-28T20:04:37+01:00",
-			Body: "Fair. Sweeping anything untouched for a minute on write, " +
-				"so the map tracks callers rather than history.",
-		})
-	}
-	if err := review.Save(m.repo, "rate-limit", st); err != nil {
+	err := review.Update(m.repo, "rate-limit", 0, func(st *review.State) error {
+		for _, f := range st.Files {
+			f.By, f.At = "darren", "2026-08-28T19:41:02+01:00"
+		}
+		for _, th := range st.Threads {
+			th.Comments[0].By = "darren"
+			th.Comments[0].At = "2026-08-28T19:59:14+01:00"
+			th.Comments = append(th.Comments, review.Comment{
+				By: "claude", At: "2026-08-28T20:04:37+01:00",
+				Body: "Fair. Sweeping anything untouched for a minute on write, " +
+					"so the map tracks callers rather than history.",
+			})
+		}
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	return drive(t, m, m.rescanCmd()())

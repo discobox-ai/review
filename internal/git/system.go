@@ -3,11 +3,13 @@ package git
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,7 +19,9 @@ import (
 // Everything else in this package is built on it, so a different backend — a
 // repository on another machine, a test double — is a matter of implementing
 // this interface and passing it to OpenWith. Nothing outside this file runs a
-// command or touches a file.
+// command or touches a file — but for the one call that each kind of system
+// spells differently, taking a lock on a file this one has opened, which is in
+// the system_*.go files beside it.
 type System interface {
 	// Git runs git in dir and returns its standard output. stdin is fed to the
 	// command when it is not nil. On failure the error carries git's standard
@@ -33,6 +37,16 @@ type System interface {
 	RemoveAll(path string) error
 	Rename(oldPath, newPath string) error
 	Stat(path string) (FileInfo, error)
+
+	// Lock takes the exclusive lock the file at path stands for, creating the
+	// file if need be, and returns what lets go of it. It is what makes a
+	// read of a file followed by a write of it one step when several
+	// processes are at it: every one of them takes the same lock first. A
+	// holder that dies lets go.
+	//
+	// While somebody else holds the lock it waits, for as long as wait and no
+	// longer, and then fails with [ErrLocked]. A wait of nothing asks once.
+	Lock(path string, wait time.Duration) (unlock func(), err error)
 
 	// WriteTempFile writes data to a fresh read-only file named name, in a
 	// directory of its own outside the repository, and returns its path. It
@@ -131,6 +145,80 @@ func (Local) RemoveAll(path string) error { return os.RemoveAll(path) }
 
 // Rename moves a file over another.
 func (Local) Rename(oldPath, newPath string) error { return os.Rename(oldPath, newPath) }
+
+// ErrLocked is what taking a lock fails with when somebody else held it for
+// longer than the caller was willing to wait.
+var ErrLocked = errors.New("locked by another program")
+
+// lockPoll is how often a lock somebody else holds is asked for again.
+const lockPoll = 5 * time.Millisecond
+
+// Lock takes the lock at path, which lasts until it is let go of or the
+// process ends, so nothing is ever left locked by a holder that died. The file
+// is never removed: a lock that deleted its file would hand the next two
+// comers a file each.
+//
+// It asks and asks again rather than sleeping in the system until the lock
+// comes free, because that is the only wait that can be given up on — and a
+// window that cannot give up waiting is a window that has stopped.
+//
+// The file is only a thing to hold a lock on, so one that can be read is
+// enough where the system allows it: a lock file left behind by another user
+// of the same repository must not shut this one out.
+func (Local) Lock(path string, wait time.Duration) (func(), error) {
+	deadline := time.Now().Add(wait)
+	locked := func() error { return fmt.Errorf("%s: %w", filepath.Base(path), ErrLocked) }
+
+	// This process's own turn comes first, and is kept until the file is
+	// closed again: see inProcess.
+	for {
+		if _, held := inProcess.LoadOrStore(path, struct{}{}); !held {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			return nil, locked()
+		}
+		time.Sleep(lockPoll)
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if os.IsPermission(err) {
+		f, err = os.OpenFile(path, os.O_RDONLY, 0)
+	}
+	if err != nil {
+		inProcess.Delete(path)
+		return nil, err
+	}
+	unlock := func() {
+		_ = f.Close()
+		inProcess.Delete(path)
+	}
+	for {
+		ok, err := tryLockFile(f)
+		if err == nil && ok {
+			return unlock, nil
+		}
+		if err == nil && !time.Now().Before(deadline) {
+			err = locked()
+		}
+		if err != nil {
+			unlock()
+			return nil, err
+		}
+		time.Sleep(lockPoll)
+	}
+}
+
+// inProcess is the paths this process holds a lock on, or is in the middle of
+// taking one on.
+//
+// The system's lock keeps other processes out. What it does about a second
+// taker in this one depends on the system: flock's keeps it out, but fcntl's
+// belongs to the process, is granted to it again — and is let go of when any
+// file open on that path is closed, the holder's or not. So the process keeps
+// its own account, and nothing so much as opens the lock file without being
+// in it: the lock then means the same thing everywhere.
+var inProcess sync.Map
 
 // WriteTempFile puts data in a read-only file of its own under the system
 // temporary directory. Keeping the given name, rather than the mangled one

@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -185,6 +186,11 @@ func (f *fakeSystem) RemoveAll(path string) error {
 	return nil
 }
 
+func (f *fakeSystem) Lock(path string, wait time.Duration) (func(), error) {
+	f.fileCalls = append(f.fileCalls, "lock "+path)
+	return func() { f.fileCalls = append(f.fileCalls, "unlock "+path) }, nil
+}
+
 func (f *fakeSystem) WriteTempFile(name string, data []byte) (string, error) {
 	path := "/tmp/fake/" + name
 	f.fileCalls = append(f.fileCalls, "writetemp "+path)
@@ -290,5 +296,91 @@ func TestRepoRunsOnAFakeSystem(t *testing.T) {
 	}
 	if len(fake.fileCalls) == 0 {
 		t.Error("no file access went through the System")
+	}
+}
+
+// A lock is what turns a read followed by a write into one step, so the only
+// thing worth knowing about it is that a second taker waits for the first —
+// and gets it the moment the first lets go, rather than never.
+func TestALockIsHeldByOneAtATime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "review.lock")
+	unlock, err := Local{}.Lock(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan func())
+	go func() {
+		second, err := Local{}.Lock(path, time.Minute)
+		if err != nil {
+			t.Error(err)
+			second = func() {}
+		}
+		got <- second
+	}()
+
+	select {
+	case <-got:
+		t.Fatal("a second taker got a lock that was still held")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	unlock()
+	select {
+	case second := <-got:
+		second()
+	case <-time.After(10 * time.Second):
+		t.Fatal("letting go of the lock did not hand it on")
+	}
+
+	// And it can be taken again afterwards: nothing is left behind locked.
+	third, err := Local{}.Lock(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third()
+}
+
+// Nobody waits for a lock for ever: a holder that never lets go costs the
+// caller the time it said it would wait, and an answer saying why.
+func TestWaitingForALockGivesUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "review.lock")
+	unlock, err := Local{}.Lock(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	for _, wait := range []time.Duration{0, 50 * time.Millisecond} {
+		start := time.Now()
+		second, err := Local{}.Lock(path, wait)
+		if err == nil {
+			second()
+			t.Fatalf("waiting %v got a lock that was still held", wait)
+		}
+		if !errors.Is(err, ErrLocked) || !strings.Contains(err.Error(), "review.lock") {
+			t.Errorf("err = %v, want it to say the lock is held, and which", err)
+		}
+		if took := time.Since(start); took < wait || took > wait+5*time.Second {
+			t.Errorf("asked to wait %v, waited %v", wait, took)
+		}
+	}
+}
+
+// The lock file is only something to hold a lock on. One that cannot be
+// written to — left by another user of the same repository — still serves.
+func TestALockFileThatCannotBeWrittenStillLocks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "review.lock")
+	if err := os.WriteFile(path, nil, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := Local{}.Lock(path, 0)
+	if err != nil {
+		t.Fatalf("a read-only lock file could not be locked: %v", err)
+	}
+	defer unlock()
+	if second, err := (Local{}).Lock(path, 0); err == nil {
+		second()
+		t.Error("and it does not keep a second taker out")
 	}
 }
