@@ -49,8 +49,7 @@ func commandBindings(m keyMap) []struct {
 		{"previous file", m.PrevFile},
 		{"less context", m.LessContextKey},
 		{"more context", m.MoreContextKey},
-		{"widen the file list", m.WiderKey},
-		{"narrow the file list", m.NarrowerKey},
+		{"show or hide the history", m.HistoryKey},
 	}
 }
 

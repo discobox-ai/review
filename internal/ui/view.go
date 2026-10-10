@@ -9,14 +9,14 @@ import (
 
 // The window: where each pane goes, and what it draws.
 //
-//	Changed Files │ Review
-//	──────────────┼────────────
-//	History       │
+//	Review
+//	────────
+//	History
 //
-// The left column is how you get about — a contents page over a history — and
-// the right column is the review itself. A comment being written is not a pane:
-// it is a box drawn into the review at the place the comment will land, so
-// there is nothing here to make room for.
+// One column. The review is the window, and its headings are the list of what
+// changed; the history is a strip under it that folds to its own title. A
+// comment being written is not a pane: it is a box drawn into the review at
+// the place the comment will land, so there is nothing here to make room for.
 
 // layout recomputes pane geometry.
 func (m *Model) layout() {
@@ -37,43 +37,39 @@ func (m *Model) layout() {
 		m.layoutZoom(body)
 		return
 	}
+	m.layoutStacked(body)
+}
 
-	leftW := m.leftWidth()
-	rightW := max(m.width-leftW-1, 10)
-	if m.leftCollapsed() {
-		leftW, rightW = 0, m.width
-	}
-
-	// The history takes the bottom of the left column, no more than a third of
-	// it and no more than it has to show, so a branch with one commit does not
-	// leave a hole. What is left goes to the files.
-	filesH := body
+// layoutStacked is the window as one column: the review across the top, and
+// under it the history, which is a title and nothing else until it is asked
+// for. Unfolded it takes no more than a third of the window, title included,
+// and no more than it has to show — but always a row of it, or it would not be
+// unfolded, on any window with the room for one.
+func (m *Model) layoutStacked(body int) {
+	m.history.button = ""
+	histH := 0 // the whole strip, title included
 	if m.showHistory() {
-		histH := min(max(body/3, 4), m.history.rows()+1)
-		filesH = max(body-histH, 3)
-		m.history.width, m.history.height = leftW, max(body-filesH-1, 1)
-	}
-	m.files.width, m.files.height = leftW, max(filesH-1, 1)
-
-	m.view.width, m.view.height = rightW, max(body-1, 1)
-
-	// Where each pane lands, walked in the order View joins them. Doing it
-	// here rather than measuring the rendered frame is what keeps a click and
-	// the thing it landed on agreeing: both come out of this one arithmetic.
-	y := 1 // below the branch bar
-	if !m.leftCollapsed() {
-		m.rects[focusFiles] = rect{0, y, leftW, 1 + m.files.height}
-		y += 1 + m.files.height
-		if m.showHistory() {
-			m.rects[focusHistory] = rect{0, y, leftW, 1 + m.history.height}
+		m.history.button, histH = "[+] ", 1
+		if m.histOpen {
+			m.history.button = "[-] "
+			histH = 1 + min(max(body/3-1, 1), m.history.rows())
+			histH = min(histH, max(body-3, 1))
+		}
+		if histH < 2 {
+			// No room for a row of it. It is drawn as folded because it is,
+			// and the keyboard cannot be left in something with no rows.
+			m.history.button = "[+] "
+			if m.focus == focusHistory {
+				m.focus = focusReview
+			}
 		}
 	}
-	rightX := 0
-	if !m.leftCollapsed() {
-		rightX = leftW + 1 // past the separator column
+	m.history.width, m.history.height = m.width, histH-1
+	m.view.width, m.view.height = m.width, max(body-histH-1, 1)
+	m.rects[focusReview] = rect{0, 1, m.width, 1 + m.view.height}
+	if histH > 0 {
+		m.rects[focusHistory] = rect{0, 2 + m.view.height, m.width, histH}
 	}
-	m.rects[focusReview] = rect{rightX, 1, rightW, 1 + m.view.height}
-
 	m.clampPanes()
 }
 
@@ -81,9 +77,8 @@ func (m *Model) layout() {
 // so nothing else is laid out and nothing else can be clicked.
 func (m *Model) layoutZoom(body int) {
 	w, h := m.width, max(body-1, 1) // one row goes to the pane's own title
+	m.history.button = ""
 	switch m.focus {
-	case focusFiles:
-		m.files.width, m.files.height = w, h
 	case focusHistory:
 		m.history.width, m.history.height = w, h
 	case focusReview, focusCompose:
@@ -105,7 +100,6 @@ func (m *Model) zoomed() focusArea {
 }
 
 func (m *Model) clampPanes() {
-	m.files.clamp()
 	m.history.clamp()
 	m.view.clamp()
 }
@@ -122,107 +116,10 @@ func (m Model) toggleZoom(f focusArea) (tea.Model, tea.Cmd) {
 	if m.zoom && m.focus == f {
 		m.zoom = false
 		m.layout()
-		m.view.build()
-		m.view.clamp()
 		return m, nil
 	}
 	m.zoom = true
-	mdl, cmd := m.setFocus(f)
-	m = mdl.(Model)
-	// A comment is wrapped to the pane it is drawn in, so the rows have to be
-	// laid out again at the new width.
-	m.view.build()
-	m.view.clamp()
-	return m, cmd
-}
-
-// leftWidth is how wide the left column stands: about a third of the window,
-// kept within reason, or whatever width it was last set to by hand.
-//
-// A path is long and a pane is narrow, so which files a review touches is the
-// one thing the window cannot always show — hence the handle: Alt-→ and Alt-←,
-// or > and <, or dragging the rule between the columns.
-func (m *Model) leftWidth() int {
-	if m.treeW > 0 {
-		return min(max(m.treeW, minLeftWidth), m.maxLeftWidth())
-	}
-	return m.autoLeftWidth()
-}
-
-// autoLeftWidth is the width the window picks for itself, and what the rule
-// goes back to if the hand never moves it.
-func (m *Model) autoLeftWidth() int {
-	w := max(min(m.width*34/100, 46), 24)
-	if w > m.width-30 {
-		w = max(m.width/3, 12)
-	}
-	return w
-}
-
-// minLeftWidth is the narrowest the left column is worth drawing: below it a
-// row is more chrome and ellipsis than name. minReviewWidth is what the review
-// keeps whatever the lists are asked for — it is what the window is for, so it
-// is the column with a floor rather than a ceiling.
-const (
-	minLeftWidth   = 12
-	minReviewWidth = 40
-)
-
-// maxLeftWidth is as far right as the rule goes. It is never less than the
-// width the window would have chosen on its own, since on a screen too small
-// for both to hold the ceiling would otherwise sit under the column already
-// drawn — and a press of the widen key would narrow it.
-func (m *Model) maxLeftWidth() int {
-	return max(max(m.width-1-minReviewWidth, m.autoLeftWidth()), minLeftWidth)
-}
-
-// setLeftWidth widens or narrows the left column, remembering the width it
-// lands on so that it survives a resize of the window and everything else that
-// lays the panes out again.
-func (m *Model) setLeftWidth(w int) {
-	m.treeW = min(max(w, minLeftWidth), m.maxLeftWidth())
-	m.layout()
-	// The review is wrapped to its pane, so its rows have to be laid out again
-	// at whatever width the move left it.
-	m.view.build()
-	m.view.clamp()
-}
-
-// resizeStep is how far one press of the resize key moves the rule. One column
-// is too slow to be worth a key; a hand that wants finer than this has the
-// mouse.
-const resizeStep = 2
-
-// doResizeLeft answers the resize keys. Nothing is resizable while a pane is
-// zoomed or the lists are folded away, and a key that silently does nothing is
-// worse than one that says why.
-func (m Model) doResizeLeft(delta int) (tea.Model, tea.Cmd) {
-	switch {
-	case m.zoom:
-		m.setWarn("The pane is zoomed — Alt-Z gives the columns back")
-	case m.leftCollapsed():
-		m.setWarn("The file list is folded away at this width — ← brings it back")
-	default:
-		m.setLeftWidth(m.leftWidth() + delta)
-	}
-	return m, nil
-}
-
-// narrowWidth is where the window stops being wide enough for both columns.
-// Below it a pane roughly a third of the screen wide leaves the review too
-// narrow to read code in, which is the one thing the window is for.
-const narrowWidth = 100
-
-// leftCollapsed reports whether the left column gives up its space entirely.
-//
-// It does so only on a narrow window, and only while the focus is on the right
-// hand column, so moving right reads as "show me this properly" and moving
-// left brings the lists straight back.
-func (m *Model) leftCollapsed() bool {
-	if m.width >= narrowWidth {
-		return false
-	}
-	return m.focus == focusReview || m.focus == focusCompose
+	return m.setFocus(f)
 }
 
 // View renders the whole window.
@@ -261,17 +158,9 @@ func (m Model) frame() string {
 
 	middle := m.viewZoomed()
 	if !m.zoom {
-		stack := []string{m.viewPane(focusFiles)}
-		if m.showHistory() {
-			stack = append(stack, m.viewPane(focusHistory))
-		}
-		left := lipgloss.JoinVertical(lipgloss.Left, stack...)
 		middle = m.viewPane(focusReview)
-		if !m.leftCollapsed() {
-			bodyH := max(m.height-2, 4)
-			sep := strings.TrimRight(strings.Repeat("│\n", bodyH), "\n")
-			middle = lipgloss.JoinHorizontal(lipgloss.Top,
-				left, m.st.sep.Render(sep), middle)
+		if m.showHistory() {
+			middle = lipgloss.JoinVertical(lipgloss.Left, middle, m.viewPane(focusHistory))
 		}
 	}
 
@@ -296,8 +185,6 @@ func (m Model) viewPane(f focusArea) string {
 	focused := m.focus == f
 	var out string
 	switch f {
-	case focusFiles:
-		out = m.files.view(m.st, focused)
 	case focusHistory:
 		out = m.history.view(m.st, focused)
 	case focusReview:
@@ -356,7 +243,7 @@ func (m Model) branchBar() (string, []barSpan) {
 		left += "  " + m.st.statusWA.Render(merging)
 		at += 2 + width(merging)
 	}
-	right := m.st.dimText.Render(m.repo.Name() + "  ·  F1 help  ·  Ctrl-Q quit")
+	right := m.st.dimText.Render("F1 help  ·  Ctrl-Q quit")
 
 	// The base is the first thing dropped when the bar will not hold all
 	// three: the branch is where you are and the right hand side is the way
@@ -489,14 +376,6 @@ func (m Model) scoreboard() string {
 
 func (m Model) hints() string {
 	switch m.focus {
-	case focusFiles:
-		// The width keys are offered here because this is the pane they are
-		// about: a path too long for the column is the thing that sends a
-		// hand looking for them.
-		if m.hideDone {
-			return "↑/↓ jump to a file · → the review · a approve · < > width · f shows the finished ones"
-		}
-		return "↑/↓ jump to a file · → the review · a approve · < > width · F fold them all · ? keys"
 	case focusHistory:
 		if _, ok := m.history.selected(); ok {
 			return "↑/↓ pick a commit · ↑ to the top row for the whole review · ? keys"
@@ -522,6 +401,11 @@ func (m Model) hints() string {
 		}
 		return "r reply · x resolve · X delete the whole thread · t next open"
 	case ok && r.kind == rowFile:
+		// Short enough to leave the scoreboard its room on an ordinary
+		// window: this is the row the window opens on.
+		if m.showHistory() {
+			return "a approve · Space fold · F all · H history · " + m.splitHint() + " · ? keys"
+		}
 		return "a approve · Space fold · F fold them all · " + m.splitHint() + " · ] next file · ? keys"
 	}
 	// The hints run out of room before the scoreboard does, and what runs off
@@ -536,10 +420,7 @@ func (m Model) hints() string {
 			" · S other side · n/p hunk · t open comments · ] file"
 	}
 	if m.commit != "" {
-		hint = "Reading one commit · c comments on the review · Alt-3 then ↑ for all of it"
-	}
-	if m.leftCollapsed() {
-		hint = "← files · " + hint
+		hint = "Reading one commit · c comments on the review · Alt-2 then ↑ for all of it"
 	}
 	return hint
 }
@@ -561,7 +442,7 @@ func (m Model) splitHint() string {
 
 func helpText() string {
 	return strings.Join([]string{
-		"discobox-review reviews a branch. It reads a repository and never writes one:",
+		"Discobox Review reviews a branch. It reads a repository and never writes one:",
 		"nothing here stages, commits, or rewrites anything.",
 		"",
 		"The review is every change between the merge base and the working",
@@ -573,6 +454,7 @@ func helpText() string {
 		"",
 		"    a  approve this file      A  approve every file",
 		"    F  fold every file, or open them all again",
+		"    H  show the history under the review, or hide it again",
 		"    f  hide the files that are done with, and show them again",
 		"    s  unify the diff, or split it into its two sides again",
 		"       (it opens split; clicking the word in the title does the same)",
@@ -603,19 +485,24 @@ func helpText() string {
 		"Getting about",
 		"",
 		"    Tab / Shift-Tab  cycle panes",
-		"    Alt-1 files      Alt-2 review      Alt-3 history",
+		"    Alt-1 review     Alt-2 history",
 		"",
 		"    24g     line 24 of the file the cursor is in",
 		"    n / p   next / previous hunk",
 		"    t / T   next / previous open comment",
 		"    ] / [   next / previous file",
 		"    g / G   the top / the bottom",
-		"    < / >   narrow / widen the file list — Alt-← and Alt-→ do the",
-		"            same, and so does dragging the rule between the columns",
 		"",
-		"  The list on the left is a contents page for the stack on the",
-		"  right: moving in one moves the other, so they never disagree",
-		"  about where you are.",
+		"  The window opens as the list of what changed: every file folded",
+		"  to its heading, which says where the file stands (○ unread,",
+		"  ◆ a comment open, ✓ approved, ◈ approved and since changed),",
+		"  how much it changed, and what is left to commit. Space opens",
+		"  the one the cursor is on, and F opens them all.",
+		"",
+		"  Under the review is the history: the commits this branch has",
+		"  made, under a first row standing for all of them at once.",
+		"  Picking a commit narrows the review to that step. H folds the",
+		"  history down to its title and opens it again.",
 		"",
 		"───────────────────────────────────────────────────────────────",
 		"Approving",
@@ -628,10 +515,9 @@ func helpText() string {
 		"  Turning the diff context up or down does not nullify anything:",
 		"  the digest counts only the lines that changed.",
 		"",
-		"  An approved file with nothing outstanding on it folds away, so",
-		"  what is left on screen is what is left to do. Space unfolds it,",
-		"  and F folds the lot — or opens the lot, when they are already",
-		"  folded — which turns a long review into a list of its files.",
+		"  Approving a file folds it away again, so what is left open is",
+		"  what is left to do. Space unfolds it, and F folds the lot — or",
+		"  opens the lot, when they are already folded.",
 		"",
 		"  Opening them again steps over the ones that are done with, since",
 		"  \"show me everything\" means everything there is still something",
@@ -684,7 +570,7 @@ func helpText() string {
 		"  pure insertion has nothing on its left.",
 		"",
 		"  Neither view is right for everything, which is why it is a key",
-		"  rather than a setting. Below 90 columns the pane draws unified",
+		"  rather than a setting. Below 80 columns the pane draws unified",
 		"  anyway, and splits itself once there is room.",
 		"",
 		"───────────────────────────────────────────────────────────────",
@@ -705,8 +591,8 @@ func helpText() string {
 		"What is not committed yet",
 		"",
 		"  An amber bar down the margin marks every line whose change is",
-		"  not in a commit. The same mark appears against the file in the",
-		"  list, and the status bar counts them.",
+		"  not in a commit. The file's heading says so in words — staged,",
+		"  uncommitted, untracked — and the status bar counts them.",
 		"",
 		"  A finished review is: every file approved, every comment",
 		"  resolved, and nothing left in the margin. The status bar says",
@@ -723,7 +609,7 @@ func helpText() string {
 		"",
 		"  Everything above is kept in .git/discobox-review.json, which is",
 		"  meant to be read and written by other things — an agent that",
-		"  answers your comments, or approves what it has fixed. discobox-review",
+		"  answers your comments, or approves what it has fixed. Discobox Review",
 		"  notices the file changing and picks it up within a second, and",
 		"  re-reads it before every write of its own, so both of you can",
 		"  work on the same review at once.",
@@ -736,8 +622,9 @@ func helpText() string {
 		"  you are sitting at. Double click a title to zoom that pane.",
 		"  Shift-drag gives your terminal's own selection back.",
 		"",
-		"  Click the ▾ in front of a file's name to fold it, and drag a",
-		"  scrollbar to scroll the pane it belongs to.",
+		"  Click a file's heading to fold it or open it, the [-] on the",
+		"  history's title to fold that, and drag a scrollbar to scroll",
+		"  the pane it belongs to.",
 		"",
 		"  On the top bar, click the branch name to check out another",
 		"  branch, and the \"from …\" beside it to choose the base — the",

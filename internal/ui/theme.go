@@ -7,10 +7,8 @@ import (
 )
 
 // Colours chosen to echo the Tk git-gui palette discobox-review grew out of:
-// lightsalmon for the file list, lavender for the history and gold for the
-// review's own heading.
+// lavender for the history and gold for the review's own heading.
 var (
-	colSalmon   = lipgloss.Color("216")
 	colGold     = lipgloss.Color("220")
 	colSky      = lipgloss.Color("153")
 	colLavender = lipgloss.Color("183")
@@ -40,7 +38,6 @@ type styles struct {
 	branchBar   lipgloss.Style
 	branchLabel lipgloss.Style
 
-	titleFiles   lipgloss.Style
 	titleDiff    lipgloss.Style
 	titleCommit  lipgloss.Style
 	titleCommits lipgloss.Style
@@ -55,7 +52,6 @@ type styles struct {
 
 	body     lipgloss.Style
 	dimText  lipgloss.Style
-	sep      lipgloss.Style
 	statusOK lipgloss.Style
 	statusWA lipgloss.Style
 	statusER lipgloss.Style
@@ -75,10 +71,12 @@ type styles struct {
 	pendingBar lipgloss.Style
 	numberOn   lipgloss.Style
 
-	// A file's heading in the review, and the verdict glyph in front of its
-	// row in the list beside it.
+	// A file's heading in the review: its band, how much it changed, and the
+	// verdict glyph in front of it.
 	fileBand       lipgloss.Style
 	fileBandOn     lipgloss.Style
+	statAdd        lipgloss.Style
+	statDel        lipgloss.Style
 	verdictOK      lipgloss.Style
 	verdictStale   lipgloss.Style
 	verdictComment lipgloss.Style
@@ -139,7 +137,6 @@ func newStyles(dark bool) *styles {
 	s.branchLabel = lipgloss.NewStyle().Foreground(colGrey)
 
 	title := lipgloss.NewStyle().Foreground(colBlack).Bold(true).Padding(0, 1)
-	s.titleFiles = title.Background(colSalmon)
 	s.titleDiff = title.Background(colGold)
 	s.titleCommit = title.Background(colSky)
 	s.titleCommits = title.Background(colLavender)
@@ -152,7 +149,6 @@ func newStyles(dark bool) *styles {
 
 	s.body = lipgloss.NewStyle()
 	s.dimText = lipgloss.NewStyle().Foreground(colDim)
-	s.sep = lipgloss.NewStyle().Foreground(colDim)
 	s.statusOK = lipgloss.NewStyle().Foreground(colOK)
 	s.statusWA = lipgloss.NewStyle().Foreground(colWarn)
 	s.statusER = lipgloss.NewStyle().Foreground(colErr)
@@ -168,6 +164,8 @@ func newStyles(dark bool) *styles {
 
 	s.fileBand = lipgloss.NewStyle().Background(colBandBg).Bold(true)
 	s.fileBandOn = lipgloss.NewStyle().Background(colBandOnBg).Bold(true)
+	s.statAdd = lipgloss.NewStyle().Foreground(colOK)
+	s.statDel = lipgloss.NewStyle().Foreground(colErr)
 	s.verdictOK = lipgloss.NewStyle().Foreground(colOK).Bold(true)
 	s.verdictStale = lipgloss.NewStyle().Foreground(colWarn).Bold(true)
 	s.verdictComment = lipgloss.NewStyle().Foreground(colComment).Bold(true)

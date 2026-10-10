@@ -61,7 +61,7 @@ var Commands = []Command{
 		Long: "With no argument it says where the review starts. With one it moves\n" +
 			"it there, and saves: the base is part of the review, so the window\n" +
 			"and every later command agree about what is under review. --auto\n" +
-			"hands it back to whatever discobox-review works out.\n\n" +
+			"hands it back to whatever Discobox Review works out.\n\n" +
 			"The --base flag on diff and status is the other thing — one command\n" +
 			"seen from somewhere else, changing nothing.",
 		Example: "discobox-review base origin/main",
@@ -112,7 +112,7 @@ var Commands = []Command{
 		Name: "approve", Args: "--by <who> <path>…", What: "sign off a file",
 		Flags: []string{"by"},
 		Long: "No digest is written, exactly as a hand-written approval leaves none:\n" +
-			"discobox-review stamps in the change as it stands the next time anything\n" +
+			"Discobox Review stamps in the change as it stands the next time anything\n" +
 			"reads the review, which is what keeps such an approval nullifiable.\n" +
 			"Edit the file afterwards and the approval falls.",
 		Example: "discobox-review approve --by git-user internal/git/git.go",
@@ -139,7 +139,7 @@ var flagHelp = map[string]string{
 	"context":  "lines of context either side",
 	"stat":     "the headings alone, without the diff under them",
 	"raw":      "the plain unified diff, for piping somewhere else",
-	"auto":     "let discobox-review work the base out again",
+	"auto":     "let Discobox Review work the base out again",
 	"by":       "who a remark is from — required; git-user for git's own user.name",
 	"side":     "old, to anchor to a line the change removed",
 	"open":     "only what is still open",
@@ -297,7 +297,7 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 // Usage lists the commands. It is what `discobox-review help` prints, and what a
 // discobox-review with nowhere to draw prints instead of opening a window.
 func Usage(out io.Writer) {
-	fmt.Fprintln(out, "discobox-review reviews a branch. With no command it opens a window;")
+	fmt.Fprintln(out, "Discobox Review reviews a branch. With no command it opens a window;")
 	fmt.Fprintln(out, "these read and write the same review from a script.")
 	fmt.Fprintln(out)
 	for _, c := range Commands {

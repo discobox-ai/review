@@ -7,7 +7,7 @@ wrong with it line by line, and see how much of that is left — built with
 [Lip Gloss v2](https://charm.land/lipgloss). Mouse selection comes from
 [discobox-ai/x/selection](https://github.com/discobox-ai/x/tree/main/selection).
 
-![The review window: a file list and branch history on the left, a stacked diff on the right with an approved file folded away, a conversation hanging off line 12, and an amber margin down the uncommitted changes](docs/screenshots/review.png)
+![The review window: a stacked diff with an approved file folded away, a conversation hanging off line 12, an amber margin down the uncommitted changes, and the branch's history in a strip underneath](docs/screenshots/review.png)
 
 **discobox-review reads a repository and never writes one.** Nothing here stages,
 commits, amends or rewrites anything. The one exception is checking out a
@@ -77,16 +77,26 @@ with a list to go back to between each makes it hard to hold a change in your
 head and easy to leave a file unread without noticing. A single stack can be
 read from top to bottom, and what is left to do is how far down you have got.
 
+**It opens folded**: every file as one row, its heading, so the first thing on
+screen is the list of what changed and where each file stands. `Space` opens
+the file the cursor is on and `F` opens them all. There is no separate list of
+files beside the review, because the headings are that list.
+
 ### What a file's heading says
 
-Each file's band carries its name and everything standing against it — how much
-changed, what is left to commit, the verdict, and how many comments are still
-waiting for an answer:
+Each file's heading opens with where the file stands — `○` unread, `◆` a
+comment still open, `✓` approved, `◈` approved and changed since — and then a
+band carrying its name and everything standing against it: how much changed
+(added in green, removed in red), what is left to commit, the verdict, and how
+many comments are still waiting for an answer:
 
 ```
-▾ internal/ui/model.go              +42 · −7 · uncommitted · 2 open comments
-▸ internal/git/git.go                                        +30 · ✓ approved
+◆  ▾ internal/ui/model.go           +42 · −7 · uncommitted · 2 open comments
+✓  ▸ internal/git/git.go                                     +30 · ✓ approved
 ```
+
+The verdict stands in front of the band rather than on it, so that read down
+the left edge the headings are a column of verdicts.
 
 Those give way in a fixed order as the pane narrows — the arithmetic first,
 then what is left to commit, then the verdict, and **last of all the
@@ -95,14 +105,13 @@ number before it goes away, and a file with one will shorten its own name to
 keep saying so:
 
 ```
-  80 columns   ▾ model.go        +42 · −7 · uncommitted · 2 open comments
-  44 columns   ▾ model.go            +42 −7 uncommitted ◆2
-  24 columns   ▾ model.go                              ◆2
+  80 columns   ◆  ▾ model.go     +42 · −7 · uncommitted · 2 open comments
+  44 columns   ◆  ▾ model.go         +42 −7 uncommitted ◆2
+  24 columns   ◆  ▾ model.go                           ◆2
 ```
 
 `◆2` is two comments outstanding, `✓2` two that have been answered — the same
-`◆` the list on the left wears, and the same `✓` a resolved thread collapses
-to. The verdict shortens to a bare `✓`, which is the same mark again and reads
+`◆` the heading opens with, and the same `✓` a resolved thread collapses to. The verdict shortens to a bare `✓`, which is the same mark again and reads
 the same way: a number after it counts remarks, and no number is the file
 itself. A file whose heading is only arithmetic keeps its whole name instead:
 there is nothing there worth shortening it for.
@@ -200,13 +209,16 @@ diff context up or down — which moves every hunk boundary — does not nullify
 single approval, while editing one character of one line nullifies exactly the
 file it was in.
 
-An approved file with nothing outstanding on it **folds away**, so what is left
-on screen is what is left to do. `Space` on its heading opens it again, and
-that choice sticks across rescans: you were looking at it more recently than
-the rule was. Deciding about a file — approving it, or taking that back — hands
-its fold back to the rule, so a file signed off still goes away.
+**Approving a file in the window folds it away again**, so what is left open
+is what is left to do. `Space` on its heading opens it, and that choice sticks across rescans.
+Approving hands the fold back to the rule every file starts with — folded — so
+a file signed off goes away even after `F` opened everything; taking an
+approval back opens the file, since that is having more to say about it.
 
-Clicking a file's heading folds it too — anywhere along the band, not only the
+A folded file has no gap under it, so a run of them reads as a list; an open
+one ends with a blank row before the next heading.
+
+Clicking a file's heading folds it too — anywhere along it, not only the
 `▾` in front of the name. The whole thing is the disclosure control, which is
 what a band across a section reads as.
 
@@ -235,10 +247,10 @@ come back:
 
 ```
  Folded                        F                    Opened
- ▸ bar.txt                 ──────►    ▾ bar.txt        …
- ▸ beta.go   ✓ approved               ▸ beta.go   ✓ approved   ← left alone
- ▸ foo.txt                            ▾ foo.txt        …
- ▸ new.txt                            ▾ new.txt        …
+ ○  ▸ bar.txt              ──────►    ○  ▾ bar.txt     …
+ ✓  ▸ beta.go  ✓ approved             ✓  ▸ beta.go  ✓ approved   ← left alone
+ ○  ▸ foo.txt                         ○  ▾ foo.txt     …
+ ○  ▸ new.txt                         ○  ▾ new.txt     …
 ```
 
 An approved file with an open comment on it is not done with, so it comes back
@@ -253,11 +265,11 @@ the screen altogether, leaving only what is unapproved or still being argued
 about.
 
 ```
- Changed Files              1/4      Unfinished Files           1/4
- ▍○ bar.txt                          ▍○ bar.txt
-  ✓ beta.go         f                ▍○ foo.txt
- ▍○ foo.txt     ──────►              ▍○ new.txt
- ▍○ new.txt
+ Review            1/4 approved      Review  1/4 approved · 1 hidden
+ ○  ▸ bar.txt                        ○  ▸ bar.txt
+ ✓  ▸ beta.go        f               ○  ▸ foo.txt
+ ○  ▸ foo.txt    ──────►             ○  ▸ new.txt
+ ○  ▸ new.txt
 ```
 
 Folding is for while you are reading — it gets a file out of the way and leaves
@@ -267,18 +279,10 @@ something, and everything else is noise between them.
 
 **A hidden file is finished, not gone.** The tallies still count it — `1/4
 approved`, not `0/3` — because a review that appeared to shrink as it was
-completed would be lying about its own size. The review pane says how many are
-hidden, and the list retitles itself **Unfinished Files**, so a file missing
-from the index is never a mystery.
+completed would be lying about its own size. The review's title says how many
+are hidden, so a file missing from the headings is never a mystery.
 
 `f` again brings them back.
-
-```
- ▍○ bar.txt                          ▸ bar.txt                       +1 · −1 · staged
-  ✓ beta.go             F            ▸ beta.go                             +3 · ✓ approved
- ▍◆ foo.txt          ──────►         ▸ foo.txt   +2 · −2 · uncommitted · 1 open comment
- ▍○ new.txt                          ▸ new.txt                          +1 · untracked
-```
 
 ## Comments
 
@@ -370,15 +374,20 @@ There is one place a comment lives, so there is one place to look for it.
 
 ## Reading one commit
 
-The pane at the bottom left lists the commits the branch has made since the
+The strip under the review lists the commits the branch has made since the
 base, newest first, under a row standing for the review as a whole:
 
 ```
- History from origin/main    2 commits
+ [-] History from origin/main    2 commits
   ● everything from the base
   000d5f8 add beta
   03a361d capitalise two
 ```
+
+It is there whenever the branch has commits of its own, and takes no more
+than a third of the window, its title included. **`H` folds it** down to its title and opens it
+again, and so does the `[-]` / `[+]` on the title; folded, the whole title is
+the button.
 
 Pick a commit and the review pane becomes that commit's own change — against
 its parent, so it reads as *what did this commit do* rather than what the
@@ -421,8 +430,7 @@ It is computed by measuring the same tree from `HEAD` instead of from the base:
 whatever shows up there is what a commit has not yet swallowed. Deletions are
 marked too, at the seam they left behind.
 
-The same mark appears in front of the file in the list, its heading says which
-kind of not-committed it is — `staged`, `uncommitted`, `part staged`,
+The file's heading says which kind of not-committed it is — `staged`, `uncommitted`, `part staged`,
 `untracked`, `deleted`, `unmerged` — and the status bar counts them:
 
 ```
@@ -701,8 +709,8 @@ agent could ask for — which is the whole reason the state is a file.
 ## Keys
 
 Every command is **one letter**, and no two commands share one. A key may act
-on whatever is under the cursor — `Space` opens a file in the list, folds one
-in the review, and unfolds a closed comment — but that is one verb reaching
+on whatever is under the cursor — `Space` folds a file in the review and
+unfolds a closed comment — but that is one verb reaching
 different objects, not a letter meaning two unrelated things.
 `TestNoTwoCommandsShareAKey` keeps it that way.
 
@@ -711,6 +719,7 @@ different objects, not a letter meaning two unrelated things.
 | `a` | approve this file | `A` | approve every file |
 | `Space` | fold this file | `F` | fold every file, or open them all |
 | `f` | hide the files that are done with | `z` | zoom the pane |
+| `H` | show the history, or hide it | | |
 | `s` | unify the diff, or split it | `S` | cross a split row, to the other side |
 | `c` | comment on this line | `r` | reply |
 | `x` | resolve / reopen | `X` | delete the conversation |
@@ -755,17 +764,16 @@ terminals that can say them.
 
 Letters also need no modifier, which sidesteps macOS: Option is not Meta there
 unless the terminal is configured for it, so an `Alt`-based scheme would arrive
-as accented characters. The only `Alt` bindings are `Alt-1` … `Alt-3` for
-jumping to a pane, `Alt-Z` for zoom, and `Alt-←` / `Alt-→` for the rule between
-the columns — and each of those has a plain key that does the same thing:
-`Tab`, `z`, and `<` / `>`.
+as accented characters. The only `Alt` bindings are `Alt-1` and `Alt-2` for
+jumping to a pane and `Alt-Z` for zoom — and each of those has a plain key that
+does the same thing: `Tab` and `z`.
 
 ### Getting about
 
 | Key | Action |
 | --- | --- |
 | `Tab`, `Shift-Tab` | Cycle focus |
-| `Alt-1` … `Alt-3` | Files, review, history |
+| `Alt-1`, `Alt-2` | Review, history |
 | `←` `↓` `↑` `→`, `h` `j` `k` `l` | Move |
 | `n` / `p` | Next / previous hunk |
 | `t` / `T` | Next / previous open conversation |
@@ -773,25 +781,26 @@ the columns — and each of those has a plain key that does the same thing:
 | `g` / `G` | The top / the bottom |
 | `24g` | Line 24 of the file the cursor is in |
 | `z` | Zoom the focused pane to the whole window |
-| `<` / `>` | Narrow / widen the left column (also `Alt-←` / `Alt-→`) |
+| `H` | Show the history under the review, or hide it |
 
-The panes form a grid, and navigation walks it:
+The window is one column:
 
 ```
-Changed Files │ Review
-──────────────┼──────────
-History       │
+Review
+──────────
+History
 ```
 
-There are three panes, not four: a comment being written is not one of them.
+There are two panes, not three: a comment being written is not one of them.
 It is a box drawn into the review at the place the comment will land, so there
-is nothing at the foot of the window to make room for.
+is nothing at the foot of the window to make room for. `Alt-2` goes to the
+history, opening it if it was folded, and `↑` off its top row comes back to the
+review.
 
-**The list on the left is a contents page for the stack on the right.** Moving
-the cursor in one moves the other, so they never disagree about where you are:
-walking down the list scrolls the review to each file's heading, and reading
-down the review walks the list along beside it. `Space` or `→` in the list
-lands in the review with that file at the top of the pane.
+**Going somewhere opens it.** A folded file has no lines on screen to land on,
+so `24g` opens the file the cursor is in before it goes to the line, and `t`
+and `T` open every folded file that still has a comment waiting before they
+look for the next one.
 
 A number typed in front of `g` or `G` goes to that line of the file the cursor
 is in, the way `24G` does in vim — counted in the file **as it now stands**,
@@ -802,8 +811,7 @@ where it was asked. The status bar shows the count as you type it, and any
 other key ends it.
 
 In the review, a line running past the right margin scrolls sideways first. `→`
-slides the code over by two tab stops, `←` slides it back, and only with the
-code against the left margin does `←` leave for the list. The line numbers and
+slides the code over by two tab stops and `←` slides it back. The line numbers and
 the `+`/`-` markers stay where they are while the code moves under them, and
 the pane title says which column it starts at.
 
@@ -826,31 +834,12 @@ merely touching the thumb would shift the pane by a row or two before you had
 done anything.
 
 The bars take their space out of the body rather than out of the pane, so the
-pane keeps its width and the text gives up the room. In the left column they
-are drawn as the thumb alone: the separator is already a rule down the edge the
-bar wants, and two rules side by side read as a border.
-
-**Under 100 columns the left column folds away** when the focus moves to the
-review: a pane taking a third of a narrow window leaves the review too tight to
-read code in, which is the one thing the window is for. `→` gives the review
-the whole width, `←` brings the list back, and the status bar says so while it
-is away.
-
-#### Moving the rule
-
-The left column is a third of the window to begin with, within reason, and
-paths are longer than that. **`>` widens it and `<` narrows it**, two columns a
-press; `Alt-→` and `Alt-←` do the same for a hand already on the arrows, and
-**dragging the rule between the columns** moves it straight to where you let go.
-The width you set is kept — resizing the window leaves the rule where you put
-it — and it stops before either pane stops being worth drawing: the review
-keeps 40 columns whatever the lists are asked for, because the review is what
-the window is for.
+pane keeps its width and the text gives up the room.
 
 **A path too long for the row is cut in the middle**, not at either end:
 
 ```
-  ○ int…/reviewview.go +120 −33 (2)
+◆  ▾ int…/reviewview.go          ◆2
 ```
 
 Which file it is lives at the end of a path and where in the tree it sits lives
@@ -862,33 +851,15 @@ as a file at the end of a path it has no room to name, where
 the name will not fit even on its own do the two ends share what there is
 between them.
 
-**The files of one directory are all cut in the same column**, so that the
-names line up:
-
-```
-each row cut for itself             cut for the column
-  ○ in…/reviewview.go +120 −33 (2)    ○ in…/reviewview.go +120 −33 (2)
-  ○ internal/ui/model.go        +4    ○ in…/model.go                +4
-  ○ internal/ui/view.go    +12 (2)    ○ in…/view.go            +12 (2)
-```
-
-A list of paths is a column of file names, and the names only form a column if
-the slash in front of them does. So a path is elided even when it would have
-fitted whole: one long name — or one wide tally, which is the same thing to the
-row it is on — moves the cut left for every file in that directory at once. A
-file with no room even for its own name is elided on its own instead, rather
-than dragging the rest of its directory down to nothing, and a directory with
-room to spare keeps its paths whole.
-
 #### Zoom
 
 `z` gives the focused pane the whole window, and `z` again hands the window
-back. A review read at full width is a different review from one read in
-two-thirds of the screen, and the history zoomed is a log. Zooming a pane also
+back. The review zoomed has the rows the history was taking, and the history
+zoomed is a log. Zooming a pane also
 moves the focus to it: with one pane on screen there is nowhere else for the
 keyboard to be, and a focus sitting on something invisible is how a window ends
 up ignoring keys for no reason anyone can see. The zoom then follows the focus,
-so `Alt-1` while zoomed hands the whole window to the file list.
+so `Alt-2` while zoomed hands the whole window to the history.
 
 `Alt-Z` does the same thing from inside the comment field, where `z` is text.
 Double clicking a pane's title zooms it too.
@@ -904,11 +875,10 @@ nothing.
 | Click a row | Focus that pane, and put the cursor on the row |
 | Click the branch name | Check out another branch |
 | Click the `from …` | Choose the base |
-| Click a `▾` | Fold that file, or open it |
-| Drag a scrollbar | Scroll the pane and focus it, without moving its cursor (on a narrow window the review's bar leaves the focus where it was, rather than fold the left column away mid-grab) |
-| Drag the rule between the columns | Widen or narrow the left column |
+| Click a file's heading | Fold that file, or open it |
+| Click `[-]` / `[+]` on the history's title | Fold the history, or open it |
+| Drag a scrollbar | Scroll the pane and focus it, without moving its cursor |
 | Wheel | Scroll whatever is under the pointer, and focus it |
-| Wheel over the files | Move to the next or previous file, and show it |
 | Wheel sideways | Slide the review across, a tab stop a tick |
 | Drag | Select text, character by character |
 | Double click | Select a word |
@@ -944,8 +914,8 @@ The scrollbars are chrome too: neither the one down a pane's right edge nor the
 one along the review's foot is selectable, and a selection running to the right
 margin stops short of the bar rather than painting over it.
 
-Dragging down the file list gives you paths, without the verdict glyphs in
-front of them. The `+`/`-` column stays in, because a range of changed lines
+A file's heading is selectable from its verdict on, so dragging over one takes
+the whole path. The `+`/`-` column stays in, because a range of changed lines
 copied without it is no longer a diff. When you want exact columns instead —
 the code with no marker at all — `Alt`-drag takes a rectangle.
 
@@ -1069,10 +1039,8 @@ Both `s` and `S` end a `V` selection. A selection is a run of *rows*, and the
 two views do not number rows alike — carrying one across would quietly change
 which lines it covered, which is worse than dropping it and saying so.
 
-Below 80 columns **the pane** — not the window; the file list and the history
-take about forty-seven columns before this one gets any, so eighty here is a
-terminal around a hundred and thirty — draws a unified diff whatever it was
-asked for. At the threshold each half is about thirty columns of code once the
+Below 80 columns the pane — which is as wide as the window — draws a unified
+diff whatever it was asked for. At the threshold each half is about thirty columns of code once the
 numbers and the markers have taken theirs, and two columns of thirty are worth
 having where two of twenty are not. It splits itself as soon as there is room,
 and `z` zooms the review pane over the whole window, which is the other way to
@@ -1198,7 +1166,6 @@ carries a comment in and out of it.
 | `internal/ui/fileview.go` | The full screen reader for a whole file, either side of the change |
 | `internal/ui/scroll.go` | Drawing the bars |
 | `internal/ui/scrollbar.go` | Taking hold of one and pulling it |
-| `internal/ui/filelist.go` | The contents page |
 | `internal/ui/commitlist.go` | The history |
 | `internal/ui/syntax.go` | Lexing a hunk and the syntax palette |
 | `internal/ui/emphasis.go` | Tabs, and finding the characters that changed |

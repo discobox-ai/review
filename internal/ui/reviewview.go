@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/discobox-ai/review/internal/git"
 	"github.com/discobox-ai/review/internal/review"
 )
@@ -446,7 +447,7 @@ func (v *reviewView) restore(a place) {
 			continue
 		}
 		// The cursor stays inside the file it was in. Folding one shortens it
-		// to two rows, and a cursor that kept its distance from the heading
+		// to its heading, and a cursor that kept its distance from the heading
 		// would land in whatever file came next — so the same key pressed
 		// twice would act on two different files.
 		last := i
@@ -476,21 +477,14 @@ func (v *reviewView) restore(a place) {
 // Building the rows
 // ---------------------------------------------------------------------------
 
-// foldHit is how much of a file's heading, in columns of content, is the
-// disclosure marker rather than the name: the glyph and the space after it.
-const foldHit = 2
-
 // minSplitWidth is the narrowest a pane can be and still be worth splitting.
 // It leaves each side about thirty columns of code once the numbers and the
 // markers have taken theirs — under that a diff has to be scrolled sideways to
 // be read twice, which is worse than reading it once.
 //
-// It is measured against the pane rather than the window, and the list and the
-// history take about forty-seven columns before this one gets any: eighty here
-// is a terminal around a hundred and thirty. That is the number this is chosen
-// against, since a review opens split and a threshold most terminals fall
-// short of would be a default nobody saw. z zooms the pane over the whole
-// window, which is the other way to find the room.
+// The pane is as wide as the window, so this is the terminal's own width: a
+// review opens split, and a threshold most terminals fell short of would be a
+// default nobody saw.
 const minSplitWidth = 80
 
 // splitting reports whether the pane is drawing side by side: asked for, and
@@ -561,7 +555,8 @@ func (v *reviewView) build() {
 		f.buildRows(split)
 		rows = append(rows, reviewRow{kind: rowFile, file: fi, line: -1})
 		if f.folded {
-			rows = append(rows, reviewRow{kind: rowGap, file: fi, line: -1})
+			// No gap under a folded file: the gap is what ends a diff, and a
+			// run of folded files with nothing between them reads as a list.
 			continue
 		}
 		mine, placed := v.draft != nil && v.draft.path == f.path, false
@@ -667,12 +662,10 @@ func (v *reviewView) mark() spot {
 // were built, and puts the reader back on the line they were on. It does
 // nothing when the width has not moved.
 //
-// The width is set by layout, which runs on a great deal more than a resize —
-// taking the focus moves it, because the left column gives up its space on a
-// narrow window. Nothing there knows about rows, and the rows decide whether
-// the diff is split, so without this a Tab on an eighty-column terminal draws
-// split rows through the unified renderer: every removal that had an addition
-// paired with it simply vanishes.
+// The width is set by layout, which knows nothing about rows, and the rows
+// decide whether the diff is split. Without this a window dragged across the
+// threshold draws split rows through the unified renderer: every removal that
+// had an addition paired with it simply vanishes.
 func (v *reviewView) reflow(s spot) {
 	if v.width == v.builtAt {
 		return
@@ -699,9 +692,8 @@ func (v *reviewView) reflow(s spot) {
 			return
 		}
 	case s.head && s.path != "":
-		// Arriving at a file puts its heading at the top of the pane, and the
-		// relay that follows must not undo that: → in the list jumps to the
-		// file before the focus moves, which is what changes the width.
+		// Arriving at a file puts its heading at the top of the pane, and
+		// laying the rows out again must not undo that.
 		if v.jumpToFile(s.path) {
 			return
 		}
@@ -1144,8 +1136,7 @@ func (v *reviewView) goToDiffLine(path string, at int) bool {
 	return true
 }
 
-// pathAt is the file the cursor is in, for keeping the list beside the pane in
-// step with what is being read.
+// pathAt is the file the cursor is in.
 func (v *reviewView) pathAt() string {
 	if f, ok := v.file(); ok {
 		return f.path
@@ -1468,11 +1459,32 @@ func (v *reviewView) render(i int, st *styles, rowW int, cursor, selected bool) 
 		}
 		return renderDiffRow(v.diffRowFor(r, st, rowW, cursor, selected))
 	}
+	if r.kind == rowFile {
+		return v.headingRow(r, st, rowW, cursor, selected)
+	}
 	chrome, used := v.chrome(r, st, rowW, cursor, selected)
 	if used >= rowW {
 		return truncateANSI(chrome, rowW)
 	}
 	return chrome + v.content(i, st, rowW-used)
+}
+
+// headingRow draws a file's heading, which is the one row that does not keep
+// to the pane's chrome: it has no line number to line up under, so it starts
+// straight after the cursor bar, verdict first — so that read down the left
+// edge, the headings are the list of what changed and where each file stands.
+func (v *reviewView) headingRow(r reviewRow, st *styles, rowW int, cursor, selected bool) string {
+	if rowW <= 0 {
+		return ""
+	}
+	bar, band := st.body, st.fileBand
+	switch {
+	case cursor:
+		bar, band = st.cursorBar, st.fileBandOn
+	case selected:
+		bar = st.selectBar
+	}
+	return bar.Render(" ") + v.fileHeader(v.files[r.file], st, band, rowW-1)
 }
 
 // chrome draws the columns in front of every non-code row. They are blank —
@@ -1490,14 +1502,7 @@ func (v *reviewView) chrome(r reviewRow, st *styles, rowW int, cursor, selected 
 	case selected:
 		bar = st.selectBar
 	}
-	fill := st.body
-	if r.kind == rowFile {
-		fill = st.fileBand
-		if cursor {
-			fill = st.fileBandOn
-		}
-	}
-	return bar.Render(" ") + fill.Render(strings.Repeat(" ", w-1)), w
+	return bar.Render(" ") + st.body.Render(strings.Repeat(" ", w-1)), w
 }
 
 // content is a row's own text, exactly avail cells wide. It is the half of the
@@ -1513,7 +1518,14 @@ func (v *reviewView) content(i int, st *styles, avail int) string {
 		if i == v.cursor {
 			style = st.fileBandOn
 		}
-		return v.fileHeader(v.files[r.file], st, style, avail)
+		// The heading starts left of where the pane's content does — see
+		// contentXAt — so it is laid out for the room it really has and then
+		// cut to the width asked for, with nothing put in place of what was
+		// cut: what is highlighted has to be the cells that are copied. The
+		// selection's grid is one width for the whole pane, so the last few
+		// columns of a heading, which run past it, cannot be dragged over.
+		lead := max(v.chromeW()-1, 0)
+		return ansi.Truncate(v.fileHeader(v.files[r.file], st, style, avail+lead), avail, "")
 	case rowThread:
 		return v.threadRow(r, st, avail)
 	case rowDraft:
@@ -1528,15 +1540,16 @@ func (v *reviewView) content(i int, st *styles, avail int) string {
 }
 
 // fileHeader is the band that starts a file's section: its name, how much it
-// changed, and every verdict standing against it.
+// changed, and every verdict standing against it. It is everything right of
+// the cursor bar, and opens with the file's verdict and then the disclosure
+// marker.
 //
 // The tail is worked out before the name, and the name gives up room to it.
 // Everything in the tail is a thing to do something about — a comment waiting
-// for an answer, an approval that has fallen — where the name is also in the
-// list beside this pane, three columns to the left. A heading that dropped its
+// for an answer, an approval that has fallen — and a heading that dropped its
 // verdicts to fit a long path would be hiding the half that matters.
 func (v *reviewView) fileHeader(f *reviewFile, st *styles, band lipgloss.Style, avail int) string {
-	fold := "▾ " // foldHit columns wide: see the click that lands on it
+	fold := "▾ "
 	if f.folded {
 		fold = "▸ "
 	}
@@ -1549,20 +1562,81 @@ func (v *reviewView) fileHeader(f *reviewFile, st *styles, band lipgloss.Style, 
 	// enough for anything at all, and only when the file has something the
 	// reader has to act on, does the name give way instead — elided from the
 	// middle, so both which file it is and where it sits survive the cut.
-	tail := f.headerTail(max(avail-width(fold+name)-2, 0))
+	verdict := f.verdict()
+	lead := verdict + "  " + fold
+
+	tail := f.headerTail(max(avail-width(lead+name)-2, 0))
 	if tail == "" && f.speaks() {
 		tail = f.headerTail(max(avail/2, 0))
 	}
 
-	left := fold + name
+	left := lead + name
 	if tail != "" {
-		left = fold + elideMiddle(name, max(avail-width(tail)-width(fold)-2, 1))
+		left = lead + elideMiddle(name, max(avail-width(tail)-width(lead)-2, 1))
 	}
-	text := left
+	text, right := left, ""
 	if tail != "" && width(left)+width(tail)+2 <= avail {
-		text = left + strings.Repeat(" ", avail-width(left)-width(tail)-1) + tail + " "
+		text += strings.Repeat(" ", avail-width(left)-width(tail)-1)
+		right = tail + " "
 	}
-	return band.Render(pad(text, avail))
+	text = pad(text, avail-width(right))
+	if !strings.HasPrefix(text, lead) {
+		return band.Render(text + right) // too narrow for the glyph to be the glyph
+	}
+	// The verdict stands in front of the band rather than on it, a space
+	// clear: on the band its colour has the band's to fight with.
+	return f.verdictStyle(st).Render(verdict) + " " +
+		band.Render(strings.TrimPrefix(text, verdict+" ")) + statInk(st, band, right)
+}
+
+// statInk draws the tail of a heading, with how much was added in green and
+// how much was removed in red — the colours those lines have further down.
+func statInk(st *styles, band lipgloss.Style, tail string) string {
+	var b strings.Builder
+	for i, word := range strings.Split(tail, " ") {
+		if i > 0 {
+			b.WriteString(band.Render(" "))
+		}
+		ink := band
+		for sign, sty := range map[string]lipgloss.Style{"+": st.statAdd, "−": st.statDel} {
+			n, signed := strings.CutPrefix(word, sign)
+			if signed && n != "" && strings.Trim(n, "0123456789") == "" {
+				ink = band.Foreground(sty.GetForeground())
+			}
+		}
+		if word != "" {
+			b.WriteString(ink.Render(word))
+		}
+	}
+	return b.String()
+}
+
+// verdict is the one glyph in front of a file's name: where the file stands
+// with the reviewer. Everything a review is trying to get to the bottom of is
+// in this column, so it is read down the headings rather than across them.
+func (f *reviewFile) verdict() string {
+	switch {
+	case f.approved:
+		return "✓"
+	case f.nullified:
+		return "◈"
+	case f.open > 0:
+		return "◆"
+	}
+	return "○"
+}
+
+// verdictStyle is the ink the verdict is drawn in.
+func (f *reviewFile) verdictStyle(st *styles) lipgloss.Style {
+	switch {
+	case f.approved:
+		return st.verdictOK
+	case f.nullified:
+		return st.verdictStale
+	case f.open > 0:
+		return st.verdictComment
+	}
+	return st.dimText
 }
 
 // speaks reports whether a file's heading has something on it the reader has

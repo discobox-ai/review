@@ -13,8 +13,7 @@ import "charm.land/bubbles/v2/key"
 // Space and F fold.
 //
 // A key may reach a different object depending on where the cursor is: Space
-// opens a file in the list, folds one in the review, and unfolds a closed
-// comment. That is one verb reaching different objects, which is not the same
+// folds a file in the review and unfolds a closed comment. That is one verb reaching different objects, which is not the same
 // as a letter meaning two unrelated things; TestNoTwoCommandsShareAKey keeps
 // the difference.
 //
@@ -37,7 +36,6 @@ type keyMap struct {
 	Post   key.Binding
 	Rescan key.Binding
 
-	FocusFiles   key.Binding
 	FocusHistory key.Binding
 	FocusReview  key.Binding
 	NextPane     key.Binding
@@ -77,8 +75,7 @@ type keyMap struct {
 	PrevFile       key.Binding
 	LessContextKey key.Binding
 	MoreContextKey key.Binding
-	WiderKey       key.Binding
-	NarrowerKey    key.Binding
+	HistoryKey     key.Binding
 
 	Up       key.Binding
 	Down     key.Binding
@@ -115,9 +112,8 @@ func newKeyMap() keyMap {
 			key.WithHelp("Ctrl-S", "post the comment")),
 		Rescan: key.NewBinding(key.WithKeys("f5"), key.WithHelp("F5", "rescan")),
 
-		FocusFiles:   key.NewBinding(key.WithKeys("alt+1"), key.WithHelp("Alt-1", "files")),
-		FocusReview:  key.NewBinding(key.WithKeys("alt+2"), key.WithHelp("Alt-2", "review")),
-		FocusHistory: key.NewBinding(key.WithKeys("alt+3"), key.WithHelp("Alt-3", "history")),
+		FocusReview:  key.NewBinding(key.WithKeys("alt+1"), key.WithHelp("Alt-1", "review")),
+		FocusHistory: key.NewBinding(key.WithKeys("alt+2"), key.WithHelp("Alt-2", "history")),
 		NextPane:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "next pane")),
 		PrevPane:     key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("Shift-Tab", "prev pane")),
 		// Alt-Z reaches zoom from inside the composer, where z is text.
@@ -183,14 +179,10 @@ func newKeyMap() keyMap {
 		PrevFile:       key.NewBinding(key.WithKeys("["), key.WithHelp("[", "previous file")),
 		LessContextKey: key.NewBinding(key.WithKeys("-"), key.WithHelp("-", "less context")),
 		MoreContextKey: key.NewBinding(key.WithKeys("=", "+"), key.WithHelp("=", "more context")),
-		// The rule between the columns. > and < point the way the rule moves,
-		// and Alt with an arrow is the same thing for a hand that reaches for
-		// the arrows — spelled out because Alt-→ is not Meta on every macOS
-		// terminal, which is why the letters are the ones the help names.
-		WiderKey: key.NewBinding(
-			key.WithKeys(">", "alt+right"), key.WithHelp(">", "widen the file list")),
-		NarrowerKey: key.NewBinding(
-			key.WithKeys("<", "alt+left"), key.WithHelp("<", "narrow the file list")),
+
+		// H rather than h, which is the arrow a vim hand uses to run the code
+		// back to the margin.
+		HistoryKey: key.NewBinding(key.WithKeys("H"), key.WithHelp("H", "show or hide the history")),
 
 		Up:       key.NewBinding(key.WithKeys("up", "k")),
 		Down:     key.NewBinding(key.WithKeys("down", "j")),

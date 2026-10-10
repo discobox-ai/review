@@ -142,13 +142,25 @@ func newTestModel(t *testing.T) Model {
 func shortTestModel(t *testing.T) Model {
 	t.Helper()
 	m := New(testRepo(t), "main", "Test")
-	return drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()())
+	return opened(drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()()))
 }
 
 func modelFor(t *testing.T, repo *git.Repo) Model {
 	t.Helper()
 	m := New(repo, "main", "Test")
-	return drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40}, m.rescanCmd()())
+	return opened(drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40}, m.rescanCmd()()))
+}
+
+// opened is a window with every file unfolded, the way a reader who has gone
+// down the headings with Space leaves it. The window opens with them all shut
+// — layout_test.go is about that — and nearly everything else here is about
+// what is inside one.
+func opened(m Model) Model {
+	for _, f := range m.view.files {
+		m.folds[f.path] = false
+	}
+	m.rebuild()
+	return m
 }
 
 // runCmd runs a command the model handed back, if there is one.
@@ -271,6 +283,11 @@ func cursorTo(t *testing.T, m Model, want func(reviewRow) bool) Model {
 // and what a reader would have to do to get there.
 func onLine(t *testing.T, m Model, path string, kind byte, text string) Model {
 	t.Helper()
+	// A file opens folded, and reading a line of one is opening it first.
+	if i, ok := m.view.byPath[path]; ok && m.view.files[i].folded {
+		m.folds[path] = false
+		m.rebuild()
+	}
 	m.view.onOld = kind == '-' && m.view.splitting()
 	return cursorTo(t, m, func(r reviewRow) bool {
 		if r.kind != rowDiff || r.file < 0 {
@@ -302,7 +319,7 @@ func TestViewRenders(t *testing.T) {
 	if strings.TrimSpace(view) == "" {
 		t.Fatal("view is empty")
 	}
-	for _, want := range []string{"Reviewing:", "feature", "Changed Files", "Review"} {
+	for _, want := range []string{"Reviewing:", "feature", "Review", "History"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view is missing %q:\n%s", want, view)
 		}
@@ -399,30 +416,6 @@ func TestFileHeadingsSayWhatIsNotCommitted(t *testing.T) {
 
 // heading is a file's band in the review, drawn wide enough to hold all of it.
 func heading(m Model, path string) string { return headingAt(m, path, 100) }
-
-// The list on the left is a contents page: moving in one moves the other.
-func TestTheListAndTheStackStayInStep(t *testing.T) {
-	m := newTestModel(t)
-	m.focus = focusFiles
-	m.files.moveTo(2) // foo.txt
-	m = drive(t, m, letterKey(" "))
-
-	if m.focus != focusReview {
-		t.Fatalf("Space in the list left the focus at %v", m.focus)
-	}
-	if got := m.view.pathAt(); got != "foo.txt" {
-		t.Errorf("the stack is showing %q, want foo.txt", got)
-	}
-	if m.view.rows[m.view.offset].kind != rowFile {
-		t.Error("the file's heading is not at the top of the pane")
-	}
-
-	// And reading down the stack brings the list along.
-	m = drive(t, m, letterKey("]"))
-	if got := m.files.currentPath(); got != m.view.pathAt() {
-		t.Errorf("list is on %q while the review is on %q", got, m.view.pathAt())
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Approving
@@ -1388,7 +1381,7 @@ func TestTabVisitsWhatIsOnScreen(t *testing.T) {
 		seen[m.focus] = true
 		m = drive(t, m, namedKey(tea.KeyTab))
 	}
-	for _, f := range []focusArea{focusFiles, focusReview, focusHistory} {
+	for _, f := range []focusArea{focusReview, focusHistory} {
 		if !seen[f] {
 			t.Errorf("Tab never reached %v", f)
 		}
@@ -1401,52 +1394,12 @@ func TestTabVisitsWhatIsOnScreen(t *testing.T) {
 func TestAltKeysJumpToPanes(t *testing.T) {
 	m := newTestModel(t)
 	for key, want := range map[string]focusArea{
-		"1": focusFiles, "2": focusReview, "3": focusHistory,
+		"1": focusReview, "2": focusHistory,
 	} {
 		m = drive(t, m, altKey(key))
 		if m.focus != want {
 			t.Errorf("Alt-%s went to %v, want %v", key, m.focus, want)
 		}
-	}
-}
-
-func TestLeftFromTheReviewGoesToTheList(t *testing.T) {
-	m := newTestModel(t)
-	m.focus = focusReview
-	m.view.hoffset = 0
-	m = drive(t, m, namedKey(tea.KeyLeft))
-	if m.focus != focusFiles {
-		t.Errorf("left went to %v, want the file list", m.focus)
-	}
-}
-
-// Under a hundred columns the left column gives up its space while the review
-// has the focus, because a review read in a third of a narrow screen is not
-// worth reading.
-func TestNarrowWindowCollapsesTheLeftColumn(t *testing.T) {
-	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 80, Height: 30})
-	m.focus = focusFiles
-	m.layout()
-	if m.leftCollapsed() {
-		t.Error("the left column folded away while it had the focus")
-	}
-	m = drive(t, m, altKey("2"))
-	if !m.leftCollapsed() {
-		t.Fatal("the left column did not fold away")
-	}
-	if strings.Contains(plain(m), "Changed Files") {
-		t.Error("the list is still drawn")
-	}
-	m = drive(t, m, namedKey(tea.KeyLeft))
-	if !strings.Contains(plain(m), "Changed Files") {
-		t.Error("left did not bring the list back")
-	}
-}
-
-func TestWideWindowKeepsBothColumns(t *testing.T) {
-	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 140, Height: 30}, altKey("2"))
-	if m.leftCollapsed() {
-		t.Error("a wide window folded the left column away")
 	}
 }
 
@@ -1994,7 +1947,7 @@ func draftRows(m Model) (first, last int, ok bool) { return m.view.draftSpan() }
 func TestTheCommentBoxIsDrawnUnderItsLine(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
-	anchor := m.view.cursor
+	anchor, height := m.view.cursor, m.view.height
 
 	m = drive(t, m, letterKey("c"))
 	first, last, ok := draftRows(m)
@@ -2028,9 +1981,8 @@ func TestTheCommentBoxIsDrawnUnderItsLine(t *testing.T) {
 	if m.rects[focusCompose].w != 0 {
 		t.Error("the composer took a pane of its own")
 	}
-	if m.view.height != max(m.height-2-1, 1) {
-		t.Errorf("the review gave up %d rows to the composer",
-			max(m.height-2-1, 1)-m.view.height)
+	if m.view.height != height {
+		t.Errorf("the review gave up %d rows to the composer", height-m.view.height)
 	}
 }
 
@@ -2072,7 +2024,7 @@ func TestTheBoxGrowsForAWrappedLine(t *testing.T) {
 	first, last, _ := draftRows(m)
 	empty := last - first + 1
 
-	long := strings.Repeat("the rest of the file is lower case, so this reads as a typo. ", 2)
+	long := strings.Repeat("the rest of the file is lower case, so this reads as a typo. ", 4)
 	m = typeText(t, m, long)
 
 	first, last, ok := draftRows(m)
@@ -2486,9 +2438,6 @@ func TestTheTalliesCountWhatIsHidden(t *testing.T) {
 	}
 	if !strings.Contains(view, "1 hidden") {
 		t.Error("the review pane does not say anything is hidden")
-	}
-	if !strings.Contains(view, "Unfinished Files") {
-		t.Error("the list does not say it is showing only some of them")
 	}
 	// The scoreboard is about the whole review either way.
 	if got := m.scoreboard(); !strings.Contains(got, "3 to read") {
@@ -3103,23 +3052,15 @@ func TestSplitBarsOnlyTheLiveHalf(t *testing.T) {
 }
 
 // A comment belongs to a line, and stays on it when the pane changes shape
-// under it. Zooming can cross the split threshold, and the rows either side of
+// under it. A resize can cross the split threshold, and the rows either side of
 // that are numbered differently — a remark keyed by a row would move to
 // whatever line took its number, which is roughly half a file away.
-func TestCommentsSurviveZoomingAcrossTheThreshold(t *testing.T) {
-	// The crossing is made by zooming, which is the path layoutZoom returns by
-	// and the reason reflow is deferred rather than called at the foot of
-	// layout. A suite whose every crossing goes through the ordinary path
-	// would still pass if that defer became a trailing call, while z on a
-	// window this size went back to drawing split rows through the unified
-	// renderer.
-	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 120, Height: 40})
-	if m.view.splitting() {
-		t.Skipf("the review pane is %d columns, split before the zoom", m.view.width)
-	}
-	m = drive(t, m, altKey("z"))
+func TestCommentsSurviveCrossingTheThreshold(t *testing.T) {
+	narrow := tea.WindowSizeMsg{Width: minSplitWidth - 10, Height: 40}
+	wide := tea.WindowSizeMsg{Width: minSplitWidth + 60, Height: 40}
+	m := drive(t, newTestModel(t), wide)
 	if !m.view.splitting() {
-		t.Fatalf("zooming to %d columns did not split the diff", m.view.width)
+		t.Fatalf("a window of %d columns did not split the diff", m.view.width)
 	}
 
 	// Written while the pane is split, which is what gives the key assertion
@@ -3129,13 +3070,12 @@ func TestCommentsSurviveZoomingAcrossTheThreshold(t *testing.T) {
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "about FOUR")
 
-	// Off and on again: the rows are renumbered each way, both times inside
-	// layoutZoom.
-	m = drive(t, m, altKey("z"))
+	// Off and on again: the rows are renumbered each way.
+	m = drive(t, m, narrow)
 	if m.view.splitting() {
 		t.Fatalf("the pane is %d columns and still split; it never crossed", m.view.width)
 	}
-	m = drive(t, m, altKey("z"))
+	m = drive(t, m, wide)
 	if !m.view.splitting() {
 		t.Fatalf("the pane is %d columns and not split; it never came back", m.view.width)
 	}
@@ -3184,100 +3124,6 @@ func TestCommentsSurviveZoomingAcrossTheThreshold(t *testing.T) {
 	above := m.view.rows[head-1]
 	if l, ok := m.view.files[above.file].rowLine(above.line); !ok || l.New != 4 {
 		t.Errorf("the conversation is drawn under %q, want under FOUR", l.Text)
-	}
-}
-
-// Zooming can cross the split threshold, and the reader keeps their line
-// across it.
-//
-// This is the one crossing that goes through layoutZoom, which returns by its
-// own path — which is why reflow is deferred from layout rather than called at
-// the foot of it. Note what does *not* break if that defer becomes a trailing
-// call: toggleZoom calls build() itself, so the rows are still laid out for
-// the new width and the diff still draws correctly. What is lost is the
-// reader's place, so that is what this has to assert.
-func TestZoomingAcrossTheThresholdKeepsTheLine(t *testing.T) {
-	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 120, Height: 40})
-	if m.view.splitting() {
-		t.Skipf("the review pane is %d columns, split before the zoom", m.view.width)
-	}
-	m = onLine(t, m, "foo.txt", '+', "FOUR")
-
-	m = drive(t, m, altKey("z"))
-	if !m.view.splitting() {
-		t.Fatalf("zooming to %d columns did not split the diff", m.view.width)
-	}
-	if _, l, ok := m.view.line(); !ok || l.New != 4 || l.Kind != '+' {
-		t.Errorf("the zoom moved the cursor to %+v, want +FOUR", l)
-	}
-
-	// And back the other way, out of split into unified.
-	m = drive(t, m, altKey("z"))
-	if m.view.splitting() {
-		t.Fatalf("unzooming to %d columns did not unify the diff", m.view.width)
-	}
-	if _, l, ok := m.view.line(); !ok || l.New != 4 || l.Kind != '+' {
-		t.Errorf("the unzoom moved the cursor to %+v, want +FOUR", l)
-	}
-
-	// The other door into layoutZoom: taking the focus while zoomed. Zoom the
-	// file list, then come back to the review — setFocus reaches layoutZoom's
-	// review case and hands the pane the full width, and setFocus does not
-	// build. Only the relay in layout covers this one.
-	m = drive(t, m, altKey("1"), altKey("z"))
-	if !m.zoom {
-		t.Fatal("the file list did not zoom")
-	}
-	m = drive(t, m, altKey("2"))
-	if !m.view.splitting() {
-		t.Fatalf("the zoomed review pane is %d columns and not split", m.view.width)
-	}
-	if m.view.builtAt != m.view.width {
-		t.Errorf("rows built for %d columns, pane is %d — nothing laid them out again",
-			m.view.builtAt, m.view.width)
-	}
-	// The pairing, not merely the presence. Rows laid out at 79 and drawn
-	// split read rowRef{5,5} and put line 5 in both halves, so the row says
-	// "-four │ -four" and FOUR appears nowhere on it — a check that -four is
-	// on the screen somewhere is satisfied by the corruption itself.
-	row := ""
-	for _, l := range strings.Split(plain(m), "\n") {
-		if strings.Contains(l, "-four") {
-			row = l
-			break
-		}
-	}
-	if row == "" {
-		t.Fatalf("the removed line is not drawn at all:\n%s", plain(m))
-	}
-	if !strings.Contains(row, "FOUR") {
-		t.Errorf("the row holding -four does not hold FOUR beside it: %q", row)
-	}
-}
-
-// The rows are laid out for a particular width, and taking the focus changes
-// it: the left column gives up its space on a narrow window. Rows built for
-// one view and drawn through the other are not a cosmetic problem — split rows
-// drawn unified lose every removal that had an addition paired with it.
-func TestChangingFocusRelaysTheRows(t *testing.T) {
-	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 95, Height: 40})
-	m = drive(t, m, altKey("2"))
-	wide, rows := m.view.splitting(), len(m.view.rows)
-
-	m = drive(t, m, altKey("1"))
-	if m.view.splitting() == wide {
-		t.Skipf("the focus does not cross the threshold at this width (pane %d)", m.view.width)
-	}
-	if len(m.view.rows) == rows {
-		t.Errorf("splitting() flipped %v→%v but the %d rows were not laid out again",
-			wide, m.view.splitting(), rows)
-	}
-	if m.view.builtAt != m.view.width {
-		t.Errorf("rows built for %d columns, pane is %d", m.view.builtAt, m.view.width)
-	}
-	// Whatever it drew, every removed line is still on the screen.
-	if view := plain(m); !strings.Contains(view, "-two") {
-		t.Errorf("the removed line is not drawn after the focus moved:\n%s", view)
 	}
 }
 
@@ -3341,7 +3187,7 @@ func TestTheTitleNamesTheSideThatWillBeActedOn(t *testing.T) {
 // opposite of what was asked for.
 func TestTheHintFollowsThePreferenceNotTheDrawing(t *testing.T) {
 	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 70, Height: 30})
-	m = drive(t, m, altKey("2"))
+	m = drive(t, m, altKey("1"))
 	if m.view.splitting() {
 		t.Skipf("the review pane is %d columns, wide enough to split", m.view.width)
 	}
@@ -3357,42 +3203,6 @@ func TestTheHintFollowsThePreferenceNotTheDrawing(t *testing.T) {
 	}
 }
 
-// Arriving at a file from the list lands on its heading, even when arriving is
-// what changes the pane's width.
-//
-// The left column gives up its space on a narrow window, so → both jumps to
-// the file and moves the focus — and the jump happens first, against the rows
-// as they were. Relaying them without carrying the reader across leaves the
-// cursor holding a row number that now means a different line, and on a longer
-// review a different file.
-func TestArrivingAtAFileLandsOnItsHeading(t *testing.T) {
-	for i := 0; i < 4; i++ {
-		m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 95, Height: 40})
-		m = drive(t, m, altKey("1"))
-		if i >= len(m.files.entries) {
-			break
-		}
-		m.files.moveTo(i)
-		want := m.files.currentPath()
-		before := m.view.splitting()
-
-		m = drive(t, m, namedKey(tea.KeyRight))
-		if m.view.splitting() == before {
-			t.Skipf("→ does not cross the split threshold at this width (pane %d)", m.view.width)
-		}
-		r, ok := m.view.row()
-		if !ok || r.file < 0 {
-			t.Fatalf("[%s] the cursor is nowhere after →", want)
-		}
-		if got := m.view.files[r.file].path; got != want {
-			t.Errorf("→ on %s landed in %s", want, got)
-		}
-		if r.kind != rowFile {
-			t.Errorf("→ on %s landed on a %v, want its heading", want, r.kind)
-		}
-	}
-}
-
 // A resize keeps the reader on the line, and on the side of the diff it is
 // numbered on: crossing the threshold must not slide the cursor off a removed
 // line onto the addition that replaced it.
@@ -3403,9 +3213,9 @@ func TestResizingKeepsTheLineAndItsSide(t *testing.T) {
 	// onOld itself and the carry would write true over true — the side would
 	// ride along whether or not anything carried it, and this test would pass
 	// with the carry deleted.
-	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 100, Height: 40})
+	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: minSplitWidth - 10, Height: 40})
 	if m.view.splitting() {
-		t.Skipf("the review pane is %d columns, already split", m.view.width)
+		t.Fatalf("the review pane is %d columns and already split", m.view.width)
 	}
 	m = onLine(t, m, "foo.txt", '-', "four")
 	if m.view.onOld {
@@ -3430,7 +3240,7 @@ func TestResizingKeepsTheLineAndItsSide(t *testing.T) {
 	}
 
 	// And back down again.
-	m = drive(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = drive(t, m, tea.WindowSizeMsg{Width: minSplitWidth - 10, Height: 40})
 	if _, l, ok := m.view.line(); !ok || l.Kind != '-' || !strings.Contains(l.Text, "four") {
 		t.Errorf("narrowing moved the cursor to %+v, want -four", l)
 	}
@@ -3616,7 +3426,7 @@ func TestSpaceOnAnOpenCommentDoesNotReply(t *testing.T) {
 // soon as there is room.
 func TestSplitWaitsForTheRoom(t *testing.T) {
 	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 70, Height: 30})
-	m = drive(t, m, altKey("2"))
+	m = drive(t, m, altKey("1"))
 	if m.view.width >= minSplitWidth {
 		t.Skipf("the review pane is %d columns, wide enough to split", m.view.width)
 	}
@@ -3883,9 +3693,8 @@ func TestChoosingACommitAsTheBase(t *testing.T) {
 
 // Git lists the tracked files in path order and discobox-review appends the untracked
 // ones, so a new file arrives at the end of the diff however its name reads.
-// The review sorts them back together, and because the contents page is built
-// from the same slice as the stack, the two panes agree on the order.
-func TestFilesAreSortedByPathInBothPanes(t *testing.T) {
+// The review sorts them back together.
+func TestFilesAreSortedByPath(t *testing.T) {
 	var b strings.Builder
 	// The order they arrive in: the tracked files in path order, then the
 	// untracked ones appended however git listed them.
@@ -3901,13 +3710,5 @@ func TestFilesAreSortedByPathInBothPanes(t *testing.T) {
 	want := []string{"aardvark.go", "internal/aaa.go", "internal/mid.go", "zz/last.go"}
 	if !slices.Equal(got, want) {
 		t.Errorf("the stack is in %v, want %v", got, want)
-	}
-
-	var listed []string
-	for _, e := range entriesFor(files) {
-		listed = append(listed, e.path)
-	}
-	if !slices.Equal(listed, got) {
-		t.Errorf("the file list is in %v, the stack in %v", listed, got)
 	}
 }

@@ -6,10 +6,6 @@ import "github.com/charmbracelet/x/ansi"
 // where on screen it starts. See [selectable] for what the two coordinate
 // spaces are and why they differ.
 
-// listIndent is the chrome the file list draws before a path: a space, the
-// "not committed" column, the verdict glyph, and the space after it.
-const listIndent = 4
-
 // commitIndent is the history's indent. The hash is content — it is most of
 // the reason to copy a line out of that pane — so only the two spaces in front
 // of it are chrome.
@@ -30,6 +26,17 @@ type reviewSel struct {
 
 func (s reviewSel) contentX() int {
 	return min(s.v.chromeW(), max(s.v.rowW(), 0))
+}
+
+// contentXAt is where one row's content starts. A file's heading is the row
+// that breaks the rule above: it has no line number, so it starts straight
+// after the cursor bar, and its name has to be reachable from there to be
+// copied whole.
+func (s reviewSel) contentXAt(line int) int {
+	if line >= 0 && line < len(s.v.rows) && s.v.rows[line].kind == rowFile {
+		return min(1, max(s.v.rowW(), 0))
+	}
+	return s.contentX()
 }
 
 // The width is the row's, not the pane's: the vertical scrollbar has already
@@ -61,33 +68,6 @@ func (s reviewSel) contentRow(line int) string {
 			s.v.diffRowFor(r, s.st, s.v.rowW(), false, false), s.contentWidth())
 	}
 	return s.v.content(line, s.st, s.contentWidth())
-}
-
-// listSel is the file list's content: the path and its tally, without the
-// verdict glyph in front of them, so that dragging down the list yields paths
-// rather than a column of ticks.
-type listSel struct{ l *fileList }
-
-// rowW is how wide a row is drawn, once the scrollbar has taken its column.
-func (s listSel) rowW() int {
-	if s.l.scrolls() {
-		return max(s.l.width-1, 0)
-	}
-	return max(s.l.width, 0)
-}
-
-func (s listSel) contentX() int            { return min(listIndent, max(s.rowW(), 0)) }
-func (s listSel) contentWidth() int        { return max(s.rowW()-s.contentX(), 0) }
-func (s listSel) contentLines() (int, int) { return 0, len(s.l.entries) }
-func (s listSel) contentOffset() int       { return s.l.offset }
-func (s listSel) contentRows() int         { return s.l.height }
-
-func (s listSel) contentRow(line int) string {
-	if line < 0 || line >= len(s.l.entries) {
-		return ""
-	}
-	_, body := s.l.row(line, s.rowW())
-	return pad(body, s.contentWidth())
 }
 
 // commitsSel is the history's content: the hash and the subject.

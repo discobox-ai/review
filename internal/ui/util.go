@@ -90,3 +90,54 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// elideMiddle shortens a path from the middle, keeping both ends. Which file
+// it is lives at the end of a path and where in the tree it sits lives at the
+// front, so a cut at either end throws one of those away; the part a reader
+// can fill in is the run of directories between them.
+//
+// The cut is made at a slash whenever there is room for the name it stands in
+// front of, so what follows the ellipsis is a whole path segment:
+//
+//	internal/ui/filelist.go  →  inter…/filelist.go
+//
+// "inter…/filelist.go" reads as a file at the end of a path it does not have
+// room to name, where "inter…filelist.go" reads as a name with a hole in the
+// middle of it. Only when the name will not fit even on its own do the two
+// ends fall back to sharing what there is between them.
+func elideMiddle(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if width(s) <= w {
+		return s
+	}
+	if w == 1 {
+		return "…"
+	}
+	runes := []rune(s)
+
+	// Where the tail starts. The slash goes with the name, and w-2 leaves the
+	// ellipsis its column and the front at least one of its own.
+	tail := len(runes)
+	if i := strings.LastIndexByte(s, '/'); i >= 0 && width(s[i:]) <= w-2 {
+		tail = len([]rune(s[:i]))
+	} else {
+		for used, tailW := 0, w/2; tail > 0; tail-- {
+			if used += runewidth.RuneWidth(runes[tail-1]); used > tailW {
+				break
+			}
+		}
+	}
+
+	// The front takes whatever the tail leaves. It always stops short of the
+	// tail: a name that fitted whole was never elided in the first place.
+	headW := w - 1 - width(string(runes[tail:]))
+	head := 0
+	for used := 0; head < tail; head++ {
+		if used += runewidth.RuneWidth(runes[head]); used > headW {
+			break
+		}
+	}
+	return string(runes[:head]) + "…" + string(runes[tail:])
+}

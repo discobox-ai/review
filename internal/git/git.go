@@ -58,9 +58,6 @@ func (r *Repo) run(args ...string) (string, error) {
 	return r.sys.Git(r.Dir, nil, args...)
 }
 
-// Name is the repository name shown in the window title.
-func (r *Repo) Name() string { return filepath.Base(r.Dir) }
-
 // DefaultContext is how many lines of context a diff is taken with unless
 // something says otherwise. It is git's own default of three widened a little:
 // a review is read to be understood rather than applied, and the two lines

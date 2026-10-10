@@ -7,7 +7,7 @@ import (
 	"github.com/discobox-ai/review/internal/git"
 )
 
-// commitList is the pane at the bottom left: the commits this branch has made
+// commitList is the strip under the review: the commits this branch has made
 // since the base, newest first, under a first row standing for the review as a
 // whole.
 //
@@ -23,6 +23,16 @@ type commitList struct {
 	offset  int
 	width   int
 	height  int
+
+	// button is drawn in front of the title when the pane can be folded to
+	// it: "[-] " while it is open and "[+] " while it is shut. See buttonHit.
+	button string
+}
+
+// buttonHit reports whether a column of the title, counted from the pane's
+// left edge, is on the button. The title style pads one cell first.
+func (l *commitList) buttonHit(x int) bool {
+	return l.button != "" && x >= 1 && x < width(l.button)
 }
 
 func newCommitList() *commitList { return &commitList{} }
@@ -138,7 +148,10 @@ func (l *commitList) view(st *styles, focused bool) string {
 	if l.base != "" {
 		name = "History from " + l.base
 	}
-	title := renderTitle(titleStyle, name, count, l.width)
+	title := renderTitle(titleStyle, l.button+name, count, l.width)
+	if l.height <= 0 {
+		return title // folded to its title
+	}
 
 	// The bar takes its column out of the rows, never out of the title, so the
 	// pane keeps its width and the subjects give up the room.
@@ -168,7 +181,7 @@ func (l *commitList) view(st *styles, focused bool) string {
 		rows = append(rows, strings.Repeat(" ", max(rowW, 0)))
 	}
 	if bar {
-		attachVScroll(st, rows, blankTrack, l.rows(), l.offset, l.maxOffset())
+		attachVScroll(st, rows, vertTrack, l.rows(), l.offset, l.maxOffset())
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, append([]string{title}, rows...)...)
 }

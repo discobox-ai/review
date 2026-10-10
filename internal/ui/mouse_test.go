@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/discobox-ai/review/internal/git"
 )
 
 // bigReview fills the review pane with more rows than fit, so that the
@@ -30,6 +31,7 @@ func bigReview(t *testing.T, m *Model, lines int) {
 		m.workBy[f.path] = f
 	}
 	m.commit = ""
+	m.folds["big.txt"] = false // a file opens folded, and this one is for scrolling
 	m.rebuild()
 	if len(m.view.rows) <= m.view.bodyRows() {
 		t.Fatalf("%d rows is not more than the %d on screen",
@@ -122,7 +124,7 @@ func contentPoint(t *testing.T, m Model, f focusArea, row, col int) (int, int) {
 	if r.w == 0 {
 		t.Fatalf("pane %v is not on screen", f)
 	}
-	return r.x + p.contentX() + col, r.y + 1 + row
+	return r.x + contentXAt(p, p.contentOffset()+row) + col, r.y + 1 + row
 }
 
 // firstDiffRow is the screen row of the first line of diff on show, which is
@@ -138,11 +140,31 @@ func firstDiffRow(t *testing.T, m Model) int {
 	return 0
 }
 
-// listRowText is what a row of the file list holds once the chrome in front of
+// headLead is how much of a heading comes before the name: the file's verdict
+// and the space after it, then the band's own margin, the disclosure marker
+// and the space after that.
+const headLead = 5
+
+// histRowText is what a row of the history holds once the indent in front of
 // it is taken off, which is what dragging over it copies.
-func listRowText(m Model, i int) string {
-	_, body := m.files.row(i, listSel{m.files}.rowW())
-	return strings.TrimRight(body, " ")
+func histRowText(m Model, i int) string { return m.history.rowBody(i) }
+
+// longHistory gives the branch more commits than the strip under the review
+// can show, which is when it wears a scrollbar.
+func longHistory(t *testing.T, m *Model, n int) {
+	t.Helper()
+	commits := make([]git.Commit, n)
+	for i := range commits {
+		commits[i] = git.Commit{
+			Hash: fmt.Sprintf("%040d", i), Short: fmt.Sprintf("%07d", i),
+			Subject: fmt.Sprintf("commit number %d", i),
+		}
+	}
+	m.history.setCommits(commits)
+	m.layout()
+	if !m.history.scrolls() {
+		t.Fatal("the history should want a scrollbar")
+	}
 }
 
 // Where a pane is drawn and where it is clicked come out of the same
@@ -176,7 +198,7 @@ func TestPaneRectsMatchWhereThePanesAreDrawn(t *testing.T) {
 				f, r.y, r.x, r.x+r.w, got, want)
 		}
 	}
-	if seen < 3 {
+	if seen < 2 {
 		t.Fatalf("only %d panes had rectangles; the layout was not measured", seen)
 	}
 }
@@ -185,27 +207,25 @@ func TestPaneRectsMatchWhereThePanesAreDrawn(t *testing.T) {
 // lands on the row that was clicked.
 func TestClickFocusesThePaneAndTheRow(t *testing.T) {
 	m := newTestModel(t)
-	if len(m.files.entries) < 2 {
-		t.Fatalf("need two files, got %v", pathsOf(m))
+	if m.history.rows() < 2 {
+		t.Fatalf("need a commit to click, got %d rows of history", m.history.rows())
 	}
-	// Start somewhere else, so the click has to move the focus.
-	m = drive(t, m, altKey("2"))
 	if m.focus != focusReview {
 		t.Fatalf("focus = %v, want the review", m.focus)
 	}
 
-	x, y := contentPoint(t, m, focusFiles, 1, 0)
+	x, y := contentPoint(t, m, focusHistory, 1, 0)
 	m = drive(t, m, pressAt(x, y))
 
-	if m.focus != focusFiles {
-		t.Errorf("focus = %v, want the file list", m.focus)
+	if m.focus != focusHistory {
+		t.Errorf("focus = %v, want the history", m.focus)
 	}
-	if m.files.cursor != 1 {
-		t.Errorf("cursor = %d, want the row that was clicked (1)", m.files.cursor)
+	if m.history.cursor != 1 {
+		t.Errorf("cursor = %d, want the row that was clicked (1)", m.history.cursor)
 	}
-	// And clicking a file is asking to see it.
-	if got := m.view.pathAt(); got != m.files.currentPath() {
-		t.Errorf("the review is showing %q, want %q", got, m.files.currentPath())
+	// And clicking a commit is asking to read it.
+	if c, ok := m.history.selected(); !ok || m.commit != c.Hash {
+		t.Errorf("the review is on %q, want the commit that was clicked", m.commit)
 	}
 }
 
@@ -214,7 +234,7 @@ func TestClickFocusesThePaneAndTheRow(t *testing.T) {
 func TestAPlainClickSelectsNothing(t *testing.T) {
 	captureClipboard(t)
 	m := newTestModel(t)
-	x, y := contentPoint(t, m, focusFiles, 0, 0)
+	x, y := contentPoint(t, m, focusHistory, 0, 0)
 	m = drive(t, m, pressAt(x, y), releaseAt(x, y))
 	if m.mouse.hasSelection() {
 		t.Error("a click with no drag left a selection behind")
@@ -305,48 +325,21 @@ func TestDragOverASplitRowCopiesTheHalfUnderIt(t *testing.T) {
 	}
 }
 
-// Dragging down the file list copies paths, not the verdict glyph and the
-// uncommitted margin drawn in front of them.
-func TestDragOverTheFileListCopiesPaths(t *testing.T) {
-	m := newTestModel(t)
-	clip := captureClipboard(t)
-	if len(m.files.entries) < 2 {
-		t.Fatalf("need two files, got %v", pathsOf(m))
-	}
-
-	x, y := contentPoint(t, m, focusFiles, 0, 0)
-	endX, endY := contentPoint(t, m, focusFiles, 1, m.files.width)
-	m = drive(t, m, pressAt(x, y), dragTo(endX, endY), releaseAt(endX, endY))
-
-	want := listRowText(m, 0) + "\n" + listRowText(m, 1)
-	got := copied(t, clip.String())
-	if got != want {
-		t.Errorf("copied %q, want %q", got, want)
-	}
-	if strings.ContainsAny(got, "✓○◆◈") {
-		t.Errorf("the copy picked up the verdict column: %q", got)
-	}
-}
-
 // Two presses on the same cell inside the double click window take the whole
 // word under them, however far it runs past where the pointer stopped.
 func TestDoubleClickSelectsAWord(t *testing.T) {
 	m := newTestModel(t)
 	clip := captureClipboard(t)
 
-	name := m.files.entries[0].path
-	if len(name) < 3 {
-		t.Fatalf("path %q is too short to click into", name)
-	}
-	x, y := contentPoint(t, m, focusFiles, 0, 1)
+	// The row standing for the whole review: "● everything from the base".
+	x, y := contentPoint(t, m, focusHistory, workingRow, 4)
 	m = drive(t, m, pressAt(x, y), releaseAt(x, y), pressAt(x, y), releaseAt(x, y))
 
 	if !m.mouse.hasSelection() {
 		t.Fatal("the double click selected nothing")
 	}
-	// The default word characters keep a dotted filename in one piece.
-	if got := copied(t, clip.String()); got != name {
-		t.Errorf("copied %q, want the whole word %q", got, name)
+	if got := copied(t, clip.String()); got != "everything" {
+		t.Errorf("copied %q, want the whole word %q", got, "everything")
 	}
 }
 
@@ -355,13 +348,13 @@ func TestTripleClickSelectsALine(t *testing.T) {
 	m := newTestModel(t)
 	clip := captureClipboard(t)
 
-	x, y := contentPoint(t, m, focusFiles, 0, 1)
+	x, y := contentPoint(t, m, focusHistory, workingRow, 4)
 	m = drive(t, m,
 		pressAt(x, y), releaseAt(x, y),
 		pressAt(x, y), releaseAt(x, y),
 		pressAt(x, y), releaseAt(x, y),
 	)
-	if got, want := copied(t, clip.String()), listRowText(m, 0); got != want {
+	if got, want := copied(t, clip.String()), histRowText(m, workingRow); got != want {
 		t.Errorf("copied %q, want the whole line %q", got, want)
 	}
 }
@@ -373,8 +366,8 @@ func TestSelectionIsPaintedWithoutChangingTheLayout(t *testing.T) {
 	m := newTestModel(t)
 	before := m.frame()
 
-	x, y := contentPoint(t, m, focusFiles, 0, 0)
-	endX, _ := contentPoint(t, m, focusFiles, 0, 5)
+	x, y := contentPoint(t, m, focusHistory, 0, 0)
+	endX, _ := contentPoint(t, m, focusHistory, 0, 5)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y))
 	after := m.frame()
 
@@ -399,9 +392,9 @@ func TestSelectionIsPaintedWithoutChangingTheLayout(t *testing.T) {
 // leaving the cursor where it was.
 func TestWheelScrollsAndFocusesThePane(t *testing.T) {
 	m := newTestModel(t)
-	m = drive(t, m, altKey("1"))
-	if m.focus != focusFiles {
-		t.Fatalf("focus = %v, want the file list", m.focus)
+	m = drive(t, m, altKey("2"))
+	if m.focus != focusHistory {
+		t.Fatalf("focus = %v, want the history", m.focus)
 	}
 	bigReview(t, &m, 200)
 
@@ -420,10 +413,10 @@ func TestWheelScrollsAndFocusesThePane(t *testing.T) {
 	}
 
 	// Going back to a pane with the wheel works the same way.
-	f := m.rects[focusFiles]
-	m = drive(t, m, wheelAt(f.x+2, f.y+2, false))
-	if m.focus != focusFiles {
-		t.Errorf("focus = %v after the wheel over the files, want the file list", m.focus)
+	h := m.rects[focusHistory]
+	m = drive(t, m, wheelAt(h.x+2, h.y+2, false))
+	if m.focus != focusHistory {
+		t.Errorf("focus = %v after the wheel over the history, want the history", m.focus)
 	}
 
 	// Coming back keeps scrolling from wherever the review was, rather than
@@ -433,105 +426,6 @@ func TestWheelScrollsAndFocusesThePane(t *testing.T) {
 	if m.view.offset != before+2*wheelLines {
 		t.Errorf("review offset = %d after two more ticks, want %d",
 			m.view.offset, before+2*wheelLines)
-	}
-}
-
-// Wheeling over the file list leafs through the files: each tick moves the
-// cursor one file and shows it in the review, the way up and down do.
-func TestWheelOverTheFilesMovesTheCursor(t *testing.T) {
-	m := newTestModel(t)
-	if len(m.files.entries) < 3 {
-		t.Fatalf("need three files, got %v", pathsOf(m))
-	}
-	m = drive(t, m, altKey("2"))
-
-	r := m.rects[focusFiles]
-	m = drive(t, m, wheelAt(r.x+2, r.y+2, false), wheelAt(r.x+2, r.y+2, false))
-	if m.focus != focusFiles {
-		t.Errorf("focus = %v, want the file list", m.focus)
-	}
-	if m.files.cursor != 2 {
-		t.Errorf("cursor = %d after two ticks down, want 2", m.files.cursor)
-	}
-	if got := m.view.pathAt(); got != m.files.currentPath() {
-		t.Errorf("the review is showing %q, want %q", got, m.files.currentPath())
-	}
-
-	m = drive(t, m, wheelAt(r.x+2, r.y+2, true))
-	if m.files.cursor != 1 {
-		t.Errorf("cursor = %d after a tick back up, want 1", m.files.cursor)
-	}
-	// And the list stops at its ends rather than wrapping.
-	m = drive(t, m, wheelAt(r.x+2, r.y+2, true), wheelAt(r.x+2, r.y+2, true))
-	if m.files.cursor != 0 {
-		t.Errorf("cursor = %d past the top, want 0", m.files.cursor)
-	}
-}
-
-// On a narrow window the left column folds away while the review has the
-// focus, so wheeling the focus onto the review has to lay the window out
-// again: otherwise the clicks still land on a file list that is no longer
-// drawn.
-func TestWheelOntoTheReviewFoldsANarrowWindow(t *testing.T) {
-	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 80, Height: 30}, altKey("1"))
-	if m.leftCollapsed() {
-		t.Fatal("the left column is folded with the focus on the files")
-	}
-	r := m.rects[focusReview]
-	m = drive(t, m, wheelAt(r.x+2, r.y+3, false))
-
-	if m.focus != focusReview {
-		t.Fatalf("focus = %v, want the review", m.focus)
-	}
-	if got := m.rects[focusReview]; got.x != 0 || got.w != m.width {
-		t.Errorf("review drawn at %+v, want the whole width from x=0", got)
-	}
-	if f, _, _, _ := m.hit(2, r.y+3); f != focusReview {
-		t.Errorf("a point at the left edge hits %v, want the review", f)
-	}
-}
-
-// Pressing the review's bar on a narrow window does not fold the left column
-// under the pointer: the fold would move the bar, and a press on the thumb
-// would land on the track and jump the pane.
-func TestGrabbingABarOnANarrowWindowKeepsTheColumn(t *testing.T) {
-	m := drive(t, newTestModel(t), tea.WindowSizeMsg{Width: 80, Height: 30})
-	bigReview(t, &m, 400)
-	m = drive(t, m, altKey("1"))
-	b, ok := m.vbar(focusReview)
-	if !ok {
-		t.Fatal("the review is not wearing a vertical bar")
-	}
-	m = drive(t, m, pressAt(b.pos, b.lo))
-
-	if m.view.offset != 0 {
-		t.Errorf("offset = %d after pressing the thumb, want 0", m.view.offset)
-	}
-	if m.leftCollapsed() {
-		t.Error("pressing the bar folded the left column")
-	}
-	if m.bar == nil || m.bar.pane != focusReview {
-		t.Errorf("bar = %+v, want the review's held", m.bar)
-	}
-}
-
-// Wheeling past the last file leaves the review alone: an overshoot must not
-// pull the reader back to the top of the file they are in.
-func TestWheelPastTheLastFileKeepsTheReviewsPlace(t *testing.T) {
-	m := newTestModel(t)
-	r := m.rects[focusFiles]
-	m = drive(t, m, altKey("1"))
-	m.files.moveTo(len(m.files.entries) - 1)
-	m.view.jumpToFile(m.files.currentPath())
-	m.view.move(1)
-	cursor := m.view.cursor
-
-	m = drive(t, m, wheelAt(r.x+2, r.y+2, false))
-	if m.files.cursor != len(m.files.entries)-1 {
-		t.Fatalf("cursor = %d, want the last file", m.files.cursor)
-	}
-	if m.view.cursor != cursor {
-		t.Errorf("review cursor = %d after an overshoot, want it left at %d", m.view.cursor, cursor)
 	}
 }
 
@@ -562,8 +456,8 @@ func TestRightClickCopiesTheSelection(t *testing.T) {
 	m := newTestModel(t)
 	clip := captureClipboard(t)
 
-	x, y := contentPoint(t, m, focusFiles, 0, 0)
-	endX, _ := contentPoint(t, m, focusFiles, 0, 4)
+	x, y := contentPoint(t, m, focusHistory, 0, 0)
+	endX, _ := contentPoint(t, m, focusHistory, 0, 4)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y), releaseAt(endX, y))
 	clip.Reset()
 
@@ -581,8 +475,8 @@ func TestRightClickCopiesTheSelection(t *testing.T) {
 func TestEscapeDropsTheSelection(t *testing.T) {
 	captureClipboard(t)
 	m := newTestModel(t)
-	x, y := contentPoint(t, m, focusFiles, 0, 0)
-	endX, _ := contentPoint(t, m, focusFiles, 0, 4)
+	x, y := contentPoint(t, m, focusHistory, 0, 0)
+	endX, _ := contentPoint(t, m, focusHistory, 0, 4)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y), releaseAt(endX, y))
 	if !m.mouse.hasSelection() {
 		t.Fatal("the drag left no selection")
@@ -598,8 +492,8 @@ func TestEscapeDropsTheSelection(t *testing.T) {
 func TestRescanDropsTheSelection(t *testing.T) {
 	captureClipboard(t)
 	m := newTestModel(t)
-	x, y := contentPoint(t, m, focusFiles, 0, 0)
-	endX, _ := contentPoint(t, m, focusFiles, 0, 4)
+	x, y := contentPoint(t, m, focusHistory, 0, 0)
+	endX, _ := contentPoint(t, m, focusHistory, 0, 4)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y), releaseAt(endX, y))
 	if !m.mouse.hasSelection() {
 		t.Fatal("the drag left no selection")
@@ -615,8 +509,8 @@ func TestRescanDropsTheSelection(t *testing.T) {
 func TestResizeDropsTheSelection(t *testing.T) {
 	captureClipboard(t)
 	m := newTestModel(t)
-	x, y := contentPoint(t, m, focusFiles, 0, 0)
-	endX, _ := contentPoint(t, m, focusFiles, 0, 4)
+	x, y := contentPoint(t, m, focusHistory, 0, 0)
+	endX, _ := contentPoint(t, m, focusHistory, 0, 4)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y), releaseAt(endX, y))
 	if !m.mouse.hasSelection() {
 		t.Fatal("the drag left no selection")
@@ -706,37 +600,27 @@ func TestHorizontalWheelScrollsTheReview(t *testing.T) {
 func TestTheScrollbarIsNotSelectable(t *testing.T) {
 	clip := captureClipboard(t)
 	m := newTestModel(t)
+	longHistory(t, &m, 60)
 
-	// A list long enough to want a bar.
-	entries := make([]fileEntry, 60)
-	for i := range entries {
-		entries[i] = fileEntry{path: fmt.Sprintf("file%02d.txt", i), adds: 1}
-	}
-	m.files.setEntries(entries)
-	m.layout()
-	if !m.files.scrolls() {
-		t.Fatal("the list should want a scrollbar")
-	}
-
-	p := listSel{m.files}
-	if got, want := p.rowW(), m.files.width-1; got != want {
+	p := commitsSel{m.history}
+	if got, want := p.rowW(), m.history.width-1; got != want {
 		t.Errorf("row width = %d, want %d with a bar", got, want)
 	}
-	if p.contentX()+p.contentWidth() > m.files.width-1 {
+	if p.contentX()+p.contentWidth() > m.history.width-1 {
 		t.Errorf("content runs to column %d, into the bar at %d",
-			p.contentX()+p.contentWidth(), m.files.width-1)
+			p.contentX()+p.contentWidth(), m.history.width-1)
 	}
 
 	// Drag the whole first row and check the bar survives the highlight.
-	x, y := contentPoint(t, m, focusFiles, 0, 0)
-	endX, _ := contentPoint(t, m, focusFiles, 0, p.contentWidth()+10)
+	x, y := contentPoint(t, m, focusHistory, 0, 0)
+	endX, _ := contentPoint(t, m, focusHistory, 0, p.contentWidth()+10)
 	m = drive(t, m, pressAt(x, y), dragTo(endX, y), releaseAt(endX, y))
 
 	if got := copied(t, clip.String()); strings.ContainsAny(got, "█│") {
 		t.Errorf("the copy picked up the scrollbar: %q", got)
 	}
-	rows := strings.Split(m.viewPane(focusFiles), "\n")
-	if w, want := ansi.StringWidth(rows[1]), m.files.width; w != want {
+	rows := strings.Split(m.viewPane(focusHistory), "\n")
+	if w, want := ansi.StringWidth(rows[1]), m.history.width; w != want {
 		t.Errorf("highlighted row is %d columns, want %d — the bar was truncated", w, want)
 	}
 }
@@ -855,7 +739,7 @@ func TestClickingTheViewModeTogglesIt(t *testing.T) {
 // zooms the pane. Only the word that names a choice is a button.
 func TestClickingTheRestOfTheTitleStillFocuses(t *testing.T) {
 	m := newTestModel(t)
-	m.focus = focusFiles
+	m.focus = focusHistory
 	r := m.rects[focusReview]
 	_, at, _ := m.view.titleLabel()
 
@@ -917,7 +801,7 @@ func TestClickingAnywhereOnTheHeadingFolds(t *testing.T) {
 	m := newTestModel(t)
 	row, path := headingOnScreen(t, m)
 
-	for _, col := range []int{0, foldHit + 1, 12} {
+	for _, col := range []int{0, headLead, 12} {
 		want := !fileIn(t, m, path).folded
 		x, y := contentPoint(t, m, focusReview, row, col)
 		m = drive(t, m, pressAt(x, y), releaseAt(x, y))
@@ -937,7 +821,7 @@ func TestDraggingOverTheHeadingCopiesInsteadOfFolding(t *testing.T) {
 	before := fileIn(t, m, path).folded
 
 	x, y := contentPoint(t, m, focusReview, row, 0)
-	end, _ := contentPoint(t, m, focusReview, row, len(path)+foldHit-1)
+	end, _ := contentPoint(t, m, focusReview, row, len(path)+headLead-1)
 	m = drive(t, m, pressAt(x, y), dragTo(end, y), releaseAt(end, y))
 
 	if fileIn(t, m, path).folded != before {
@@ -956,7 +840,7 @@ func TestDraggingOverTheHeadingCopiesInsteadOfFolding(t *testing.T) {
 func TestDraggingTheVerticalBarScrolls(t *testing.T) {
 	m := newTestModel(t)
 	bigReview(t, &m, 400)
-	m = drive(t, m, altKey("1"))
+	m = drive(t, m, altKey("2"))
 	b, ok := m.vbar(focusReview)
 	if !ok {
 		t.Fatal("the review is not wearing a vertical bar")
@@ -1024,26 +908,21 @@ func TestGrabbingTheThumbDoesNotJump(t *testing.T) {
 	}
 }
 
-// The list panes wear one too.
-func TestDraggingTheFileListBar(t *testing.T) {
+// The history wears one too.
+func TestDraggingTheHistoryBar(t *testing.T) {
 	m := newTestModel(t)
-	entries := make([]fileEntry, 200)
-	for i := range entries {
-		entries[i] = fileEntry{path: fmt.Sprintf("file%03d.txt", i), adds: 1}
-	}
-	m.files.setEntries(entries)
-	m.layout()
+	longHistory(t, &m, 200)
 
-	b, ok := m.vbar(focusFiles)
+	b, ok := m.vbar(focusHistory)
 	if !ok {
-		t.Fatal("the file list is not wearing a bar")
+		t.Fatal("the history is not wearing a bar")
 	}
 	m = drive(t, m, pressAt(b.pos, b.lo+b.length-1))
-	if m.files.offset != m.files.maxOffset() {
-		t.Errorf("offset = %d, want %d", m.files.offset, m.files.maxOffset())
+	if m.history.offset != m.history.maxOffset() {
+		t.Errorf("offset = %d, want %d", m.history.offset, m.history.maxOffset())
 	}
-	if m.files.cursor != 0 {
-		t.Errorf("dragging the bar moved the cursor to %d", m.files.cursor)
+	if m.history.cursor != 0 {
+		t.Errorf("dragging the bar moved the cursor to %d", m.history.cursor)
 	}
 }
 
@@ -1071,13 +950,13 @@ func TestDraggingTheHorizontalBarScrolls(t *testing.T) {
 // a press there is an ordinary press.
 func TestNoBarNothingToGrab(t *testing.T) {
 	m := newTestModel(t)
-	if m.files.scrolls() {
-		t.Skip("the fixture's file list is long enough to want a bar")
+	if m.history.scrolls() {
+		t.Skip("the fixture's history is long enough to want a bar")
 	}
-	if _, ok := m.vbar(focusFiles); ok {
+	if _, ok := m.vbar(focusHistory); ok {
 		t.Error("a list with nothing to scroll reports a bar")
 	}
-	r := m.rects[focusFiles]
+	r := m.rects[focusHistory]
 	m = drive(t, m, pressAt(r.x+r.w-1, r.y+2))
 	if m.bar != nil {
 		t.Error("a press where no bar is drawn grabbed one")
