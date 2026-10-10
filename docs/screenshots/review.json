@@ -7,6 +7,9 @@
       "path": "internal/server/handler.go",
       "approved": true,
       "digest": "7cab2ca2e8394ece",
+      "hunks": [
+        "7cab2ca2e8394ece"
+      ],
       "by": "darren",
       "at": "2026-08-28T19:41:02+01:00"
     }
