@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"maps"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -1066,9 +1067,7 @@ type hunkKey struct {
 	old, new     int
 }
 
-// hunkKeys names each of a file's hunks, by index into its patch.
-func (m *Model) hunkKeys(f *reviewFile) []hunkKey { return hunkKeysIn(m.commit, f) }
-
+// hunkKeysIn names each of a file's hunks, by index into its patch.
 func hunkKeysIn(commit string, f *reviewFile) []hunkKey {
 	if f.patch == nil {
 		return nil
@@ -1082,6 +1081,47 @@ func hunkKeysIn(commit string, f *reviewFile) []hunkKey {
 		}
 	}
 	return keys
+}
+
+// runKeys names, for each of a file's hunks, the runs of changed lines in it,
+// each by the first line it changes. A fold made by hand is kept against these
+// rather than against the hunk, for the reason an approval is: turn the context
+// up until two hunks join and the hunk on screen is one nobody folded, half of
+// which may never have been read.
+func (m *Model) runKeys(f *reviewFile) [][]hunkKey {
+	if f.patch == nil {
+		return nil
+	}
+	keys := make([][]hunkKey, len(f.patch.Hunks))
+	in := false
+	for _, l := range f.lines {
+		if l.Hunk < 0 || l.Hunk >= len(keys) {
+			in = false
+			continue
+		}
+		switch l.Kind {
+		case '+', '-':
+			if !in {
+				keys[l.Hunk] = append(keys[l.Hunk], hunkKey{commit: m.commit, path: f.path, old: l.Old, new: l.New})
+				in = true
+			}
+		case ' ', '@':
+			in = false
+		}
+	}
+	return keys
+}
+
+// setHunkFold folds a hunk by hand, or opens it: every run in it, so that the
+// hunk is whichever was asked for at any context.
+func (m *Model) setHunkFold(f *reviewFile, hunk int, shut bool) {
+	keys := m.runKeys(f)
+	if hunk < 0 || hunk >= len(keys) {
+		return
+	}
+	for _, k := range keys[hunk] {
+		m.hunks[k] = shut
+	}
 }
 
 // gapKeys names each of a file's gaps: one is known by the hunk that follows
@@ -1115,6 +1155,10 @@ func (m *Model) reopenGaps(commit string, files []*reviewFile) {
 // folded or opened by hand overrides that. Inside an approved file the rule
 // stands aside — the whole file has folded already, and somebody who opens it
 // again wants to read it, not a list of its hunks.
+//
+// It is asked run by run, as an approval is, and a hunk is shut only when every
+// run in it is: more context can join a hunk somebody folded to one they have
+// not read, and the fold of the one must not take the other off the screen.
 func (m *Model) shutFor(f *reviewFile) map[int]bool {
 	if f.patch == nil || (len(m.hunks) == 0 && len(f.signed) == 0) {
 		return nil
@@ -1128,12 +1172,19 @@ func (m *Model) shutFor(f *reviewFile) map[int]bool {
 		}
 	}
 	var shut map[int]bool
-	for h, k := range m.hunkKeys(f) {
-		v, ok := m.hunks[k]
-		if !ok {
-			v = !f.approved && f.hunkApproved(h) && !open[h]
+	for h, runs := range m.runKeys(f) {
+		all := len(runs) > 0
+		for i, k := range runs {
+			v, ok := m.hunks[k]
+			if !ok {
+				v = !f.approved && !open[h] && i < len(f.blocks[h]) && f.signed[f.blocks[h][i]]
+			}
+			if !v {
+				all = false
+				break
+			}
 		}
-		if v {
+		if all {
 			if shut == nil {
 				shut = map[int]bool{}
 			}
@@ -1488,14 +1539,27 @@ func (m Model) reviewKey(msg tea.KeyPressMsg, count string) (tea.Model, tea.Cmd)
 }
 
 // unfoldOpenThreads opens every folded file somebody is still waiting for an
-// answer in. A file opens folded, so its conversations are not rows until it
-// is read — and t, which goes looking for the next one, would otherwise walk
-// straight past the files it was asked about and report that there were none.
+// answer in, and every hunk folded by hand inside one. A file opens folded, so
+// its conversations are not rows until it is read — and t, which goes looking
+// for the next one, would otherwise walk straight past the files it was asked
+// about and report that there were none.
 func (m *Model) unfoldOpenThreads() {
 	changed := false
 	for _, f := range m.view.files {
-		if f.folded && f.open > 0 {
+		if f.open == 0 {
+			continue
+		}
+		if f.folded {
 			m.folds[f.path], changed = false, true
+		}
+		for at, ts := range f.threads {
+			if at >= len(f.lines) || !f.shut[f.lines[at].Hunk] {
+				continue
+			}
+			if slices.ContainsFunc(ts, func(t *review.Thread) bool { return !t.Resolved }) {
+				m.setHunkFold(f, f.lines[at].Hunk, false)
+				changed = true
+			}
 		}
 	}
 	if changed {
@@ -1535,6 +1599,16 @@ func (m Model) gotoLine(n int) (tea.Model, tea.Cmd) {
 		// for one by number is asking to see it.
 		m.folds[f.path] = false
 		m.rebuild()
+		f = m.view.files[r.file]
+	}
+	// The same for a folded hunk the line is in.
+	for _, l := range f.lines {
+		if l.New == n && (l.Kind == '+' || l.Kind == ' ') && l.Hunk >= 0 && f.shut[l.Hunk] {
+			m.setHunkFold(f, l.Hunk, false)
+			m.rebuild()
+			f = m.view.files[r.file]
+			break
+		}
 	}
 	row, exact, found := m.view.lineRow(r.file, n)
 	if !found {
@@ -1663,11 +1737,7 @@ func (m *Model) cursorHunk() (*reviewFile, int, bool) {
 // the same key pressed again opens it.
 func (m Model) doFoldHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	hunk := f.lines[head].Hunk
-	keys := m.hunkKeys(f)
-	if hunk >= len(keys) {
-		return m, nil
-	}
-	m.hunks[keys[hunk]] = !f.shut[hunk]
+	m.setHunkFold(f, hunk, !f.shut[hunk])
 	path := f.path
 	m.rebuild()
 	m.view.goToDiffLine(path, head)
@@ -1687,14 +1757,16 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	}
 	// Deciding about a hunk hands its fold back to the rule, as it does for a
 	// file — and gets it back if the decision is not saved.
-	undo := func() {}
-	if keys := m.hunkKeys(f); hunk < len(keys) {
-		k := keys[hunk]
-		if was, set := m.hunks[k]; set {
-			undo = func() { m.hunks[k] = was }
+	was := map[hunkKey]bool{}
+	if keys := m.runKeys(f); hunk < len(keys) {
+		for _, k := range keys[hunk] {
+			if v, set := m.hunks[k]; set {
+				was[k] = v
+			}
+			delete(m.hunks, k)
 		}
-		delete(m.hunks, k)
 	}
+	undo := func() { maps.Copy(m.hunks, was) }
 	path, digest, author := f.path, f.digest, m.author
 	withdraw := f.approved || f.hunkApproved(hunk)
 

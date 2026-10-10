@@ -4081,7 +4081,7 @@ func TestAHunkApprovalThatIsNotSavedMovesNoFold(t *testing.T) {
 	m := modelFor(t, changedRepo(t, 60, map[int]string{4: "FOUR", 50: "FIFTY"}))
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	f := fileIn(t, m, "foo.txt")
-	k := m.hunkKeys(f)[0]
+	k := m.runKeys(f)[0][0]
 	m.hunks[k] = false
 
 	// A review caught halfway through being written cannot be saved over.
@@ -4094,5 +4094,134 @@ func TestAHunkApprovalThatIsNotSavedMovesNoFold(t *testing.T) {
 	}
 	if v, ok := m.hunks[k]; !ok || v {
 		t.Errorf("the fold the reader set was not put back: hunks[%v] = %v, %v", k, v, ok)
+	}
+}
+
+// t goes looking for the next open comment, and one inside a hunk the reader
+// folded by hand is not a row until the hunk is opened. It opens.
+func TestTheNextOpenCommentOpensTheHunkItIsIn(t *testing.T) {
+	m := modelFor(t, twoHunkRepo(t))
+	m = onLine(t, m, "foo.txt", '+', "THIRTY-SIX")
+	m = comment(t, m, "why")
+	m = onLine(t, m, "foo.txt", '+', "THIRTY-SIX")
+	m = drive(t, m, letterKey(" "))
+	if _, n := hunkRows(m, "foo.txt"); n > 11 {
+		t.Fatalf("the hunk did not fold: %d lines showing", n)
+	}
+	m.view.moveTo(0)
+	m = drive(t, m, letterKey("t"))
+	if m.view.thread() == "" {
+		t.Errorf("t walked past the comment in a folded hunk (status %q)", m.status)
+	}
+}
+
+// Asking for a line by number is asking to see it, in a folded hunk as in a
+// folded file.
+func TestGoingToALineOpensTheHunkItIsIn(t *testing.T) {
+	m := modelFor(t, twoHunkRepo(t))
+	m = onLine(t, m, "foo.txt", '+', "THIRTY-SIX")
+	m = drive(t, m, letterKey(" "))
+	m = drive(t, m, letterKey("3"), letterKey("6"), letterKey("g"))
+	if _, l, ok := m.view.line(); !ok || l.New != 36 || l.Kind != '+' {
+		t.Errorf("36g landed on %+v, want the changed line 36 (status %q)", l, m.status)
+	}
+}
+
+// More context can join a hunk somebody folded to one they have not read. The
+// fold is of the one, and must not take the other off the screen with it.
+func TestAFoldDoesNotSpreadToTheHunkItJoins(t *testing.T) {
+	m := modelFor(t, twoHunkRepo(t))
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey(" "))
+	for i := 0; i < 12; i++ {
+		m = drive(t, m, letterKey("="))
+	}
+	heads, code := hunkRows(m, "foo.txt")
+	if heads != 1 {
+		t.Fatalf("the hunks did not join: %d of them", heads)
+	}
+	if code == 0 {
+		t.Errorf("the joined hunk is folded, hiding a change nobody folded:\n%s", plain(m))
+	}
+
+	// Folding the joined hunk is folding both, and stays so when they part.
+	m = onLine(t, m, "foo.txt", '+', "THIRTY-SIX")
+	m = drive(t, m, letterKey(" "))
+	for i := 0; i < 12; i++ {
+		m = drive(t, m, letterKey("-"))
+	}
+	if heads, code := hunkRows(m, "foo.txt"); heads != 2 || code != 0 {
+		t.Errorf("after parting, %d hunks show %d lines, want 2 folded hunks", heads, code)
+	}
+}
+
+// The bar says what a and Space will reach from where the cursor is: a hunk
+// only inside one, the lines left out on a row that counts them, and the file
+// from a row that is in neither.
+func TestTheHintNamesWhatTheKeysReach(t *testing.T) {
+	m := modelFor(t, twoHunkRepo(t))
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	if h := m.hints(); !strings.Contains(h, "approve the hunk") {
+		t.Errorf("inside a hunk the hint is %q", h)
+	}
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		if r.kind != rowDiff || r.file < 0 {
+			return false
+		}
+		l, ok := m.view.files[r.file].rowLine(r.line)
+		return ok && l.Kind == 'g'
+	})
+	if h := m.hints(); strings.Contains(h, "hunk ·") && strings.Contains(h, "approve") || !strings.Contains(h, "these lines") {
+		t.Errorf("on a row of unchanged lines the hint is %q", h)
+	}
+	// The blank row that ends an open file is in no hunk and no gap.
+	m = cursorTo(t, m, func(r reviewRow) bool { return r.kind == rowGap })
+	if h := m.hints(); !strings.Contains(h, "approve the file") {
+		t.Errorf("on a row in no hunk the hint is %q", h)
+	}
+}
+
+// An approved hunk whose change is edited away loses its approval when the
+// window next looks, and does not get it back when the edit is undone — on
+// screen and on disk both.
+func TestAHunkApprovalFallsWithItsChangeAndStaysFallen(t *testing.T) {
+	m := modelFor(t, twoHunkRepo(t))
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey("a"))
+	if n := len(reviewJSON(t, m.repo).FileFor("foo.txt").Hunks); n != 1 {
+		t.Fatalf("%d hunks recorded, want 1", n)
+	}
+	is, err := os.ReadFile(filepath.Join(m.repo.Dir, "foo.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(is), "FOUR\n", "FOUR AND MORE\n", 1)
+
+	// A review that cannot be saved over keeps what it showed.
+	writeFile(t, m.repo.Dir, "foo.txt", edited)
+	saved := string(reviewJSON(t, m.repo).Bytes())
+	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+		t.Fatal(err)
+	}
+	m = drive(t, m, m.rescanCmd()())
+	if len(m.rv.ApprovedHunks("foo.txt")) != 1 {
+		t.Error("the approval left the screen though dropping it was never saved")
+	}
+	if err := m.repo.WriteStateFile(review.FileName, saved); err != nil {
+		t.Fatal(err)
+	}
+
+	m = drive(t, m, m.rescanCmd()())
+	if f := reviewJSON(t, m.repo).FileFor("foo.txt"); f != nil && len(f.Hunks) != 0 {
+		t.Fatalf("the approval of a change that is gone was kept: %v", f.Hunks)
+	}
+	if len(m.rv.ApprovedHunks("foo.txt")) != 0 {
+		t.Error("the window still shows the hunk approved")
+	}
+
+	writeFile(t, m.repo.Dir, "foo.txt", string(is))
+	m = drive(t, m, m.rescanCmd()())
+	if f := reviewJSON(t, m.repo).FileFor("foo.txt"); f != nil && len(f.Hunks) != 0 {
+		t.Errorf("undoing the edit brought the approval back: %v", f.Hunks)
 	}
 }

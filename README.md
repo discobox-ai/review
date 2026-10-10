@@ -240,8 +240,10 @@ whether any of them has a comment still open on it:
 ```
 
 `Space` there opens it again, and `Space` on the file's heading folds the whole
-file. The fold is kept by the first line the hunk changes rather than by its
-position, so asking for more or less context does not undo it.
+file. The fold is kept by the first line each run of changes starts on rather
+than by the hunk's position, so asking for more or less context does not undo
+it — and when more context joins a folded hunk to one that is still open, the
+joined hunk is open: it folds only if every part of it was folded.
 
 Between the hunks, and above the first and below the last, a row counts what
 the diff left out because nothing in it changed:
@@ -515,6 +517,9 @@ This is the review the pictures above were taken of, as it stands on disk:
       "path": "internal/server/handler.go",
       "approved": true,
       "digest": "7cab2ca2e8394ece",
+      "hunks": [
+        "7cab2ca2e8394ece"
+      ],
       "by": "darren",
       "at": "2026-08-28T19:41:02+01:00"
     }
@@ -842,7 +847,8 @@ review.
 **Going somewhere opens it.** A folded file has no lines on screen to land on,
 so `24g` opens the file the cursor is in before it goes to the line, and `t`
 and `T` open every folded file that still has a comment waiting before they
-look for the next one.
+look for the next one. A folded hunk is opened the same way: by `g` when the
+line asked for is in it, and by `t` and `T` when a comment is waiting in it.
 
 A number typed in front of `g` or `G` goes to that line of the file the cursor
 is in, the way `24G` does in vim — counted in the file **as it now stands**,

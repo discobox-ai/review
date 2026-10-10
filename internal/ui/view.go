@@ -423,6 +423,15 @@ func (m Model) hints() string {
 		hint = "c comment · a approve the hunk · " + m.splitHint() +
 			" · S other side · n/p hunk · Space fold it · t open comments · ] file"
 	}
+	// The two keys reach the smallest thing the cursor is in, so the bar asks
+	// what that is rather than promising a hunk on a row that is in none.
+	if _, _, in := m.cursorHunk(); !in {
+		if _, _, gap := m.cursorGap(); gap {
+			hint = "Space show these lines, or put them away · n/p hunk · t open comments · ] file · -/= context"
+		} else {
+			hint = "a approve the file · Space fold it · " + m.splitHint() + " · n/p hunk · t open comments · ] file"
+		}
+	}
 	if m.commit != "" {
 		hint = "Reading one commit · c comments on the review · Alt-2 then ↑ for all of it"
 	}
