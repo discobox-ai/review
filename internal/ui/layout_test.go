@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/discobox-ai/review/internal/review"
 )
 
 // freshTestModel is the window exactly as the program opens it: one column,
@@ -348,5 +349,30 @@ func TestFoldedFilesAskForNoHorizontalBar(t *testing.T) {
 	m = onLine(t, m, "wide.txt", '+', "a very long line")
 	if _, horz := m.view.bars(); !horz {
 		t.Error("the open file's long line did not bring the bar back")
+	}
+}
+
+// A fold moves with a verdict, and a verdict that could not be saved moved
+// nothing: the file the reader opened stays open.
+func TestAnApprovalThatIsNotSavedMovesNoFold(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "beta.go", '+', "package beta")
+	if fileIn(t, m, "beta.go").folded {
+		t.Fatal("beta.go is folded before anything was decided about it")
+	}
+	// A review caught halfway through being written cannot be saved over.
+	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+		t.Fatal(err)
+	}
+	m = drive(t, m, letterKey("a"))
+	if !m.statusEr {
+		t.Fatalf("status = %q, want it to say the approval was not saved", m.status)
+	}
+	if v, ok := m.folds["beta.go"]; !ok || v {
+		t.Errorf("the fold the reader set was not put back: folds[beta.go] = %v, %v", v, ok)
+	}
+	m.rebuild()
+	if fileIn(t, m, "beta.go").folded {
+		t.Error("the file shut although its approval was never recorded")
 	}
 }
