@@ -90,8 +90,13 @@ type File struct {
 	Approved  bool   `json:"approved"`
 	Digest    string `json:"digest,omitempty"`
 	Nullified bool   `json:"nullified,omitempty"`
-	By        string `json:"by,omitempty"`
-	At        string `json:"at,omitempty"`
+	// Hunks are the parts of the change signed off one at a time, each named
+	// by the digest of a run of changed lines; see [HunkDigests]. They stand
+	// whether or not the file as a whole is approved, and one that names a
+	// change no longer there simply matches nothing.
+	Hunks []string `json:"hunks,omitempty"`
+	By    string   `json:"by,omitempty"`
+	At    string   `json:"at,omitempty"`
 }
 
 // Thread is one conversation, hanging off one line.
@@ -270,7 +275,61 @@ func (s *State) Unapprove(path string) {
 		return
 	}
 	f.Approved, f.Nullified = false, false
+	f.Hunks = nil
 	f.At = Now()
+}
+
+// ApprovedHunks is the runs of changed lines in a path that have been signed
+// off one at a time, as a set of their digests.
+func (s *State) ApprovedHunks(path string) map[string]bool {
+	f := s.FileFor(path)
+	if f == nil || len(f.Hunks) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(f.Hunks))
+	for _, d := range f.Hunks {
+		set[d] = true
+	}
+	return set
+}
+
+// SetHunks replaces the runs of changed lines signed off in a path.
+func (s *State) SetHunks(path string, digests []string) {
+	if len(digests) == 0 {
+		if f := s.FileFor(path); f != nil {
+			f.Hunks = nil
+		}
+		return
+	}
+	digests = append([]string(nil), digests...)
+	sort.Strings(digests)
+	s.entryFor(path).Hunks = digests
+}
+
+// PruneHunks drops the hunk approvals of a path that are of changes no longer
+// there, given the runs of changed lines the path has now, and reports whether
+// it dropped any.
+//
+// Without it an approval of an edit that was then undone would lie in wait and
+// come back with the edit, signed off by nobody who read it the second time.
+// A file's approval does not come back that way, and nor should a hunk's.
+func (s *State) PruneHunks(path string, present map[string]bool) bool {
+	f := s.FileFor(path)
+	if f == nil || len(f.Hunks) == 0 {
+		return false
+	}
+	kept := f.Hunks[:0]
+	for _, d := range f.Hunks {
+		if present[d] {
+			kept = append(kept, d)
+		}
+	}
+	changed := len(kept) != len(f.Hunks)
+	f.Hunks = kept
+	if len(f.Hunks) == 0 {
+		f.Hunks = nil
+	}
+	return changed
 }
 
 // Reconcile checks every approval against the change now in front of the
@@ -341,6 +400,54 @@ func Digest(p *git.Patch) string {
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// HunkDigests identifies the parts of a change, hunk by hunk: for each hunk of
+// the patch, one digest for every unbroken run of changed lines in it.
+//
+// A run rather than the hunk, for the reason [Digest] leaves the context out.
+// Where a hunk begins and ends is a matter of how much context was asked for,
+// and two that were apart become one when it is turned up; the runs of changed
+// lines inside them are the same runs either way. So an approval is recorded
+// against the runs, and a hunk is approved when all of its runs are.
+func HunkDigests(p *git.Patch) [][]string {
+	if p == nil {
+		return nil
+	}
+	out := make([][]string, len(p.Hunks))
+	for i, hunk := range p.Hunks {
+		h := sha256.New()
+		open := false
+		flush := func() {
+			if open {
+				out[i] = append(out[i], hex.EncodeToString(h.Sum(nil))[:16])
+				h.Reset()
+				open = false
+			}
+		}
+		oldNo, newNo := hunk.OldStart, hunk.NewStart
+		for _, l := range hunk.Lines {
+			if l == "" {
+				continue
+			}
+			switch l[0] {
+			case ' ':
+				flush()
+				oldNo++
+				newNo++
+			case '-':
+				fmt.Fprintf(h, "-%d %s\n", oldNo, l[1:])
+				oldNo++
+				open = true
+			case '+':
+				fmt.Fprintf(h, "+%d %s\n", newNo, l[1:])
+				newNo++
+				open = true
+			}
+		}
+		flush()
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

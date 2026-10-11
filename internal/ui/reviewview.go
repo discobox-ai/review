@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -81,10 +82,21 @@ type reviewFile struct {
 	// about. See [review.Digest].
 	digest string
 
+	// blocks is the same for the parts of the change: for each hunk, the
+	// digest of every run of changed lines in it. See [review.HunkDigests].
+	blocks [][]string
+
 	// state is the file's working tree status, which is what says whether the
 	// change has been committed. It is empty while a single commit is being
 	// read, where the question does not arise.
 	state git.State
+
+	// full is the file as the new side of the diff has it, a line each, and
+	// gaps is the stretches of it the diff leaves out: one before each hunk
+	// and one after the last, indexed by the hunk that follows. A gap nothing
+	// was left out of has no lines and no row. See [reviewFile.addGaps].
+	full []string
+	gaps []gap
 
 	// rows is the file's lines arranged for drawing, and rowAt maps each line
 	// back to the row that shows it. In a unified view that is one row per
@@ -112,6 +124,8 @@ type reviewFile struct {
 	approved  bool
 	nullified bool
 	folded    bool
+	shut      map[int]bool             // the hunks folded away, by index into the patch
+	signed    map[string]bool          // the runs of changed lines approved one hunk at a time
 	threads   map[int][]*review.Thread // by index into lines
 	loose     []*review.Thread         // in this file, but on no line of it
 	open      int
@@ -269,6 +283,261 @@ func (f *reviewFile) rowLine(row int) (git.DiffLine, bool) {
 		return git.DiffLine{}, false
 	}
 	return f.lines[i], true
+}
+
+// gap is a stretch of a file the diff does not show, because nothing in it
+// changed: the lines between two hunks, or above the first, or below the last.
+type gap struct {
+	old, new int  // its first line, as each side of the diff numbers it
+	n        int  // how many lines it is; none when the hunks meet
+	open     bool // the lines are in the stack, rather than counted on one row
+}
+
+// addGaps puts a row into the file's lines wherever the diff skips part of
+// the file, saying how much it skipped. text is the file as the new side has
+// it, which is where the skipped lines are read from when a gap is opened.
+//
+// The row is a line like any other — kind 'g', in no hunk, with the gap's
+// index where a hunk's line would have its own — so that the cursor, the
+// scrollbar and the selection walk over it without being told about it.
+func (f *reviewFile) addGaps(text string) {
+	if f.patch == nil || len(f.patch.Hunks) == 0 || text == "" || strings.IndexByte(text, 0) >= 0 {
+		return
+	}
+	f.full = strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	f.gaps = make([]gap, len(f.patch.Hunks)+1)
+
+	oldAt, newAt := 1, 1
+	for h, hunk := range f.patch.Hunks {
+		oldN, newN := 0, 0
+		for _, l := range hunk.Lines {
+			if l == "" {
+				continue
+			}
+			switch l[0] {
+			case ' ':
+				oldN++
+				newN++
+			case '-':
+				oldN++
+			case '+':
+				newN++
+			}
+		}
+		// A side a hunk has no lines on is numbered by the line before it.
+		oldFirst, newFirst := hunk.OldStart, hunk.NewStart
+		if oldN == 0 {
+			oldFirst++
+		}
+		if newN == 0 {
+			newFirst++
+		}
+		// Both sides skip the same lines, or the file is not the one the
+		// diff was taken from and there is nothing here to trust.
+		if n := newFirst - newAt; n > 0 && n == oldFirst-oldAt && newFirst-1 <= len(f.full) {
+			f.gaps[h] = gap{old: oldAt, new: newAt, n: n}
+		}
+		oldAt, newAt = oldFirst+oldN, newFirst+newN
+	}
+	if n := len(f.full) - newAt + 1; n > 0 {
+		f.gaps[len(f.patch.Hunks)] = gap{old: oldAt, new: newAt, n: n}
+	}
+
+	// From the end, so that putting one row in does not move the place the
+	// next one goes.
+	if g := len(f.gaps) - 1; f.gaps[g].n > 0 {
+		f.insert(len(f.lines), []git.DiffLine{{Kind: 'g', Hunk: -1, Line: g}}, []string{""}, nil)
+	}
+	for i := len(f.lines) - 1; i >= 0; i-- {
+		if l := f.lines[i]; l.Kind == '@' && l.Hunk < len(f.gaps) && f.gaps[l.Hunk].n > 0 {
+			f.insert(i, []git.DiffLine{{Kind: 'g', Hunk: -1, Line: l.Hunk}}, []string{""}, nil)
+		}
+	}
+}
+
+// insert puts lines into the file, keeping everything that runs parallel to
+// them in step.
+func (f *reviewFile) insert(at int, lines []git.DiffLine, texts []string, spans [][]span) {
+	if len(f.spans) == len(f.lines) {
+		if spans == nil {
+			spans = make([][]span, len(lines))
+		}
+		f.spans = slices.Insert(f.spans, at, spans...)
+	}
+	if len(f.emph) == len(f.lines) {
+		f.emph = slices.Insert(f.emph, at, make([]emphasis, len(lines))...)
+	}
+	f.lines = slices.Insert(f.lines, at, lines...)
+	f.texts = slices.Insert(f.texts, at, texts...)
+}
+
+// gapAt is the gap a line belongs to — its row, or one of the lines it has
+// let out — and false for a line of the diff itself.
+func (f *reviewFile) gapAt(i int) (int, bool) {
+	if i < 0 || i >= len(f.lines) {
+		return 0, false
+	}
+	l := f.lines[i]
+	if l.Hunk >= 0 || l.Line < 0 || l.Line >= len(f.gaps) || (l.Kind != 'g' && l.Kind != ' ') {
+		return 0, false
+	}
+	return l.Line, true
+}
+
+// gapRow is the index of a gap's own row among the file's lines.
+func (f *reviewFile) gapRow(g int) int {
+	for i, l := range f.lines {
+		if l.Kind == 'g' && l.Line == g {
+			return i
+		}
+	}
+	return -1
+}
+
+// setGap opens a gap, putting the lines it stands for into the file under its
+// row, or shuts it and takes them out again.
+//
+// They go in as context lines, numbered on both sides, which is all they are:
+// the same lines more context would have shown. So a remark can be written
+// against one, and finds it again by its number like any other.
+func (f *reviewFile) setGap(g int, open bool) {
+	if g < 0 || g >= len(f.gaps) || f.gaps[g].n == 0 || f.gaps[g].open == open {
+		return
+	}
+	at := f.gapRow(g)
+	if at < 0 {
+		return
+	}
+	gp := &f.gaps[g]
+	gp.open = open
+	if !open {
+		if len(f.spans) == len(f.lines) {
+			f.spans = slices.Delete(f.spans, at+1, at+1+gp.n)
+		}
+		if len(f.emph) == len(f.lines) {
+			f.emph = slices.Delete(f.emph, at+1, at+1+gp.n)
+		}
+		f.lines = slices.Delete(f.lines, at+1, at+1+gp.n)
+		f.texts = slices.Delete(f.texts, at+1, at+1+gp.n)
+		return
+	}
+	lines, texts := make([]git.DiffLine, gp.n), make([]string, gp.n)
+	for k := range lines {
+		// A file with DOS line endings keeps its carriage returns when it is
+		// read whole, and one sent to the terminal moves the cursor.
+		s := strings.TrimSuffix(f.full[gp.new-1+k], "\r")
+		lines[k] = git.DiffLine{
+			Text: " " + s, Kind: ' ', Hunk: -1, Line: g,
+			Old: gp.old + k, New: gp.new + k, Seam: gp.new + k,
+		}
+		texts[k] = expandTabs(s)
+	}
+	var spans [][]span
+	// A gap can be most of a file, and this runs where the keys are read.
+	if !f.plain && gp.n <= maxLexLines {
+		if lexer := lexerFor(f.path); lexer != nil {
+			spans = tokeniseLines(lexer, texts)
+		}
+	}
+	f.insert(at+1, lines, texts, spans)
+}
+
+// gapText is what a gap's row says: how much of the file it stands for.
+func (f *reviewFile) gapText(i int) string {
+	g, ok := f.gapAt(i)
+	if !ok {
+		return ""
+	}
+	mark := "▸ "
+	if f.gaps[g].open {
+		mark = "▾ "
+	}
+	return mark + plural(f.gaps[g].n, "unchanged line", "unchanged lines")
+}
+
+// hidden reports whether a line is inside a folded hunk. The hunk's own header
+// is not: it is the row the fold leaves behind, and what opens it again.
+func (f *reviewFile) hidden(i int) bool {
+	if len(f.shut) == 0 || i < 0 || i >= len(f.lines) {
+		return false
+	}
+	l := f.lines[i]
+	return l.Kind != '@' && f.shut[l.Hunk]
+}
+
+// hunkHead is the index of the header line of the hunk a line belongs to, or
+// -1 for a line that belongs to none — the preamble above the first of them.
+func (f *reviewFile) hunkHead(i int) int {
+	if i < 0 || i >= len(f.lines) || f.lines[i].Hunk < 0 {
+		return -1
+	}
+	for ; i >= 0; i-- {
+		if f.lines[i].Kind == '@' {
+			return i
+		}
+	}
+	return -1
+}
+
+// hunkApproved reports whether a hunk has been signed off on its own: every
+// run of changed lines in it is one the review has an approval for.
+func (f *reviewFile) hunkApproved(hunk int) bool {
+	if len(f.signed) == 0 || hunk < 0 || hunk >= len(f.blocks) || len(f.blocks[hunk]) == 0 {
+		return false
+	}
+	for _, d := range f.blocks[hunk] {
+		if !f.signed[d] {
+			return false
+		}
+	}
+	return true
+}
+
+// hunksApproved counts the hunks signed off on their own, out of how many.
+func (f *reviewFile) hunksApproved() (n, of int) {
+	for h := range f.blocks {
+		if f.hunkApproved(h) {
+			n++
+		}
+	}
+	return n, len(f.blocks)
+}
+
+// hunkText is what a hunk's header row says. An open one nobody has decided
+// about says what git said. A folded one also says what it is holding back,
+// and above all whether anyone is still waiting for an answer in there: a fold
+// hides the conversation along with the code, and that must not be how a
+// comment gets missed.
+//
+// The verdict is only said while it is news. In an approved file every hunk is
+// approved, and the file's own heading has said so.
+func (f *reviewFile) hunkText(i int) string {
+	l := f.lines[i]
+	s := l.Text
+	if f.shut[l.Hunk] {
+		lines, open := 0, 0
+		for j := i + 1; j < len(f.lines) && f.lines[j].Hunk == l.Hunk; j++ {
+			if isCodeLine(f.lines[j].Kind) {
+				lines++
+			}
+			for _, t := range f.threads[j] {
+				if !t.Resolved {
+					open++
+				}
+			}
+		}
+		s = "▸ " + s + "  · " + plural(lines, "line", "lines") + " folded"
+		if open > 0 {
+			s += " · " + plural(open, "open comment", "open comments")
+		}
+	}
+	if !f.approved && f.hunkApproved(l.Hunk) {
+		if !f.shut[l.Hunk] {
+			s += " "
+		}
+		s += " · ✓ approved"
+	}
+	return s
 }
 
 // done reports whether there is nothing left to do about a file: signed off,
@@ -578,6 +847,11 @@ func (v *reviewView) build() {
 			draftRow = f.rowAt[v.draft.line]
 		}
 		for i := range f.rows {
+			// A folded hunk is its header and nothing else: the lines under it
+			// go, and the conversations hung off them go with them.
+			if f.hidden(f.primary(i)) {
+				continue
+			}
 			rows = append(rows, reviewRow{
 				kind: rowDiff, file: fi, line: i, marked: f.marked(f.primary(i)),
 			})
@@ -1689,6 +1963,9 @@ func (f *reviewFile) headerTail(avail int) string {
 	case f.nullified:
 		add("◈ approval nullified", "◈")
 	}
+	if n, of := f.hunksApproved(); n > 0 && !f.approved {
+		add("✓ "+itoa(n)+"/"+itoa(of)+" hunks", "✓"+itoa(n)+"/"+itoa(of))
+	}
 	switch {
 	case f.open > 0:
 		add(plural(f.open, "open comment", "open comments"), "◆"+itoa(f.open))
@@ -1829,14 +2106,17 @@ func (v *reviewView) diffRowForLine(f *reviewFile, i int, st *styles, rowW int, 
 	}
 
 	if !isCodeLine(l.Kind) {
-		style := st.diffMeta
-		if l.Kind == '@' {
-			style = st.diffHunk
+		style, text := st.diffMeta, l.Text
+		switch l.Kind {
+		case '@':
+			style, text = st.diffHunk, f.hunkText(i)
+		case 'g':
+			style, text = st.dimText, f.gapText(i)
 		}
 		return diffRow{
 			bar: bar, mark: mark, marked: marked,
 			numW: v.numW, numSty: numSty,
-			gutter: "", code: l.Text, base: style, emphSty: style,
+			gutter: "", code: text, base: style, emphSty: style,
 			hscroll: v.hoffset, width: rowW,
 		}
 	}

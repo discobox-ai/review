@@ -414,14 +414,23 @@ func (m Model) hints() string {
 	}
 	// The hints run out of room before the scoreboard does, and what runs off
 	// the end is the tail — so the ones worth keeping are said early.
-	hint := "c comment · a approve the file · " + m.splitHint() +
-		" · n/p hunk · t open comments · ] file · -/= context"
+	hint := "c comment · a approve the hunk · " + m.splitHint() +
+		" · n/p hunk · Space fold it · t open comments · ] file · -/= context"
 	if m.view.splitting() {
 		// Crossing a split row only means anything while there are two sides
 		// to cross between, so it is offered there and nowhere else. This one
 		// does ask what was drawn rather than what was asked for.
-		hint = "c comment · a approve the file · " + m.splitHint() +
-			" · S other side · n/p hunk · t open comments · ] file"
+		hint = "c comment · a approve the hunk · " + m.splitHint() +
+			" · S other side · n/p hunk · Space fold it · t open comments · ] file"
+	}
+	// The two keys reach the smallest thing the cursor is in, so the bar asks
+	// what that is rather than promising a hunk on a row that is in none.
+	if _, _, in := m.cursorHunk(); !in {
+		if _, _, gap := m.cursorGap(); gap {
+			hint = "Space show these lines, or put them away · n/p hunk · t open comments · ] file · -/= context"
+		} else {
+			hint = "a approve the file · Space fold it · " + m.splitHint() + " · n/p hunk · t open comments · ] file"
+		}
 	}
 	if m.commit != "" {
 		hint = "Reading one commit · c comments on the review · Alt-2 then ↑ for all of it"
@@ -456,7 +465,8 @@ func helpText() string {
 		"───────────────────────────────────────────────────────────────",
 		"Commands",
 		"",
-		"    a  approve this file      A  approve every file",
+		"    a  approve this hunk — or, on a file's heading, the file",
+		"    A  approve every file",
 		"    F  fold every file, or open them all again",
 		"    H  show the history under the review, or hide it again",
 		"    f  hide the files that are done with, and show them again",
@@ -476,11 +486,12 @@ func helpText() string {
 		"    R  rescan (also F5)       -  /  =   less / more context",
 		"    z  zoom the pane to the whole window (Alt-Z anywhere)",
 		"",
-		"    Space  fold the file you are in, from anywhere in it, and open",
-		"           it again. On a resolved comment it opens that instead.",
-		"           It never writes anything.",
-		"    Enter  act on what the cursor is on: comment on a line, reply to",
-		"           a comment, fold a file",
+		"    Space  fold the hunk you are in, from anywhere in it, and open it",
+		"           again. On a file's heading it folds the file, and on a",
+		"           resolved comment it opens that. It never writes anything.",
+		"           On a row counting unchanged lines the diff left out, it",
+		"           shows them, and puts them away again.",
+		"    Enter  the same as Space. A comment begins with c, and only c.",
 		"",
 		"    Ctrl-S       post the comment being written",
 		"    Ctrl-C or q  quit         F1 or ?  these keys",

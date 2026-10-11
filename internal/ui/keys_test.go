@@ -38,7 +38,6 @@ func commandBindings(m keyMap) []struct {
 		{"help", m.HelpKey},
 		{"quit", m.QuitKey},
 		{"open or fold", m.Toggle},
-		{"act on this", m.Act},
 		{"visual select", m.Visual},
 		{"zoom", m.ZoomKey},
 		{"next hunk", m.NextHunk},
@@ -100,8 +99,8 @@ func TestCommandsDoNotCollideWithMovement(t *testing.T) {
 	}
 	for _, b := range commandBindings(m) {
 		for _, k := range b.Keys() {
-			// Enter acts on the row the cursor is on, which is a command
-			// rather than a movement — Space is its milder half.
+			// Enter discloses the row the cursor is on, as Space does: a
+			// command rather than a movement.
 			if k == "enter" {
 				continue
 			}

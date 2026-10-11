@@ -17,11 +17,13 @@ import "charm.land/bubbles/v2/key"
 // as a letter meaning two unrelated things; TestNoTwoCommandsShareAKey keeps
 // the difference.
 //
-// Space and Enter are the two halves of that verb. Space discloses — it folds
-// the file you are reading, from wherever in it you have got to, and opens a
-// resolved conversation — and Enter acts, which on a line of the diff means
-// writing a remark about it. They were one key, and the cost was that reading
-// down a file with the fold key opened a comment box on every line.
+// Space discloses, and Enter is the same key: it folds the hunk you are
+// reading, from wherever in it you have got to, folds the whole file from the
+// file's heading, and opens a resolved conversation. Neither ever writes
+// anything — c is the only way a comment begins.
+//
+// a follows the same rule of reach: the hunk from inside a hunk, the file from
+// the file's heading.
 //
 // Inside the comment composer every letter is text, so none of the commands
 // are reachable from it: Ctrl-Enter posts what was written, Esc throws it away.
@@ -63,7 +65,6 @@ type keyMap struct {
 	HelpKey     key.Binding
 	QuitKey     key.Binding
 	Toggle      key.Binding
-	Act         key.Binding
 	Visual      key.Binding
 	ZoomKey     key.Binding
 
@@ -120,10 +121,10 @@ func newKeyMap() keyMap {
 		// Everywhere else the letter does it, as z does in tmux.
 		Zoom: key.NewBinding(key.WithKeys("alt+z"), key.WithHelp("Alt-Z", "zoom the pane")),
 
-		ApproveKey: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "approve this file")),
+		ApproveKey: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "approve this hunk, or the file from its heading")),
 		ApproveAll: key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "approve every file")),
-		// Space folds the file the cursor is in; F is the same verb reaching
-		// every file at once, the way A is to a. Lowercase f is left alone,
+		// Space folds the hunk or the file the cursor is on; F is the same verb
+		// reaching every file at once, the way A is to a. Lowercase f is left alone,
 		// since finding something in a long review is what will want it.
 		FoldAll: key.NewBinding(key.WithKeys("F"), key.WithHelp("F", "fold or open every file")),
 		// f and F are a pair: one takes the finished files off the screen, the
@@ -160,14 +161,12 @@ func newKeyMap() keyMap {
 		// The space bar is named rather than spelled: a key reports the text
 		// it produced, and a bare space would be indistinguishable from one
 		// typed into a field.
-		Toggle: key.NewBinding(key.WithKeys("space"), key.WithHelp("Space", "open / fold")),
-		// Enter acts on what the cursor is on; Space only discloses it. The
-		// two were one key, and on a line of the diff that key opened a
-		// comment box — so reading down a file with Space, which discloses
-		// everything else, kept starting remarks nobody had asked to write.
-		// Space is the safe one now: it opens and shuts what is already there
-		// and never makes anything new.
-		Act:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("Enter", "act on this")),
+		//
+		// Enter is the same key. It used to act where Space disclosed, and on
+		// a line of the diff that meant opening a comment box — a second way
+		// to start a remark, on the key a hand hits without meaning much by
+		// it. c is how a comment begins, and nothing else is.
+		Toggle:  key.NewBinding(key.WithKeys("space", "enter"), key.WithHelp("Space", "open / fold")),
 		Visual:  key.NewBinding(key.WithKeys("V"), key.WithHelp("V", "visual select")),
 		ZoomKey: key.NewBinding(key.WithKeys("z"), key.WithHelp("z", "zoom the pane")),
 
@@ -177,7 +176,7 @@ func newKeyMap() keyMap {
 		PrevThread:     key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "previous open comment")),
 		NextFile:       key.NewBinding(key.WithKeys("]"), key.WithHelp("]", "next file")),
 		PrevFile:       key.NewBinding(key.WithKeys("["), key.WithHelp("[", "previous file")),
-		LessContextKey: key.NewBinding(key.WithKeys("-"), key.WithHelp("-", "less context")),
+		LessContextKey: key.NewBinding(key.WithKeys("-", "_"), key.WithHelp("-", "less context")),
 		MoreContextKey: key.NewBinding(key.WithKeys("=", "+"), key.WithHelp("=", "more context")),
 
 		// H rather than h, which is the arrow a vim hand uses to run the code
