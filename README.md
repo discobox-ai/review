@@ -85,18 +85,25 @@ files beside the review, because the headings are that list.
 ### What a file's heading says
 
 Each file's heading opens with where the file stands — `○` unread, `◆` a
-comment still open, `✓` approved, `◈` approved and changed since — and then a
-band carrying its name and everything standing against it: how much changed
+comment still open, `✓` approved, `◈` approved and changed since — twice over:
+first where it stands **with you**, then, fainter, where it stands **with
+anybody else**. Then a band carrying its name and everything standing against it: how much changed
 (added in green, removed in red), what is left to commit, the verdict, and how
 many comments are still waiting for an answer:
 
 ```
-◆  ▾ internal/ui/model.go           +42 · −7 · uncommitted · 2 open comments
-✓  ▸ internal/git/git.go                                     +30 · ✓ approved
+◆ ·  ▾ internal/ui/model.go         +42 · −7 · uncommitted · 2 open comments
+✓ ✓  ▸ internal/git/git.go                     +30 · ✓ approved · ✓ by claude
+○ ✓  ▸ internal/git/patch.go                                +12 · ✓ by claude
 ```
 
-The verdict stands in front of the band rather than on it, so that read down
-the left edge the headings are a column of verdicts.
+The verdicts stand in front of the band rather than on it, so that read down
+the left edge the headings are two columns of them: yours, and everybody
+else's. The second is `✓` once anybody else's approval stands, `◈` when the
+file has changed under the only ones there were, and `·` when nobody else has
+said anything; the end of the heading names who. `patch.go` there is a file an
+agent has signed off and you have not read — see
+[Whose approval](#whose-approval).
 
 Those give way in a fixed order as the pane narrows — the arithmetic first,
 then what is left to commit, then the verdict, and **last of all the
@@ -105,9 +112,9 @@ number before it goes away, and a file with one will shorten its own name to
 keep saying so:
 
 ```
-  80 columns   ◆  ▾ model.go     +42 · −7 · uncommitted · 2 open comments
-  44 columns   ◆  ▾ model.go         +42 −7 uncommitted ◆2
-  24 columns   ◆  ▾ model.go                           ◆2
+  80 columns   ◆ ·  ▾ model.go   +42 · −7 · uncommitted · 2 open comments
+  44 columns   ◆ ·  ▾ model.go       +42 −7 uncommitted ◆2
+  24 columns   ◆ ·  ▾ model.go                         ◆2
 ```
 
 `◆2` is two comments outstanding, `✓2` two that have been answered — the same
@@ -215,6 +222,25 @@ Approving hands the fold back to the rule every file starts with — folded — 
 a file signed off goes away even after `F` opened everything; taking an
 approval back opens the file, since that is having more to say about it.
 
+### Whose approval
+
+An approval is **somebody's**, and a file keeps one for each reviewer who has
+given it. An agent approving a file does not approve it for you, and yours does
+not replace the agent's: they stand side by side in the review, and in the two
+columns every heading opens with.
+
+**The window goes by yours** — the name it was opened with, `-by`. A file only
+somebody else has approved is still one you have not read, so it does not fold
+away, it is still counted in `3 to read` and left out of `1/4 approved`, `f`
+does not hide it, and `a` on it adds your approval beside theirs. `a` again
+takes yours back and leaves theirs alone. So a review an agent has already
+driven to sign-off opens as a list of files with `○ ✓` in front of them, and
+going down it with `a` is you reading what it read.
+
+Hunks are the same: the ones folded away as approved are the ones *you* signed
+off. And a file changing is the file changing for everybody — every approval of
+it falls together.
+
 A folded file has no gap under it, so a run of them reads as a list; an open
 one ends with a blank row before the next heading.
 
@@ -294,10 +320,10 @@ come back:
 
 ```
  Folded                        F                    Opened
- ○  ▸ bar.txt              ──────►    ○  ▾ bar.txt     …
- ✓  ▸ beta.go  ✓ approved             ✓  ▸ beta.go  ✓ approved   ← left alone
- ○  ▸ foo.txt                         ○  ▾ foo.txt     …
- ○  ▸ new.txt                         ○  ▾ new.txt     …
+ ○ ·  ▸ bar.txt            ──────►    ○ ·  ▾ bar.txt   …
+ ✓ ·  ▸ beta.go  ✓ approved           ✓ ·  ▸ beta.go  ✓ approved ← left alone
+ ○ ·  ▸ foo.txt                       ○ ·  ▾ foo.txt   …
+ ○ ·  ▸ new.txt                       ○ ·  ▾ new.txt   …
 ```
 
 An approved file with an open comment on it is not done with, so it comes back
@@ -305,26 +331,31 @@ like the rest. And when *every* file is done with, the second press opens the
 lot anyway — a key that looked like it did nothing would be worse than one that
 occasionally shows you what you already signed off.
 
-### Hiding what is finished
+### Hiding what you have approved
 
-**`f`** goes further than folding: it takes the files that are done with off
-the screen altogether, leaving only what is unapproved or still being argued
-about.
+**`f`** goes further than folding: it takes every file you have approved off
+the screen altogether, leaving only what you have yet to read. **Your approval
+alone decides it.** Not anybody else's — a file an agent approved and you did
+not stays on the screen — and not whether a comment on the file is still open,
+which is the one way this differs from folding: most open comments are a
+reviewer and an author still talking, and a file you have signed off is one
+you have asked not to be shown. The title goes on counting the open comments,
+hidden or not.
 
 ```
  Review            1/4 approved      Review  1/4 approved · 1 hidden
- ○  ▸ bar.txt                        ○  ▸ bar.txt
- ✓  ▸ beta.go        f               ○  ▸ foo.txt
- ○  ▸ foo.txt    ──────►             ○  ▸ new.txt
- ○  ▸ new.txt
+ ○ ·  ▸ bar.txt                      ○ ·  ▸ bar.txt
+ ✓ ·  ▸ beta.go      f               ○ ✓  ▸ foo.txt
+ ○ ✓  ▸ foo.txt  ──────►             ○ ·  ▸ new.txt
+ ○ ·  ▸ new.txt
 ```
 
 Folding is for while you are reading — it gets a file out of the way and leaves
 it in the review. This is for the other half of the job: once most of a change
-has been signed off, what is left is the list of things still wanting
-something, and everything else is noise between them.
+has been signed off, what is left is the list of files still to read, and
+everything else is noise between them.
 
-**A hidden file is finished, not gone.** The tallies still count it — `1/4
+**A hidden file is read, not gone.** The tallies still count it — `1/4
 approved`, not `0/3` — because a review that appeared to shrink as it was
 completed would be lying about its own size. The review's title says how many
 are hidden, so a file missing from the headings is never a mystery.
@@ -509,19 +540,22 @@ This is the review the pictures above were taken of, as it stands on disk:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "branch": "rate-limit",
   "base": "main",
   "files": [
     {
       "path": "internal/server/handler.go",
-      "approved": true,
-      "digest": "7cab2ca2e8394ece",
-      "hunks": [
-        "7cab2ca2e8394ece"
-      ],
-      "by": "darren",
-      "at": "2026-08-28T19:41:02+01:00"
+      "verdicts": [
+        { "by": "claude", "approved": true, "digest": "7cab2ca2e8394ece", "at": "2026-08-28T19:41:02+01:00" },
+        { "by": "darren", "approved": true, "digest": "7cab2ca2e8394ece", "hunks": ["7cab2ca2e8394ece"], "at": "2026-08-28T19:41:02+01:00" }
+      ]
+    },
+    {
+      "path": "internal/store/store.go",
+      "verdicts": [
+        { "by": "claude", "approved": true, "digest": "e7716cd31bbdb458", "at": "2026-08-28T19:41:02+01:00" }
+      ]
     }
   ],
   "threads": [
@@ -546,10 +580,12 @@ This is the review the pictures above were taken of, as it stands on disk:
 | --- | --- |
 | `version` | The schema version, so a reader can tell whether it understands what it is looking at |
 | `branch`, `base` | What this review is of, and what it is measured from |
-| `files[].approved` | Whether the file has been signed off |
-| `files[].digest` | The change that was signed off; see [Approving](#approving) |
-| `files[].hunks` | The parts of the change signed off one hunk at a time: a digest for each run of changed lines |
-| `files[].nullified` | The approval fell because the file moved, rather than never being given |
+| `files[].verdicts[]` | What each reviewer has made of the file, one to a name; see [Whose approval](#whose-approval) |
+| `…verdicts[].by` | Whose verdict it is |
+| `…verdicts[].approved` | Whether they have signed the file off |
+| `…verdicts[].digest` | The change that was signed off; see [Approving](#approving) |
+| `…verdicts[].hunks` | The parts of the change they signed off one hunk at a time: a digest for each run of changed lines |
+| `…verdicts[].nullified` | Their approval fell because the file moved, rather than never being given |
 | `threads[].side` | `new` for a working-tree line, `old` for one the change removed |
 | `threads[].line` | The line number in that space, or `0` for a comment with no line left |
 | `threads[].lines` | How many lines the remark covers, counting from `line`; left out for the ordinary one-line comment, so a reader that ignores it entirely is still right about where the comment goes |
@@ -623,6 +659,11 @@ and **`unapproved`** counts the files there are to approve, where the file
 records only approvals. One fact to a line, so a script can read any of it
 without reading all of it: `discobox-review status | grep ^unapproved`.
 
+A file counts as **`approved`** there when anybody's approval of it stands.
+`status --by <who>` counts one reviewer's and nobody else's — `--by git-user`
+is how much of it *you* have read — and `diff --stat` says who against each
+file: `approved by claude, darren`.
+
 `base-chosen no` appears when nothing pinned the base, so it may move when the
 branch does. `problem` appears instead of an error when the base could not be
 used at all — this is the command you run to find out what is wrong, so it
@@ -649,8 +690,9 @@ none of that, which `git apply` will take.
 | `reply <id> <body>` | answer one |
 | `resolve <id>…` / `reopen <id>…` | close one, or open it again |
 | `delete <id> [n]` | a conversation, or one remark of it |
-| `approve <path>…` / `unapprove <path>…` | sign off a file, or take it back |
-| `status` | what is left to do, one fact to a line |
+| `approve <path>…` | sign off a file, as `--by`; anybody else's approval of it stands |
+| `unapprove --by <who> <path>…` | take that reviewer's approval back; `--all` in place of `--by` for everybody's |
+| `status [--by <who>]` | what is left to do, one fact to a line |
 | `help [<command>]` | the list, or one command in full |
 
 `base` saves, because the base is part of the review: the window and every
@@ -700,11 +742,28 @@ The smallest useful edits are all one line:
   array. `id` and `side` may be left out: ids are generated (`t1`, `t2`, …) and
   `side` defaults to `new`. Any unique id string is accepted, so an agent that
   wants to name its own may.
-- **Approve a file** — add `{"path": "x.go", "approved": true}` to `files`.
-  The digest may be left out; discobox-review stamps in the current one, after which
-  the approval nullifies like any other. That is the point of stamping rather
-  than treating a digest-less approval as stale: "approved" plainly means
-  "approved as it is now".
+- **Approve a file** — add `{"by": "claude", "approved": true}` to the file's
+  `verdicts`, or, when it has no entry yet, add
+  `{"path": "x.go", "by": "claude", "approved": true}` to `files`: a verdict
+  written straight onto the file is read as one, and put where it belongs at
+  the next save. The digest may be left out; discobox-review stamps in the
+  current one, after which the approval nullifies like any other. That is the
+  point of stamping rather than treating a digest-less approval as stale:
+  "approved" plainly means "approved as it is now".
+
+A review written by a discobox-review from before a file had a verdict for each
+reviewer — `"version": 1`, with the one approval on the file itself — is read
+the same way, as the verdict of whoever signed it, and saved as version 2.
+Version 1 put no name on a hunk signed off on its own, only on a whole file's
+approval; since only a window ever signed off a hunk, the first window to open
+such a review takes those hunks as its reader's. An approval with no name on
+it — written by hand, without a `by` — stays nobody's: it counts for `status`,
+shows in the second column as `✓ by nobody named`, and is never taken for
+yours. One from a version newer than the program is refused rather than half
+understood.
+
+Where a name has two verdicts on a file — a reviewer whose approval fell adding
+a fresh one by hand under the one that is there — the later one stands.
 
 discobox-review **notices the file changing within a second** and puts it straight on
 screen. It also **re-reads the file before every write of its own**, so a
@@ -769,7 +828,7 @@ different objects, not a letter meaning two unrelated things.
 | --- | --- | --- | --- |
 | `a` | approve this hunk, or the file from its heading | `A` | approve every file |
 | `Space` | fold this hunk, or the file from its heading | `F` | fold every file, or open them all |
-| `f` | hide the files that are done with | `z` | zoom the pane |
+| `f` | hide the files you have approved | `z` | zoom the pane |
 | `H` | show the history, or hide it | | |
 | `s` | unify the diff, or split it | `S` | cross a split row, to the other side |
 | `c` | comment on this line | `r` | reply |

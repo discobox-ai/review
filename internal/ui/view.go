@@ -353,7 +353,7 @@ func (m Model) viewStatusBar() string {
 func (m Model) scoreboard() string {
 	unapproved, uncommitted := 0, 0
 	for _, f := range m.work {
-		if !m.rv.Approved(f.path) {
+		if !m.rv.Approved(f.path, m.author) {
 			unapproved++
 		}
 		if f.state.Pending() != "" {
@@ -469,7 +469,7 @@ func helpText() string {
 		"    A  approve every file",
 		"    F  fold every file, or open them all again",
 		"    H  show the history under the review, or hide it again",
-		"    f  hide the files that are done with, and show them again",
+		"    f  hide the files you have approved, and show them again",
 		"    s  unify the diff, or split it into its two sides again",
 		"       (it opens split; clicking the word in the title does the same)",
 		"    S  cross a split row, to the line the change took away",
@@ -514,6 +514,11 @@ func helpText() string {
 		"  how much it changed, and what is left to commit. Space opens",
 		"  the one the cursor is on, and F opens them all.",
 		"",
+		"  There are two of those marks. The first is where the file",
+		"  stands with you; the second, fainter, is where it stands with",
+		"  anybody else — ✓ once one of them has approved it, and the end",
+		"  of the heading says who.",
+		"",
 		"  Under the review is the history: the commits this branch has",
 		"  made, under a first row standing for all of them at once.",
 		"  Picking a commit narrows the review to that step. H folds the",
@@ -530,6 +535,11 @@ func helpText() string {
 		"  Turning the diff context up or down does not nullify anything:",
 		"  the digest counts only the lines that changed.",
 		"",
+		"  An approval is also somebody's. Yours is the one this window",
+		"  goes by: a file an agent has approved is still one you have",
+		"  not read, so it stays open, stays counted as to read, and a",
+		"  gives it your approval beside theirs.",
+		"",
 		"  Approving a file folds it away again, so what is left open is",
 		"  what is left to do. Space unfolds it, and F folds the lot — or",
 		"  opens the lot, when they are already folded.",
@@ -539,9 +549,11 @@ func helpText() string {
 		"  to do about. An approved file with an open comment on it is not",
 		"  done with, so it comes back like the rest.",
 		"",
-		"  f goes further and takes those files off the screen altogether,",
-		"  leaving what is unapproved or still being argued about. The",
-		"  counts still count them: a hidden file is finished, not gone.",
+		"  f goes further and takes every file you have approved off the",
+		"  screen altogether, leaving what you have yet to read. Your",
+		"  approval alone decides it: not anybody else's, and not whether",
+		"  a comment on the file is still open. The counts still count",
+		"  them, open comments included: a hidden file is read, not gone.",
 		"",
 		"───────────────────────────────────────────────────────────────",
 		"Comments",

@@ -140,10 +140,10 @@ func firstDiffRow(t *testing.T, m Model) int {
 	return 0
 }
 
-// headLead is how much of a heading comes before the name: the file's verdict
-// and the space after it, then the band's own margin, the disclosure marker
+// headLead is how much of a heading comes before the name: the two verdicts
+// and the space after each, then the band's own margin, the disclosure marker
 // and the space after that.
-const headLead = 5
+const headLead = 7
 
 // histRowText is what a row of the history holds once the indent in front of
 // it is taken off, which is what dragging over it copies.

@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,7 +45,11 @@ func safeBranch(branch string) string {
 
 // Version is the schema version written into every file. It exists so that a
 // reader can tell whether it understands what it is looking at.
-const Version = 1
+//
+// 2 is the version in which a file carries a verdict for each reviewer. 1 kept
+// a single approval on the file itself, signed by whoever gave it last; a
+// review written that way is still read — see [File.UnmarshalJSON].
+const Version = 2
 
 // Sides a comment can be anchored to. "new" numbers lines in the working tree
 // as it stands now, "old" numbers them in the file as the base has it. Those
@@ -64,7 +69,7 @@ type State struct {
 	Branch string `json:"branch"`
 	Base   string `json:"base,omitempty"`
 
-	// Files carries one entry per file anybody has had an opinion about.
+	// Files carries one entry per file anybody has given a verdict on.
 	// A file nobody has approved has no entry at all.
 	Files []*File `json:"files"`
 
@@ -78,15 +83,26 @@ func (s *State) Of(branch string) bool {
 	return s.Branch == "" || branch == "" || s.Branch == branch
 }
 
-// File is what the review says about one path.
+// File is what the review says about one path: what each reviewer has made
+// of it, one verdict to a name, in the order of the names.
+//
+// A verdict each rather than one for the file, because a file an agent has
+// approved is not thereby one the person has read. Whose approval counts is
+// for whoever is asking to say.
+type File struct {
+	Path     string     `json:"path"`
+	Verdicts []*Verdict `json:"verdicts"`
+}
+
+// Verdict is what one reviewer says about one path.
 //
 // Approved is a claim about a particular set of changes, not about a name:
 // Digest identifies the change that was read, so a file edited after it was
 // approved no longer matches and the approval falls. Nullified records that
 // this is what happened, rather than the approval merely never having been
 // given, since the two are worth telling apart.
-type File struct {
-	Path      string `json:"path"`
+type Verdict struct {
+	By        string `json:"by"`
 	Approved  bool   `json:"approved"`
 	Digest    string `json:"digest,omitempty"`
 	Nullified bool   `json:"nullified,omitempty"`
@@ -95,8 +111,47 @@ type File struct {
 	// whether or not the file as a whole is approved, and one that names a
 	// change no longer there simply matches nothing.
 	Hunks []string `json:"hunks,omitempty"`
-	By    string   `json:"by,omitempty"`
 	At    string   `json:"at,omitempty"`
+}
+
+// empty reports whether a verdict says nothing: no approval, none that fell,
+// and no hunk signed off. Such a one is not kept.
+func (v *Verdict) empty() bool {
+	return !v.Approved && !v.Nullified && len(v.Hunks) == 0
+}
+
+// UnmarshalJSON reads a file's entry in either of the shapes it has had.
+//
+// The older one is the verdict written straight onto the file, with nothing
+// around it. That is how a version 1 review has it, and it is also still the
+// least a hand can write to approve something — a path, "approved": true and
+// a name — so it goes on being read: as the verdict of whoever "by" names.
+// It goes after the list proper, so that where the same name has a verdict in
+// both, this one is the later of the two — see [State.normalise].
+func (f *File) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Path     string     `json:"path"`
+		Verdicts []*Verdict `json:"verdicts"`
+		Verdict
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	f.Path, f.Verdicts = raw.Path, raw.Verdicts
+	if flat := raw.Verdict; !flat.empty() {
+		f.Verdicts = append(f.Verdicts, &flat)
+	}
+	return nil
+}
+
+// verdict is the one a reviewer has given on this file, or nil.
+func (f *File) verdict(by string) *Verdict {
+	for _, v := range f.Verdicts {
+		if v != nil && v.By == by {
+			return v
+		}
+	}
+	return nil
 }
 
 // Thread is one conversation, hanging off one line.
@@ -157,6 +212,12 @@ func Parse(data []byte) (*State, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
+	// Written by a discobox-review newer than this one. Reading it as though
+	// it were understood would be followed by writing it back without
+	// whatever was not, so it is not read at all.
+	if s.Version > Version {
+		return nil, fmt.Errorf("the review is version %d and this discobox-review reads up to %d: it wants upgrading", s.Version, Version)
+	}
 	s.normalise()
 	return &s, nil
 }
@@ -167,9 +228,52 @@ func (s *State) normalise() {
 	if s.Version == 0 {
 		s.Version = Version
 	}
+	// A path named twice is one file: somebody adding their approval by hand
+	// may well have added an entry rather than looked for the one there, and
+	// what they said belongs with the rest of what is said about it.
+	first := map[string]*File{}
+	for _, f := range s.Files {
+		if f == nil {
+			continue
+		}
+		if into := first[f.Path]; into != nil {
+			into.Verdicts = append(into.Verdicts, f.Verdicts...)
+			f.Path = ""
+			continue
+		}
+		first[f.Path] = f
+	}
 	files := s.Files[:0]
 	for _, f := range s.Files {
-		if f != nil && f.Path != "" {
+		if f == nil || f.Path == "" {
+			continue
+		}
+		// One verdict to a name, and none that says nothing; a file left
+		// with none has nothing said about it.
+		//
+		// The last of them, where a name has several. Nothing here writes a
+		// second, so a second is somebody's hand: a reviewer whose approval
+		// fell adding the one that replaces it, below the one that is there.
+		// The hunks they had signed off are not what they were taking back,
+		// so those come along when the later verdict names none.
+		verdicts := f.Verdicts[:0]
+		for _, v := range f.Verdicts {
+			if v == nil || v.empty() {
+				continue
+			}
+			at := slices.IndexFunc(verdicts, func(o *Verdict) bool { return o.By == v.By })
+			if at < 0 {
+				verdicts = append(verdicts, v)
+				continue
+			}
+			if len(v.Hunks) == 0 {
+				v.Hunks = verdicts[at].Hunks
+			}
+			verdicts[at] = v
+		}
+		f.Verdicts = verdicts
+		sort.SliceStable(f.Verdicts, func(i, j int) bool { return f.Verdicts[i].By < f.Verdicts[j].By })
+		if len(f.Verdicts) > 0 {
 			files = append(files, f)
 		}
 	}
@@ -248,62 +352,159 @@ func (s *State) entryFor(path string) *File {
 	return f
 }
 
-// Approved reports whether a path has been approved as it now stands.
-func (s *State) Approved(path string) bool {
-	f := s.FileFor(path)
-	return f != nil && f.Approved
+// VerdictOf is what a reviewer has said about a path, or nil.
+func (s *State) VerdictOf(path, by string) *Verdict {
+	if f := s.FileFor(path); f != nil {
+		return f.verdict(by)
+	}
+	return nil
 }
 
-// Nullified reports whether a path was approved and then changed.
-func (s *State) Nullified(path string) bool {
-	f := s.FileFor(path)
-	return f != nil && !f.Approved && f.Nullified
-}
-
-// Approve records an approval of the change identified by digest.
-func (s *State) Approve(path, digest, by string) {
+// verdictFor is VerdictOf, making one when there is none.
+func (s *State) verdictFor(path, by string) *Verdict {
 	f := s.entryFor(path)
-	f.Approved, f.Digest, f.Nullified = true, digest, false
-	f.By, f.At = by, Now()
+	if v := f.verdict(by); v != nil {
+		return v
+	}
+	v := &Verdict{By: by}
+	f.Verdicts = append(f.Verdicts, v)
+	sort.SliceStable(f.Verdicts, func(i, j int) bool { return f.Verdicts[i].By < f.Verdicts[j].By })
+	return v
 }
 
-// Unapprove takes an approval back. It is not a nullification: the reviewer
-// changed their mind rather than the file changing under them.
-func (s *State) Unapprove(path string) {
+// Approved reports whether a reviewer has approved a path as it now stands.
+func (s *State) Approved(path, by string) bool {
+	v := s.VerdictOf(path, by)
+	return v != nil && v.Approved
+}
+
+// Nullified reports whether a reviewer approved a path which then changed.
+func (s *State) Nullified(path, by string) bool {
+	v := s.VerdictOf(path, by)
+	return v != nil && !v.Approved && v.Nullified
+}
+
+// Approvers is everybody whose approval of a path stands, by name.
+func (s *State) Approvers(path string) []string {
+	return s.named(path, func(v *Verdict) bool { return v.Approved })
+}
+
+// Fallen is everybody who approved a path which then changed, by name.
+func (s *State) Fallen(path string) []string {
+	return s.named(path, func(v *Verdict) bool { return !v.Approved && v.Nullified })
+}
+
+func (s *State) named(path string, want func(*Verdict) bool) []string {
+	f := s.FileFor(path)
+	if f == nil {
+		return nil
+	}
+	var out []string
+	for _, v := range f.Verdicts {
+		if want(v) {
+			out = append(out, v.By)
+		}
+	}
+	return out
+}
+
+// Approve records a reviewer's approval of the change identified by digest.
+// Anybody else's verdict on the path is left as it is.
+func (s *State) Approve(path, digest, by string) {
+	v := s.verdictFor(path, by)
+	v.Approved, v.Digest, v.Nullified = true, digest, false
+	v.At = Now()
+}
+
+// Unapprove takes a reviewer's approval back, and the hunks they signed off
+// with it. It is not a nullification: the reviewer changed their mind rather
+// than the file changing under them.
+func (s *State) Unapprove(path, by string) {
+	s.drop(path, func(v *Verdict) bool { return v.By == by })
+}
+
+// UnapproveAll takes back every approval a path has, whoever gave it.
+func (s *State) UnapproveAll(path string) {
+	s.drop(path, func(*Verdict) bool { return true })
+}
+
+// drop removes the verdicts on a path that match, and the path's entry with
+// them when none is left.
+func (s *State) drop(path string, match func(*Verdict) bool) {
 	f := s.FileFor(path)
 	if f == nil {
 		return
 	}
-	f.Approved, f.Nullified = false, false
-	f.Hunks = nil
-	f.At = Now()
+	f.Verdicts = slices.DeleteFunc(f.Verdicts, match)
+	if len(f.Verdicts) == 0 {
+		s.Files = slices.DeleteFunc(s.Files, func(o *File) bool { return o == f })
+	}
 }
 
-// ApprovedHunks is the runs of changed lines in a path that have been signed
-// off one at a time, as a set of their digests.
-func (s *State) ApprovedHunks(path string) map[string]bool {
-	f := s.FileFor(path)
-	if f == nil || len(f.Hunks) == 0 {
+// ApprovedHunks is the runs of changed lines in a path that a reviewer has
+// signed off one at a time, as a set of their digests.
+func (s *State) ApprovedHunks(path, by string) map[string]bool {
+	v := s.VerdictOf(path, by)
+	if v == nil || len(v.Hunks) == 0 {
 		return nil
 	}
-	set := make(map[string]bool, len(f.Hunks))
-	for _, d := range f.Hunks {
+	set := make(map[string]bool, len(v.Hunks))
+	for _, d := range v.Hunks {
 		set[d] = true
 	}
 	return set
 }
 
-// SetHunks replaces the runs of changed lines signed off in a path.
-func (s *State) SetHunks(path string, digests []string) {
+// SetHunks replaces the runs of changed lines a reviewer has signed off in a
+// path.
+func (s *State) SetHunks(path, by string, digests []string) {
 	if len(digests) == 0 {
-		if f := s.FileFor(path); f != nil {
-			f.Hunks = nil
+		if v := s.VerdictOf(path, by); v != nil {
+			v.Hunks = nil
+			if v.empty() {
+				s.Unapprove(path, by)
+			}
 		}
 		return
 	}
 	digests = append([]string(nil), digests...)
 	sort.Strings(digests)
-	s.entryFor(path).Hunks = digests
+	s.verdictFor(path, by).Hunks = digests
+}
+
+// ClaimHunks hands a reviewer the hunks that are signed off under no name, in
+// every path, and reports whether there were any.
+//
+// A version 1 review named whoever approved a file and nobody for a hunk
+// signed off on its own, so those come over belonging to no one — see
+// [File.UnmarshalJSON]. But only a window has ever signed off a hunk, and a
+// window has one reader, so the first one to open the review takes them as
+// its reader's: they are that person's reading, and would otherwise sit in
+// the file counting for nobody while every hunk came back unread.
+//
+// An approval of the whole file under no name is left where it is. That is
+// what a hand writes, and whose hand is exactly what must not be guessed.
+func (s *State) ClaimHunks(by string) bool {
+	if by == "" {
+		return false
+	}
+	claimed := false
+	for _, f := range slices.Clone(s.Files) {
+		nameless := f.verdict("")
+		if nameless == nil || len(nameless.Hunks) == 0 {
+			continue
+		}
+		mine := s.verdictFor(f.Path, by)
+		for _, d := range nameless.Hunks {
+			if !slices.Contains(mine.Hunks, d) {
+				mine.Hunks = append(mine.Hunks, d)
+			}
+		}
+		sort.Strings(mine.Hunks)
+		nameless.Hunks, claimed = nil, true
+		s.drop(f.Path, (*Verdict).empty)
+	}
+	return claimed
 }
 
 // PruneHunks drops the hunk approvals of a path that are of changes no longer
@@ -315,52 +516,60 @@ func (s *State) SetHunks(path string, digests []string) {
 // A file's approval does not come back that way, and nor should a hunk's.
 func (s *State) PruneHunks(path string, present map[string]bool) bool {
 	f := s.FileFor(path)
-	if f == nil || len(f.Hunks) == 0 {
+	if f == nil {
 		return false
 	}
-	kept := f.Hunks[:0]
-	for _, d := range f.Hunks {
-		if present[d] {
-			kept = append(kept, d)
+	changed := false
+	for _, v := range f.Verdicts {
+		kept := slices.DeleteFunc(slices.Clone(v.Hunks), func(d string) bool { return !present[d] })
+		if len(kept) == len(v.Hunks) {
+			continue
+		}
+		changed = true
+		if v.Hunks = kept; len(kept) == 0 {
+			v.Hunks = nil
 		}
 	}
-	changed := len(kept) != len(f.Hunks)
-	f.Hunks = kept
-	if len(f.Hunks) == 0 {
-		f.Hunks = nil
+	if changed {
+		s.drop(path, (*Verdict).empty)
 	}
 	return changed
 }
 
 // Reconcile checks every approval against the change now in front of the
-// reviewer, and reports whether anything moved.
+// reviewer, and reports whether anything moved, and which paths had an
+// approval fall.
 //
 // digests maps a path to the digest of its current change. An approval whose
 // digest no longer matches is nullified: the file has been edited since it was
-// read, so the approval was of something else. An approval carrying no digest
-// at all — the shape an agent writes when it approves a file by hand — is
-// stamped with the current one rather than being treated as stale, since
-// "approved" plainly means "approved as it is now".
+// read, so the approval was of something else — whoever gave it. An approval
+// carrying no digest at all — the shape an agent writes when it approves a
+// file by hand — is stamped with the current one rather than being treated as
+// stale, since "approved" plainly means "approved as it is now".
 func (s *State) Reconcile(digests map[string]string) (changed bool, nullified []string) {
 	for _, f := range s.Files {
-		if !f.Approved {
-			continue
-		}
 		cur, ok := digests[f.Path]
 		if !ok {
 			// Not part of the review as it now stands: the base may have
 			// moved, or the change may have been committed away. Leaving the
-			// approval alone means it is still there if the file comes back.
+			// approvals alone means they are still there if the file comes
+			// back.
 			continue
 		}
-		switch {
-		case f.Digest == "":
-			f.Digest, changed = cur, true
-			if f.At == "" {
-				f.At = Now()
+		fell := false
+		for _, v := range f.Verdicts {
+			switch {
+			case !v.Approved:
+			case v.Digest == "":
+				v.Digest, changed = cur, true
+				if v.At == "" {
+					v.At = Now()
+				}
+			case v.Digest != cur:
+				v.Approved, v.Nullified, changed, fell = false, true, true, true
 			}
-		case f.Digest != cur:
-			f.Approved, f.Nullified, changed = false, true, true
+		}
+		if fell {
 			nullified = append(nullified, f.Path)
 		}
 	}

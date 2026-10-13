@@ -131,7 +131,7 @@ func newKeyMap() keyMap {
 		// other folds what is left. Lower case is the bigger hammer, which is
 		// the wrong way round — but f is the letter a filter wants, and F was
 		// already the fold's.
-		HideDone: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "hide the files that are done with")),
+		HideDone: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "hide the files you have approved")),
 		// s stands the two sides of a change beside each other. Neither view
 		// is right for everything, so it is a key rather than a setting.
 		SplitKey: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "split the diff, or unify it")),

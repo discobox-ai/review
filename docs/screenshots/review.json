@@ -1,17 +1,38 @@
 {
-  "version": 1,
+  "version": 2,
   "branch": "rate-limit",
   "base": "main",
   "files": [
     {
       "path": "internal/server/handler.go",
-      "approved": true,
-      "digest": "7cab2ca2e8394ece",
-      "hunks": [
-        "7cab2ca2e8394ece"
-      ],
-      "by": "darren",
-      "at": "2026-08-28T19:41:02+01:00"
+      "verdicts": [
+        {
+          "by": "claude",
+          "approved": true,
+          "digest": "7cab2ca2e8394ece",
+          "at": "2026-08-28T19:41:02+01:00"
+        },
+        {
+          "by": "darren",
+          "approved": true,
+          "digest": "7cab2ca2e8394ece",
+          "hunks": [
+            "7cab2ca2e8394ece"
+          ],
+          "at": "2026-08-28T19:41:02+01:00"
+        }
+      ]
+    },
+    {
+      "path": "internal/store/store.go",
+      "verdicts": [
+        {
+          "by": "claude",
+          "approved": true,
+          "digest": "e7716cd31bbdb458",
+          "at": "2026-08-28T19:41:02+01:00"
+        }
+      ]
     }
   ],
   "threads": [

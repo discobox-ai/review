@@ -298,22 +298,22 @@ func TestApproving(t *testing.T) {
 	repo := testRepo(t)
 	run(t, repo, "approve", "--by", "git-user", "server.go", "other.go")
 	st := stored(t, repo)
-	if !st.Approved("server.go") || !st.Approved("other.go") {
+	if !st.Approved("server.go", "Test") || !st.Approved("other.go", "Test") {
 		t.Fatalf("files = %+v", st.Files)
 	}
-	if got := st.FileFor("server.go"); got.Digest != "" {
+	if got := st.VerdictOf("server.go", "Test"); got.Digest != "" {
 		t.Errorf("digest = %q, want it left for discobox-review to stamp", got.Digest)
 	}
-	if got := st.FileFor("server.go").By; got != "Test" {
+	if got := st.VerdictOf("server.go", "Test").By; got != "Test" {
 		t.Errorf("by %q", got)
 	}
 
-	run(t, repo, "unapprove", "server.go")
+	run(t, repo, "unapprove", "--by", "git-user", "server.go")
 	st = stored(t, repo)
-	if st.Approved("server.go") {
+	if st.Approved("server.go", "Test") {
 		t.Error("unapprove did not take it back")
 	}
-	if st.Nullified("server.go") {
+	if st.Nullified("server.go", "Test") {
 		t.Error("unapproving marked the file as having changed")
 	}
 }
@@ -366,7 +366,7 @@ func TestStatusNullifiesAStaleApproval(t *testing.T) {
 	if got := fields(t, run(t, repo, "status")); got["approved"] != "1" {
 		t.Fatalf("approved = %q after approving", got["approved"])
 	}
-	if stored(t, repo).FileFor("server.go").Digest == "" {
+	if stored(t, repo).VerdictOf("server.go", "Test").Digest == "" {
 		t.Fatal("reading the review did not stamp the digest in")
 	}
 
@@ -379,7 +379,7 @@ func TestStatusNullifiesAStaleApproval(t *testing.T) {
 		t.Errorf("nullified = %q, want the file named", got["nullified"])
 	}
 	// And it is written down, so the window sees the same thing.
-	if f := stored(t, repo).FileFor("server.go"); f.Approved || !f.Nullified {
+	if f := stored(t, repo).VerdictOf("server.go", "Test"); f.Approved || !f.Nullified {
 		t.Errorf("the review says %+v", f)
 	}
 	// The diff heading says so too.
@@ -413,7 +413,7 @@ func TestAReadingCommandDoesNotUndoWhatWasWrittenMeanwhile(t *testing.T) {
 	if len(st.Threads) != 1 {
 		t.Fatalf("status wrote its stale copy over the comment: threads = %+v", st.Threads)
 	}
-	if st.FileFor("server.go").Digest == "" {
+	if st.VerdictOf("server.go", "Test").Digest == "" {
 		t.Error("the approval was not stamped")
 	}
 	// And it reports the review it left behind, not the one it started with.
@@ -497,7 +497,7 @@ func TestCommandsRunTogetherAllLand(t *testing.T) {
 		}
 		seen[th.ID] = true
 	}
-	if f := st.FileFor("server.go"); f == nil || !f.Approved || f.Digest == "" {
+	if f := st.VerdictOf("server.go", "Test"); f == nil || !f.Approved || f.Digest == "" {
 		t.Errorf("the approval did not come through stamped: %+v", f)
 	}
 }
@@ -864,7 +864,7 @@ func TestEveryRemarkIsSigned(t *testing.T) {
 	if by := st.Threads[0].Comments[0].By; by != "Test" {
 		t.Errorf("--by %s filed it under %q, want git's own user.name", GitUser, by)
 	}
-	if by := st.FileFor("server.go").By; by != "Test" {
+	if by := st.VerdictOf("server.go", "Test").By; by != "Test" {
 		t.Errorf("--by %s approved as %q, want git's own user.name", GitUser, by)
 	}
 
@@ -947,4 +947,48 @@ func TestHelpForNothingInParticular(t *testing.T) {
 		t.Error("the listing does not say there is more")
 	}
 	fails(t, repo, "help", "nope")
+}
+
+// An approval is its reviewer's own: a second one stands beside the first
+// rather than replacing it, and each can be counted and taken back alone.
+func TestApprovalsArePerReviewer(t *testing.T) {
+	repo := testRepo(t)
+	run(t, repo, "approve", "--by", "reviewer", "server.go")
+	run(t, repo, "approve", "--by", "security", "server.go")
+	st := stored(t, repo)
+	if !st.Approved("server.go", "reviewer") || !st.Approved("server.go", "security") {
+		t.Fatalf("verdicts = %+v", st.FileFor("server.go"))
+	}
+	if out := run(t, repo, "diff", "--stat"); !strings.Contains(out, "approved by reviewer, security") {
+		t.Errorf("the heading does not say who approved:\n%s", out)
+	}
+
+	// Anybody's approval counts, until somebody in particular is asked about.
+	if got := fields(t, run(t, repo, "status")); got["approved"] != "1" {
+		t.Errorf("approved = %q, want 1", got["approved"])
+	}
+	if got := fields(t, run(t, repo, "status", "--by", "git-user")); got["approved"] != "0" {
+		t.Errorf("approved by the person = %q, want 0", got["approved"])
+	}
+	if got := fields(t, run(t, repo, "status", "--by", "security")); got["approved"] != "1" {
+		t.Errorf("approved by security = %q, want 1", got["approved"])
+	}
+
+	run(t, repo, "unapprove", "--by", "security", "server.go")
+	st = stored(t, repo)
+	if st.Approved("server.go", "security") || !st.Approved("server.go", "reviewer") {
+		t.Errorf("unapprove --by took back the wrong one: %v", st.Approvers("server.go"))
+	}
+
+	// Whose is said every time: a command that guessed would take back an
+	// approval nobody meant it to.
+	fails(t, repo, "unapprove", "server.go")
+	fails(t, repo, "unapprove", "--all", "--by", "reviewer", "server.go")
+	if !stored(t, repo).Approved("server.go", "reviewer") {
+		t.Fatal("an unapprove that was refused took an approval back")
+	}
+	run(t, repo, "unapprove", "--all", "server.go")
+	if got := stored(t, repo).Approvers("server.go"); len(got) != 0 {
+		t.Errorf("unapprove --all left %v standing", got)
+	}
 }

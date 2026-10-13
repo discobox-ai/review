@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,15 @@ type Command struct {
 	// Flags are the flags this command takes, by name. Anything else given to
 	// it is refused rather than quietly ignored.
 	Flags []string
+
+	// ByOptional marks a command that takes --by to narrow what it does to
+	// one reviewer, rather than to sign something. Such a command writes no
+	// name, so there is a way to run it without one.
+	ByOptional bool
+
+	// FlagHelp is what a flag means to this command, where that is not what
+	// it means to the others.
+	FlagHelp map[string]string
 }
 
 // Commands is every subcommand, in the order help lists them.
@@ -111,20 +121,36 @@ var Commands = []Command{
 	{
 		Name: "approve", Args: "--by <who> <path>…", What: "sign off a file",
 		Flags: []string{"by"},
-		Long: "No digest is written, exactly as a hand-written approval leaves none:\n" +
+		Long: "The approval is --by's own, and stands beside anybody else's: a file\n" +
+			"can be approved by a reviewer and still be unread by the person.\n\n" +
+			"No digest is written, exactly as a hand-written approval leaves none:\n" +
 			"Discobox Review stamps in the change as it stands the next time anything\n" +
 			"reads the review, which is what keeps such an approval nullifiable.\n" +
-			"Edit the file afterwards and the approval falls.",
+			"Edit the file afterwards and every approval of it falls.",
 		Example: "discobox-review approve --by git-user internal/git/git.go",
 	},
-	{Name: "unapprove", Args: "<path>…", What: "take that back"},
 	{
-		Name: "status", Args: "", What: "what is left to do, one fact to a line",
-		Flags: []string{"base"},
+		Name: "unapprove", Args: "--by <who> | --all <path>…", What: "take that back",
+		Flags: []string{"by", "all"}, ByOptional: true,
+		FlagHelp: map[string]string{"by": "whose approval — git-user for git's own user.name"},
+		Long: "With --by it takes back that reviewer's approval and leaves the\n" +
+			"others standing. --all takes back every approval the file has,\n" +
+			"whoever gave it.\n\n" +
+			"It wants one or the other, and has no default for the reason --by\n" +
+			"has none anywhere else: an approval is somebody's, and a command\n" +
+			"that guessed whose would take back one nobody meant it to.",
+		Example: "discobox-review unapprove --by reviewer internal/git/git.go",
+	},
+	{
+		Name: "status", Args: "[--by <who>]", What: "what is left to do, one fact to a line",
+		Flags: []string{"base", "by"}, ByOptional: true,
+		FlagHelp: map[string]string{"by": "whose approvals to count — git-user for git's own user.name; anybody's when left out"},
 		Long: "Reads the repository as well as the review, because two of the things\n" +
 			"worth knowing are not in the file: merge-base is the commit the base\n" +
 			"and this branch last had in common, and unapproved counts the files\n" +
 			"there are to approve.\n\n" +
+			"A file counts as approved when anybody's approval of it stands. With\n" +
+			"--by it is that reviewer's approval that counts, and nobody else's.\n\n" +
 			"One fact to a line, so a script can read any of it without reading\n" +
 			"all of it.",
 		Example: "discobox-review status | grep ^unapproved",
@@ -140,6 +166,7 @@ var flagHelp = map[string]string{
 	"stat":     "the headings alone, without the diff under them",
 	"raw":      "the plain unified diff, for piping somewhere else",
 	"auto":     "let Discobox Review work the base out again",
+	"all":      "every reviewer's, whoever they are",
 	"by":       "who a remark is from — required; git-user for git's own user.name",
 	"side":     "old, to anchor to a line the change removed",
 	"open":     "only what is still open",
@@ -218,7 +245,7 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 
 	// A command that writes a remark writes a name with it, and there is no
 	// name to fall back on: see Author.
-	if c.takes("by") {
+	if c.takes("by") && !(c.ByOptional && opts.by == "") {
 		if opts.by, err = Author(repo, opts.by); err != nil {
 			return fmt.Errorf("%s: %w", c.Name, err)
 		}
@@ -334,6 +361,9 @@ func helpFor(out io.Writer, name string) error {
 		fmt.Fprintln(out)
 		for _, f := range c.Flags {
 			what := flagHelp[f]
+			if here, ok := c.FlagHelp[f]; ok {
+				what = here
+			}
 			if f == "context" {
 				what += " (default " + strconv.Itoa(git.DefaultContext) + ")"
 			}
@@ -354,6 +384,7 @@ type options struct {
 	path     string
 	base     string
 	auto     bool
+	all      bool
 	context  int
 	stat     bool
 	raw      bool
@@ -400,6 +431,8 @@ func parseFlags(c Command, args []string) (options, []string, error) {
 			}
 		case "auto":
 			o.auto = true
+		case "all":
+			o.all = true
 		case "stat":
 			o.stat = true
 		case "raw":
@@ -521,10 +554,15 @@ func fileLine(p *git.Patch, st *review.State, state git.State) string {
 	if dels > 0 {
 		parts = append(parts, "−"+strconv.Itoa(dels))
 	}
-	switch {
-	case st.Approved(p.Path):
-		parts = append(parts, "approved")
-	case st.Nullified(p.Path):
+	// Who approved it is said along with the fact, since one reviewer's
+	// approval is no news about another's.
+	if by := st.Approvers(p.Path); len(by) > 0 {
+		verdict := "approved"
+		if names := strings.Join(slices.DeleteFunc(by, func(n string) bool { return n == "" }), ", "); names != "" {
+			verdict += " by " + names
+		}
+		parts = append(parts, verdict)
+	} else if len(st.Fallen(p.Path)) > 0 {
 		parts = append(parts, "approval nullified")
 	}
 	if pending := state.Pending(); pending != "" {
@@ -690,13 +728,20 @@ func status(out io.Writer, repo *git.Repo, st *review.State, branch string, o op
 		return err
 	}
 
+	// Anybody's approval, or the one reviewer's that was asked about.
+	stands := func(path string) bool {
+		if o.by != "" {
+			return st.Approved(path, o.by)
+		}
+		return len(st.Approvers(path)) > 0
+	}
 	files, approved := 0, 0
 	for _, p := range patches {
 		if p.Path == "" {
 			continue
 		}
 		files++
-		if st.Approved(p.Path) {
+		if stands(p.Path) {
 			approved++
 		}
 	}
@@ -711,7 +756,10 @@ func status(out io.Writer, repo *git.Repo, st *review.State, branch string, o op
 	// something about, so it is named rather than counted.
 	var fallen []string
 	for _, f := range st.Files {
-		if f.Nullified && !f.Approved {
+		if stands(f.Path) {
+			continue
+		}
+		if by := st.Fallen(f.Path); (o.by == "" && len(by) > 0) || (o.by != "" && slices.Contains(by, o.by)) {
 			fallen = append(fallen, f.Path)
 		}
 	}
@@ -912,6 +960,11 @@ func setApproved(st *review.State, repo *git.Repo, args []string, o options, wan
 	if len(args) == 0 {
 		return "", errors.New("wants at least one path")
 	}
+	// Whose approval is taken back is said, one way or the other. Leaving it
+	// out is how an agent withdrawing its own would take the person's too.
+	if !want && (o.by == "") == !o.all {
+		return "", fmt.Errorf("unapprove wants --by <who>, for one reviewer's approval, or --all, for everybody's: not both, and not neither")
+	}
 	for _, path := range args {
 		if want {
 			// No digest: discobox-review stamps in the change as it stands the next
@@ -920,7 +973,11 @@ func setApproved(st *review.State, repo *git.Repo, args []string, o options, wan
 			st.Approve(path, "", o.by)
 			continue
 		}
-		st.Unapprove(path)
+		if o.by != "" {
+			st.Unapprove(path, o.by)
+			continue
+		}
+		st.UnapproveAll(path)
 	}
 	verb := "approved "
 	if !want {

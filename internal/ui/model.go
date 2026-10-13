@@ -109,9 +109,9 @@ type Model struct {
 	gapsOpen   map[hunkKey]bool // the unchanged stretches between hunks that have been opened
 	rescanning bool
 
-	// hideDone takes the files that are done with off the screen altogether,
-	// leaving what is unapproved or still being argued about. Folding puts a
-	// file out of the way; this puts it out of the review.
+	// hideDone takes the files the reader has approved off the screen
+	// altogether, leaving what they have yet to. Folding puts a file out of
+	// the way; this puts it out of the review.
 	hideDone bool
 
 	// The review document, and enough of its file to notice somebody else
@@ -523,7 +523,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.mutate(func(st *review.State) {
 			for _, p := range msg.paths {
 				st.Approve(p, msg.digests[p], msg.by)
-				st.SetHunks(p, msg.hunks[p])
+				st.SetHunks(p, msg.by, msg.hunks[p])
 			}
 		}) {
 			undo()
@@ -680,7 +680,7 @@ func (m *Model) adoptReview() {
 	if saved := m.readReview(); !m.basePinned {
 		m.baseRef = saved
 	}
-	m.reconcile()
+	m.reconcile(true)
 }
 
 // readReview loads the review file and reports the base it names, which is not
@@ -800,11 +800,20 @@ func (m *Model) pickUpChanges() tea.Cmd {
 	if moved {
 		m.baseRef = base
 	}
-	m.reconcile()
+	// An approval that has to be judged — stamped, or struck down — is
+	// judged against git as it is now, not as it was when this window last
+	// looked. Whatever wrote the review may well have been answering an edit
+	// to the tree, which nothing has told the window about: the diff on
+	// screen is the one from before it, and going by that would strike down
+	// an approval of the file as it stands for not being of the file as it
+	// was. So the tree is read again first, and the scan's arrival does the
+	// judging.
+	stale := m.reconcile(false)
 	m.rebuild()
-	if moved {
+	if moved || stale {
 		// The base is what every diff on screen was taken against, so a
-		// review that names a different one has to be read again from git.
+		// review that names a different one has to be read again from git
+		// too.
 		m.rescanning = true
 		return m.rescanCmd()
 	}
@@ -813,9 +822,13 @@ func (m *Model) pickUpChanges() tea.Cmd {
 
 // reconcile checks the approvals against the changes now in front of the
 // reviewer, and says so when one has fallen.
-func (m *Model) reconcile() {
+//
+// fresh says the changes in front of the reviewer have just been read from
+// git. When they have not, nothing is decided: it reports whether there is
+// anything to decide, and the caller reads git again before coming back.
+func (m *Model) reconcile(fresh bool) (undecided bool) {
 	if len(m.work) == 0 {
-		return
+		return false
 	}
 	digests := make(map[string]string, len(m.work))
 	for _, f := range m.work {
@@ -832,8 +845,14 @@ func (m *Model) reconcile() {
 		}
 		present[f.path] = runs
 	}
+	author := m.author
 	verdict := func(st *review.State) (changed bool, nullified []string) {
 		changed, nullified = st.Reconcile(digests)
+		// Hunks signed off before a sign-off carried a name are this
+		// reader's: see [review.State.ClaimHunks].
+		if st.ClaimHunks(author) {
+			changed = true
+		}
 		for path, runs := range present {
 			if st.PruneHunks(path, runs) {
 				changed = true
@@ -845,11 +864,14 @@ func (m *Model) reconcile() {
 	// saved: one that could not be written must not be shown as if it stood.
 	probe, err := review.Parse(m.rv.Bytes())
 	if err != nil {
-		return
+		return false
 	}
 	changed, nullified := verdict(probe)
 	if !changed {
-		return
+		return false
+	}
+	if !fresh {
+		return true
 	}
 	// What fell, fell from the copy on screen. The file may have moved on
 	// since that was read, so the same verdict is given again on what is
@@ -875,6 +897,7 @@ func (m *Model) reconcile() {
 	default:
 		m.setWarn(plural(len(nullified), "approval", "approvals") + " nullified: files changed since they were read")
 	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -902,16 +925,23 @@ func (m *Model) rebuild() {
 	}
 
 	files = m.place(files)
-	// A file that is done with — approved, with nothing outstanding — is left
-	// out entirely while the filter is on. The count of them goes with the
-	// panes, so that what they say about the review as a whole stays true
-	// about the review as a whole.
-	hidden := 0
+	// A file the reader has approved is left out entirely while the filter is
+	// on. The count of them goes with the panes, so that what they say about
+	// the review as a whole stays true about the review as a whole.
+	//
+	// Their approval and nothing else decides it. Not anybody else's: what
+	// is being hidden is what this reader has read. And not whether a
+	// comment on the file is still open, which is what keeps a file from
+	// folding: most open comments are a reviewer and an author still talking,
+	// and a reader who has signed the file off has asked not to be shown it.
+	// The title goes on counting the open ones, hidden or not.
+	hidden, hiddenOpen := 0, 0
 	if m.hideDone {
 		kept := files[:0]
 		for _, f := range files {
-			if f.done() {
+			if f.approved {
 				hidden++
+				hiddenOpen += f.open
 				continue
 			}
 			kept = append(kept, f)
@@ -920,7 +950,7 @@ func (m *Model) rebuild() {
 	}
 
 	m.view.setFiles(files, m.commit, label)
-	m.view.hidden = hidden
+	m.view.hidden, m.view.hiddenOpen = hidden, hiddenOpen
 	m.view.note = m.emptyNote()
 	m.layout()
 }
@@ -929,7 +959,7 @@ func (m *Model) rebuild() {
 // either the end of the job or the beginning of it.
 func (m *Model) emptyNote() string {
 	if m.hideDone && len(m.work) > 0 {
-		return "Nothing left to read: every file is approved and every comment answered.\n" +
+		return "Nothing left to read: you have approved every file.\n" +
 			"Press f to see them all again."
 	}
 	if m.commit != "" {
@@ -958,14 +988,20 @@ func (m *Model) place(files []*reviewFile) []*reviewFile {
 	for _, f := range files {
 		f.threads, f.loose = map[int][]*review.Thread{}, nil
 		f.total, f.open = m.rv.CountFor(f.path)
-		f.approved = m.rv.Approved(f.path)
-		f.nullified = m.rv.Nullified(f.path)
+		// The verdict a file is read by is the reader's own. Anybody else's
+		// is shown beside it and decides nothing: a file an agent approved
+		// is still one the person at the window has not read.
+		f.approved = m.rv.Approved(f.path, m.author)
+		f.nullified = m.rv.Nullified(f.path, m.author)
+		mine := func(by string) bool { return by == m.author }
+		f.others = slices.DeleteFunc(m.rv.Approvers(f.path), mine)
+		f.othersFell = slices.DeleteFunc(m.rv.Fallen(f.path), mine)
 		f.folded = m.foldedFor(f)
 		f.signed = nil
 		if m.commit == "" {
 			// A hunk of one commit is not a hunk of the review, so there is
 			// nothing of the kind to show while a commit is being read.
-			f.signed = m.rv.ApprovedHunks(f.path)
+			f.signed = m.rv.ApprovedHunks(f.path, m.author)
 		}
 		if m.commit != "" {
 			// The state of the working tree says nothing about a commit that
@@ -1518,12 +1554,12 @@ func (m Model) reviewKey(msg tea.KeyPressMsg, count string) (tea.Model, tea.Cmd)
 	case key.Matches(msg, m.keys.NextThread):
 		m.unfoldOpenThreads()
 		if !m.view.jumpThread(1, m.rv) {
-			m.setOK("No open comment below here")
+			m.setOK("No open comment below here" + m.hiddenOpenNote())
 		}
 	case key.Matches(msg, m.keys.PrevThread):
 		m.unfoldOpenThreads()
 		if !m.view.jumpThread(-1, m.rv) {
-			m.setOK("No open comment above here")
+			m.setOK("No open comment above here" + m.hiddenOpenNote())
 		}
 	case key.Matches(msg, m.keys.Visual):
 		m.view.toggleVisual()
@@ -1781,7 +1817,7 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	all := f.blocks
 	left, promoted := 0, false
 	if !m.mutate(func(st *review.State) {
-		approved, signed := st.Approved(path), st.ApprovedHunks(path)
+		approved, signed := st.Approved(path, author), st.ApprovedHunks(path, author)
 		var keep []string
 		for h, blocks := range all {
 			whole := true
@@ -1805,13 +1841,13 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 			// Only a file that is approved has an approval to take back; one
 			// whose approval already fell keeps saying that it did.
 			if approved {
-				st.Unapprove(path)
+				st.Unapprove(path, author)
 			}
 		case left == 0:
 			st.Approve(path, digest, author)
 			promoted = true
 		}
-		st.SetHunks(path, keep)
+		st.SetHunks(path, author, keep)
 	}) {
 		undo()
 		return m, nil
@@ -1844,12 +1880,31 @@ func (m Model) foldFile(path string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// doHideDone takes the finished files off the screen, or puts them back.
+// hiddenOpenNote is what t and T add when they find nothing: that there are
+// open comments they cannot reach, in files f has taken off the screen.
+//
+// f hides a file on the reader's approval alone, a comment still open on it or
+// not, and t walks the rows there are. Without this the title would count a
+// comment that the one key for finding comments said was not there.
+//
+// It counts what f took away and nothing else. A comment can be off the
+// screen for other reasons — it is on a file the commit being read did not
+// touch — and f again would not bring that one back.
+func (m *Model) hiddenOpenNote() string {
+	hidden := m.view.hiddenOpen
+	if hidden <= 0 {
+		return ""
+	}
+	return " · " + plural(hidden, "open comment", "open comments") + " in files f has hidden"
+}
+
+// doHideDone takes the files the reader has approved off the screen, or puts
+// them back.
 //
 // Folding a file gets it out of the way and leaves it in the review, which is
 // right while you are still reading. This is for the other half of the job:
 // once most of a change has been signed off, what is left is the list of
-// things still wanting something, and everything else is noise between them.
+// files still to read, and everything else is noise between them.
 func (m Model) doHideDone() (tea.Model, tea.Cmd) {
 	m.hideDone = !m.hideDone
 	path := m.view.pathAt()
@@ -1860,9 +1915,9 @@ func (m Model) doHideDone() (tea.Model, tea.Cmd) {
 			m.view.clamp()
 		}
 		if n := m.view.hidden; n == 0 {
-			m.setOK("Nothing is finished with yet · f shows every file again")
+			m.setOK("You have approved nothing yet · f shows every file again")
 		} else {
-			m.setOK("Hiding " + plural(n, "finished file", "finished files") + " · f shows them again")
+			m.setOK("Hiding " + plural(n, "file", "files") + " you have approved · f shows them again")
 		}
 		return m, nil
 	}
@@ -2098,12 +2153,13 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 		m.setError("No file to approve")
 		return m, nil
 	}
-	if m.rv.Approved(path) {
+	author := m.author
+	if m.rv.Approved(path, author) {
 		// Withdrawing an approval is having more to say about the file, so it
 		// opens rather than going back to how the window started.
 		undo := m.keepFolds(path)
 		m.folds[path] = false
-		if m.mutate(func(st *review.State) { st.Unapprove(path) }) {
+		if m.mutate(func(st *review.State) { st.Unapprove(path, author) }) {
 			m.setOK("Approval withdrawn from " + path)
 		} else {
 			undo()
@@ -2119,14 +2175,14 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 	// with, so one approved after F opened everything still goes away.
 	undo := m.keepFolds(path)
 	delete(m.folds, path)
-	digest, author := f.digest, m.author
+	digest := f.digest
 	// The hunks go in with the file, so that if the file is edited and the
 	// approval falls, the hunks the edit did not touch are still signed off.
 	// An approval given from the command line records none, and falls whole.
 	all := slices.Concat(f.blocks...)
 	if m.mutate(func(st *review.State) {
 		st.Approve(path, digest, author)
-		st.SetHunks(path, all)
+		st.SetHunks(path, author, all)
 	}) {
 		m.setOK("Approved " + path)
 	} else {
@@ -2163,12 +2219,12 @@ func (m *Model) keepFolds(paths ...string) func() {
 func (m Model) doApproveAll() (tea.Model, tea.Cmd) {
 	var pending []string
 	for _, f := range m.work {
-		if !m.rv.Approved(f.path) {
+		if !m.rv.Approved(f.path, m.author) {
 			pending = append(pending, f.path)
 		}
 	}
 	if len(pending) == 0 {
-		m.setOK("Every file is already approved")
+		m.setOK("You have already approved every file")
 		return m, nil
 	}
 	digests, hunks := map[string]string{}, map[string][]string{}
