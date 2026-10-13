@@ -120,16 +120,21 @@ type reviewFile struct {
 	// well as an addition.
 	pending map[int]bool
 
-	// Filled in from the review before the rows are built.
-	approved  bool
-	nullified bool
-	folded    bool
-	shut      map[int]bool             // the hunks folded away, by index into the patch
-	signed    map[string]bool          // the runs of changed lines approved one hunk at a time
-	threads   map[int][]*review.Thread // by index into lines
-	loose     []*review.Thread         // in this file, but on no line of it
-	open      int
-	total     int
+	// Filled in from the review before the rows are built. approved and
+	// nullified are the reader's own verdict, which is the one the window
+	// goes by; others is everybody else whose approval stands, and othersFell
+	// everybody else whose approval the file has changed under.
+	approved   bool
+	nullified  bool
+	others     []string
+	othersFell []string
+	folded     bool
+	shut       map[int]bool             // the hunks folded away, by index into the patch
+	signed     map[string]bool          // the runs of changed lines approved one hunk at a time
+	threads    map[int][]*review.Thread // by index into lines
+	loose      []*review.Thread         // in this file, but on no line of it
+	open       int
+	total      int
 }
 
 // rowRef names the diff lines one drawn row shows.
@@ -630,10 +635,14 @@ type reviewView struct {
 	// then the other does not quietly move the cursor across.
 	onOld bool
 
-	// hidden counts the files left out because they are done with. They are
+	// hidden counts the files left out because the reader has approved them. They are
 	// still part of the review, so the tally still counts them; they are just
 	// not on the screen.
 	hidden int
+
+	// hiddenOpen counts the open comments on those files, which went off the
+	// screen with them.
+	hiddenOpen int
 
 	cursor  int
 	offset  int
@@ -1691,7 +1700,7 @@ func (v *reviewView) view(st *styles, focused bool, rv *review.State) string {
 // tally is the right hand end of the title: how much of the review is done.
 //
 // A file hidden by the filter is still part of the review and still counted
-// here. It went off the screen because it was finished with, and a tally that
+// here. It went off the screen because it was approved, and a tally that
 // forgot it would report a review shrinking as it was completed.
 func (v *reviewView) tally(rv *review.State) string {
 	total := len(v.files) + v.hidden
@@ -1841,8 +1850,8 @@ func (v *reviewView) fileHeader(f *reviewFile, st *styles, band lipgloss.Style, 
 	// enough for anything at all, and only when the file has something the
 	// reader has to act on, does the name give way instead — elided from the
 	// middle, so both which file it is and where it sits survive the cut.
-	verdict := f.verdict()
-	lead := verdict + "  " + fold
+	verdict, theirs := f.verdict(), f.theirVerdict()
+	lead := verdict + " " + theirs + "  " + fold
 
 	tail := f.headerTail(max(avail-width(lead+name)-2, 0))
 	if tail == "" && f.speaks() {
@@ -1862,10 +1871,10 @@ func (v *reviewView) fileHeader(f *reviewFile, st *styles, band lipgloss.Style, 
 	if !strings.HasPrefix(text, lead) {
 		return band.Render(text + right) // too narrow for the glyph to be the glyph
 	}
-	// The verdict stands in front of the band rather than on it, a space
-	// clear: on the band its colour has the band's to fight with.
-	return f.verdictStyle(st).Render(verdict) + " " +
-		band.Render(strings.TrimPrefix(text, verdict+" ")) + statInk(st, band, right)
+	// The verdicts stand in front of the band rather than on it, a space
+	// clear: on the band their colour has the band's to fight with.
+	return f.verdictStyle(st).Render(verdict) + " " + f.theirStyle(st).Render(theirs) + " " +
+		band.Render(strings.TrimPrefix(text, verdict+" "+theirs+" ")) + statInk(st, band, right)
 }
 
 // statInk draws the tail of a heading, with how much was added in green and
@@ -1890,9 +1899,13 @@ func statInk(st *styles, band lipgloss.Style, tail string) string {
 	return b.String()
 }
 
-// verdict is the one glyph in front of a file's name: where the file stands
-// with the reviewer. Everything a review is trying to get to the bottom of is
+// verdict is the first glyph in front of a file's name: where the file stands
+// with the reader. Everything a review is trying to get to the bottom of is
 // in this column, so it is read down the headings rather than across them.
+//
+// It is the reader's own verdict and nobody else's. What an agent made of the
+// file is in the column beside it — see [reviewFile.theirVerdict] — so that a
+// file somebody else has approved still reads here as one to be read.
 func (f *reviewFile) verdict() string {
 	switch {
 	case f.approved:
@@ -1914,6 +1927,45 @@ func (f *reviewFile) verdictStyle(st *styles) lipgloss.Style {
 		return st.verdictStale
 	case f.open > 0:
 		return st.verdictComment
+	}
+	return st.dimText
+}
+
+// reviewerNames is a list of reviewers as a heading says it. A verdict can be
+// written by hand without a name, and that one is said to be nobody's rather
+// than left as a gap where a name should be.
+func reviewerNames(names []string) string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		if out[i] = n; n == "" {
+			out[i] = "nobody named"
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
+// theirVerdict is the second glyph in front of a file's name: where the file
+// stands with everybody else. One approval is enough for the tick, since the
+// column answers "has anyone else been through this", and the heading's tail
+// says who.
+func (f *reviewFile) theirVerdict() string {
+	switch {
+	case len(f.others) > 0:
+		return "✓"
+	case len(f.othersFell) > 0:
+		return "◈"
+	}
+	return "·"
+}
+
+// theirStyle is the ink that second glyph is drawn in: the colours of the
+// first, without its weight, since it is the reader's own that is the news.
+func (f *reviewFile) theirStyle(st *styles) lipgloss.Style {
+	switch {
+	case len(f.others) > 0:
+		return st.verdictOK.Bold(false)
+	case len(f.othersFell) > 0:
+		return st.verdictStale.Bold(false)
 	}
 	return st.dimText
 }
@@ -1966,6 +2018,14 @@ func (f *reviewFile) headerTail(avail int) string {
 	if n, of := f.hunksApproved(); n > 0 && !f.approved {
 		add("✓ "+itoa(n)+"/"+itoa(of)+" hunks", "✓"+itoa(n)+"/"+itoa(of))
 	}
+	// Whose the other approvals are. Its short spelling is nothing: the
+	// column in front of the name has already said that there is one.
+	switch {
+	case len(f.others) > 0:
+		add("✓ by "+reviewerNames(f.others), "")
+	case len(f.othersFell) > 0:
+		add("◈ by "+reviewerNames(f.othersFell), "")
+	}
 	switch {
 	case f.open > 0:
 		add(plural(f.open, "open comment", "open comments"), "◆"+itoa(f.open))
@@ -1980,7 +2040,9 @@ func (f *reviewFile) headerTail(avail int) string {
 			var words []string
 			for _, p := range parts[drop:] {
 				if short {
-					words = append(words, p.short)
+					if p.short != "" {
+						words = append(words, p.short)
+					}
 				} else {
 					words = append(words, p.long)
 				}

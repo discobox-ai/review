@@ -108,7 +108,7 @@ func TestAHeadingOpensWithTheVerdict(t *testing.T) {
 		f := m.view.files[r.file]
 		row := m.view.render(i, m.st, m.view.rowW(), false, false)
 		text := ansi.Strip(row)
-		if want := " " + f.verdict() + "  ▸ " + f.path; !strings.HasPrefix(text, want) {
+		if want := " " + f.verdict() + " " + f.theirVerdict() + "  ▸ " + f.path; !strings.HasPrefix(text, want) {
 			t.Errorf("%s is headed %q, want it to start %q", f.path, text, want)
 		}
 		if w := ansi.StringWidth(row); w != m.view.rowW() {
@@ -224,7 +224,7 @@ func TestApprovingFoldsAndWithdrawingOpens(t *testing.T) {
 	m.view.moveTo(0)
 	path := m.view.pathAt()
 	m = drive(t, m, letterKey("a"))
-	if m.rv.Approved(path) {
+	if m.rv.Approved(path, "Test") {
 		t.Fatalf("a did not withdraw the approval of %s", path)
 	}
 	if fileIn(t, m, path).folded {

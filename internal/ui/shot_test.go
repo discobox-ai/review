@@ -350,7 +350,7 @@ func shotRepo(t *testing.T) *git.Repo {
 // terminal gets — which is the one the images are rendered against.
 func shotModel(t *testing.T, repo *git.Repo, w, h int) Model {
 	t.Helper()
-	m := New(repo, "main", "Test")
+	m := New(repo, "main", "darren")
 	m.dark, m.st = true, newStyles(true)
 	return drive(t, m, tea.WindowSizeMsg{Width: w, Height: h}, m.rescanCmd()())
 }
@@ -383,8 +383,15 @@ func shotReview(t *testing.T, m Model) Model {
 		"the life of the process. A busy afternoon is a memory leak.")
 
 	err := review.Update(m.repo, "rate-limit", 0, func(st *review.State) error {
+		// An agent has been through two of the files already, which is the
+		// second column of verdicts: its approval stands beside the reader's
+		// own and is not taken for it.
+		st.Approve("internal/server/handler.go", "", "claude")
+		st.Approve("internal/store/store.go", "", "claude")
 		for _, f := range st.Files {
-			f.By, f.At = "darren", "2026-08-28T19:41:02+01:00"
+			for _, v := range f.Verdicts {
+				v.At = "2026-08-28T19:41:02+01:00"
+			}
 		}
 		for _, th := range st.Threads {
 			th.Comments[0].By = "darren"

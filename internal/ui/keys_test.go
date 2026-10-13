@@ -21,7 +21,7 @@ func commandBindings(m keyMap) []struct {
 		{"approve", m.ApproveKey},
 		{"approve everything", m.ApproveAll},
 		{"fold everything", m.FoldAll},
-		{"hide the finished files", m.HideDone},
+		{"hide the approved files", m.HideDone},
 		{"split the diff", m.SplitKey},
 		{"cross a split row", m.SideKey},
 		{"comment", m.CommentKey},

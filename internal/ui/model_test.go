@@ -427,10 +427,10 @@ func TestApproveWritesTheReviewFile(t *testing.T) {
 	m = drive(t, m, letterKey("a"))
 
 	st := reviewJSON(t, m.repo)
-	if !st.Approved("beta.go") {
+	if !st.Approved("beta.go", "Test") {
 		t.Fatalf("beta.go was not approved: %s", st.Bytes())
 	}
-	f := st.FileFor("beta.go")
+	f := st.VerdictOf("beta.go", "Test")
 	if f.Digest == "" {
 		t.Error("the approval carries no digest, so nothing could ever nullify it")
 	}
@@ -444,10 +444,10 @@ func TestApproveWritesTheReviewFile(t *testing.T) {
 	// And pressing it again takes the approval back.
 	m = drive(t, m, letterKey("a"))
 	st = reviewJSON(t, m.repo)
-	if st.Approved("beta.go") {
+	if st.Approved("beta.go", "Test") {
 		t.Error("a second press did not withdraw the approval")
 	}
-	if st.Nullified("beta.go") {
+	if st.Nullified("beta.go", "Test") {
 		t.Error("withdrawing an approval marked the file as having changed")
 	}
 }
@@ -458,7 +458,7 @@ func TestApprovalIsNullifiedWhenTheFileChanges(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = drive(t, m, letterKey("a"))
-	if !reviewJSON(t, m.repo).Approved("foo.txt") {
+	if !reviewJSON(t, m.repo).Approved("foo.txt", "Test") {
 		t.Fatal("foo.txt was not approved to begin with")
 	}
 
@@ -466,10 +466,10 @@ func TestApprovalIsNullifiedWhenTheFileChanges(t *testing.T) {
 	m = drive(t, m, m.rescanCmd()())
 
 	st := reviewJSON(t, m.repo)
-	if st.Approved("foo.txt") {
+	if st.Approved("foo.txt", "Test") {
 		t.Error("the approval survived the file changing")
 	}
-	if !st.Nullified("foo.txt") {
+	if !st.Nullified("foo.txt", "Test") {
 		t.Error("the review does not record that the approval fell")
 	}
 	if !fileIn(t, m, "foo.txt").nullified {
@@ -491,7 +491,7 @@ func TestContextDoesNotNullifyApprovals(t *testing.T) {
 	if m.context == defaultContext {
 		t.Fatal("the context did not change")
 	}
-	if !reviewJSON(t, m.repo).Approved("foo.txt") {
+	if !reviewJSON(t, m.repo).Approved("foo.txt", "Test") {
 		t.Error("changing the diff context nullified an approval")
 	}
 	if !fileIn(t, m, "foo.txt").approved {
@@ -551,7 +551,7 @@ func TestApproveEverythingAsksFirst(t *testing.T) {
 	m = drive(t, m, letterKey("y"))
 	st := reviewJSON(t, m.repo)
 	for _, p := range pathsOf(m) {
-		if !st.Approved(p) {
+		if !st.Approved(p, "Test") {
 			t.Errorf("%s was not approved", p)
 		}
 	}
@@ -941,16 +941,16 @@ func TestAnAgentsEditIsPickedUp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.pickUpChanges()
+	m = polled(t, m)
 	if !strings.Contains(plain(m), "resolved") {
 		t.Error("the answer did not reach the screen")
 	}
-	if !fileIn(t, m, "beta.go").approved {
-		t.Error("the agent's approval did not reach the screen")
+	if f := fileIn(t, m, "beta.go"); !slices.Contains(f.others, "claude") || f.approved {
+		t.Errorf("the agent's approval did not reach the screen as the agent's: others %v, approved %v", f.others, f.approved)
 	}
 	// An approval written without a digest is stamped with the current one, so
 	// that it can be nullified like any other.
-	if got := reviewJSON(t, m.repo).FileFor("beta.go").Digest; got == "" {
+	if got := reviewJSON(t, m.repo).VerdictOf("beta.go", "claude").Digest; got == "" {
 		t.Error("the hand written approval was not stamped with a digest")
 	}
 }
@@ -1000,7 +1000,7 @@ func TestAConcurrentEditIsNotClobbered(t *testing.T) {
 	if len(back.Threads) != 2 {
 		t.Fatalf("threads = %+v, want both", back.Threads)
 	}
-	if !back.Approved("beta.go") {
+	if !back.Approved("beta.go", "Test") {
 		t.Error("the approval was lost to the re-read")
 	}
 }
@@ -1028,13 +1028,13 @@ func TestStampingAnApprovalDoesNotClobberAConcurrentEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.reconcile()
+	m.reconcile(true)
 
 	back := reviewJSON(t, m.repo)
 	if len(back.Threads) != 1 {
 		t.Fatalf("the stamp was written over the comment: threads = %+v", back.Threads)
 	}
-	if back.FileFor("beta.go").Digest == "" {
+	if back.VerdictOf("beta.go", "claude").Digest == "" {
 		t.Error("the approval was not stamped")
 	}
 	if len(m.rv.Threads) != 1 {
@@ -1079,9 +1079,9 @@ func TestTheWindowWaitsForTheLock(t *testing.T) {
 		t.Fatal("the window never got the lock")
 	}
 	back := reviewJSON(t, m.repo)
-	if len(back.Threads) != 2 || !back.Approved("beta.go") {
+	if len(back.Threads) != 2 || !back.Approved("beta.go", "Test") {
 		t.Errorf("want both comments and the approval, got %d threads, approved = %v",
-			len(back.Threads), back.Approved("beta.go"))
+			len(back.Threads), back.Approved("beta.go", "Test"))
 	}
 }
 
@@ -1103,7 +1103,7 @@ func TestALockThatIsNotLetGoOfDoesNotStopTheWindow(t *testing.T) {
 	if !errors.Is(err, git.ErrLocked) {
 		t.Fatalf("err = %v, want the window told the review is locked", err)
 	}
-	if m.rv.Approved("beta.go") || reviewJSON(t, m.repo).Approved("beta.go") {
+	if m.rv.Approved("beta.go", "Test") || reviewJSON(t, m.repo).Approved("beta.go", "Test") {
 		t.Error("the approval shows although it was never saved")
 	}
 
@@ -1145,7 +1145,7 @@ func TestAWriteDoesNotPutBackABaseSomethingElseChanged(t *testing.T) {
 	if back.Base != "main~0" {
 		t.Errorf("base on disk = %q: the window wrote its own over the one just set", back.Base)
 	}
-	if !back.Approved("beta.go") {
+	if !back.Approved("beta.go", "Test") {
 		t.Error("the approval was not saved")
 	}
 	// And the poll goes on to measure from it.
@@ -1189,9 +1189,9 @@ func TestAStampThatCannotBeSavedIsNotShown(t *testing.T) {
 	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
 		t.Fatal(err)
 	}
-	m.reconcile()
+	m.reconcile(true)
 
-	if got := m.rv.FileFor("beta.go"); got == nil || got.Digest != "" {
+	if got := m.rv.VerdictOf("beta.go", "claude"); got == nil || got.Digest != "" {
 		t.Errorf("the screen shows a stamp nothing saved: %+v", got)
 	}
 	if !m.statusEr {
@@ -2383,14 +2383,15 @@ func headingAt(m Model, path string, w int) string {
 }
 
 // ---------------------------------------------------------------------------
-// Hiding the files that are done with
+// Hiding the files the reader has approved
 // ---------------------------------------------------------------------------
 
-// f takes the finished files off the screen: what is left is what is still
-// unapproved or still being argued about.
-func TestHidingTheFilesThatAreDoneWith(t *testing.T) {
+// f takes the files the reader has approved off the screen: what is left is
+// what they have yet to read. A comment still open on one does not keep it —
+// that is what keeps a file from folding, and the title goes on counting it.
+func TestHidingTheFilesThatAreApproved(t *testing.T) {
 	m := newTestModel(t)
-	// bar.txt: approved, but somebody is still waiting for an answer on it.
+	// bar.txt: approved, though somebody is still waiting for an answer on it.
 	m = onLine(t, m, "bar.txt", '+', "beta")
 	m = comment(t, m, "hold on")
 	m = onLine(t, m, "bar.txt", '+', "beta")
@@ -2401,20 +2402,28 @@ func TestHidingTheFilesThatAreDoneWith(t *testing.T) {
 
 	m = drive(t, m, letterKey("f"))
 	got := pathsOf(m)
-	want := []string{"bar.txt", "foo.txt", "new.txt"}
+	want := []string{"foo.txt", "new.txt"}
 	if len(got) != len(want) {
-		t.Fatalf("showing %v, want %v — an approved file with an open comment stays", got, want)
+		t.Fatalf("showing %v, want %v — approving a file is all it takes", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("file %d = %q, want %q", i, got[i], want[i])
 		}
 	}
-	if m.view.hidden != 1 {
-		t.Errorf("hidden = %d, want 1", m.view.hidden)
+	if m.view.hidden != 2 {
+		t.Errorf("hidden = %d, want 2", m.view.hidden)
 	}
-	if !strings.Contains(m.status, "1 finished file") {
+	if !strings.Contains(m.status, "Hiding 2 files you have approved") {
 		t.Errorf("status = %q", m.status)
+	}
+	if !strings.Contains(plain(m), "1 open comment") {
+		t.Errorf("the comment on a hidden file stopped being counted:\n%s", plain(m))
+	}
+	// t cannot go to a row that is not there, so it says where the comment is.
+	m = drive(t, m, letterKey("t"))
+	if !strings.Contains(m.status, "1 open comment in files f has hidden") {
+		t.Errorf("t said %q of a comment the title is counting", m.status)
 	}
 
 	// And f again brings them back.
@@ -3834,10 +3843,10 @@ func TestAApprovesJustTheHunk(t *testing.T) {
 
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = drive(t, m, letterKey("a"))
-	if m.rv.Approved("foo.txt") {
+	if m.rv.Approved("foo.txt", "Test") {
 		t.Fatal("approving one hunk of two approved the file")
 	}
-	if n := len(reviewJSON(t, m.repo).Files[0].Hunks); n != 1 {
+	if n := len(reviewJSON(t, m.repo).Files[0].Verdicts[0].Hunks); n != 1 {
 		t.Errorf("the review records %d approved hunks, want 1", n)
 	}
 	if _, n := hunkRows(m, "foo.txt"); n == 0 || n >= before {
@@ -3875,7 +3884,7 @@ func TestAApprovesJustTheHunk(t *testing.T) {
 	m = drive(t, m, letterKey("a"))
 	m = onLine(t, m, "foo.txt", '+', "THIRTY-SIX")
 	m = drive(t, m, letterKey("a"))
-	if !m.rv.Approved("foo.txt") {
+	if !m.rv.Approved("foo.txt", "Test") {
 		t.Fatalf("approving every hunk did not approve the file (status %q)", m.status)
 	}
 
@@ -3886,7 +3895,7 @@ func TestAApprovesJustTheHunk(t *testing.T) {
 	m = drive(t, m, letterKey(" ")) // open the file the approval folded
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = drive(t, m, letterKey("a"))
-	if m.rv.Approved("foo.txt") {
+	if m.rv.Approved("foo.txt", "Test") {
 		t.Error("withdrawing a hunk left the file approved")
 	}
 	if n, of := fileIn(t, m, "foo.txt").hunksApproved(); n != 1 || of != 2 {
@@ -3901,11 +3910,11 @@ func TestAOnTheHeadingApprovesTheFile(t *testing.T) {
 		return r.kind == rowFile && m.view.files[r.file].path == "foo.txt"
 	})
 	m = drive(t, m, letterKey("a"))
-	if !m.rv.Approved("foo.txt") {
+	if !m.rv.Approved("foo.txt", "Test") {
 		t.Fatalf("a on the heading did not approve the file (status %q)", m.status)
 	}
 	m = drive(t, m, letterKey("a"))
-	if m.rv.Approved("foo.txt") {
+	if m.rv.Approved("foo.txt", "Test") {
 		t.Error("a on the heading did not take the approval back")
 	}
 	if n, _ := fileIn(t, m, "foo.txt").hunksApproved(); n != 0 {
@@ -4014,16 +4023,16 @@ func TestApprovingAHunkKeepsWhatAnotherWriterSigned(t *testing.T) {
 	// Somebody else signs off the last hunk, and this window has not looked.
 	other := fileIn(t, m, "foo.txt").blocks[2]
 	st := reviewJSON(t, m.repo)
-	st.SetHunks("foo.txt", append(st.FileFor("foo.txt").Hunks, other...))
+	st.SetHunks("foo.txt", "Test", append(st.VerdictOf("foo.txt", "Test").Hunks, other...))
 	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 
 	m = onLine(t, m, "foo.txt", '+', "TWENTY")
 	m = drive(t, m, letterKey("a"))
-	if !m.rv.Approved("foo.txt") {
+	if !m.rv.Approved("foo.txt", "Test") {
 		t.Errorf("the third hunk signed off elsewhere was lost: %v (status %q)",
-			reviewJSON(t, m.repo).FileFor("foo.txt").Hunks, m.status)
+			reviewJSON(t, m.repo).VerdictOf("foo.txt", "Test").Hunks, m.status)
 	}
 }
 
@@ -4188,7 +4197,7 @@ func TestAHunkApprovalFallsWithItsChangeAndStaysFallen(t *testing.T) {
 	m := modelFor(t, twoHunkRepo(t))
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = drive(t, m, letterKey("a"))
-	if n := len(reviewJSON(t, m.repo).FileFor("foo.txt").Hunks); n != 1 {
+	if n := len(reviewJSON(t, m.repo).VerdictOf("foo.txt", "Test").Hunks); n != 1 {
 		t.Fatalf("%d hunks recorded, want 1", n)
 	}
 	is, err := os.ReadFile(filepath.Join(m.repo.Dir, "foo.txt"))
@@ -4204,7 +4213,7 @@ func TestAHunkApprovalFallsWithItsChangeAndStaysFallen(t *testing.T) {
 		t.Fatal(err)
 	}
 	m = drive(t, m, m.rescanCmd()())
-	if len(m.rv.ApprovedHunks("foo.txt")) != 1 {
+	if len(m.rv.ApprovedHunks("foo.txt", "Test")) != 1 {
 		t.Error("the approval left the screen though dropping it was never saved")
 	}
 	if err := m.repo.WriteStateFile(review.FileName, saved); err != nil {
@@ -4212,16 +4221,237 @@ func TestAHunkApprovalFallsWithItsChangeAndStaysFallen(t *testing.T) {
 	}
 
 	m = drive(t, m, m.rescanCmd()())
-	if f := reviewJSON(t, m.repo).FileFor("foo.txt"); f != nil && len(f.Hunks) != 0 {
+	if f := reviewJSON(t, m.repo).VerdictOf("foo.txt", "Test"); f != nil && len(f.Hunks) != 0 {
 		t.Fatalf("the approval of a change that is gone was kept: %v", f.Hunks)
 	}
-	if len(m.rv.ApprovedHunks("foo.txt")) != 0 {
+	if len(m.rv.ApprovedHunks("foo.txt", "Test")) != 0 {
 		t.Error("the window still shows the hunk approved")
 	}
 
 	writeFile(t, m.repo.Dir, "foo.txt", string(is))
 	m = drive(t, m, m.rescanCmd()())
-	if f := reviewJSON(t, m.repo).FileFor("foo.txt"); f != nil && len(f.Hunks) != 0 {
+	if f := reviewJSON(t, m.repo).VerdictOf("foo.txt", "Test"); f != nil && len(f.Hunks) != 0 {
 		t.Errorf("undoing the edit brought the approval back: %v", f.Hunks)
+	}
+}
+
+// agentApproves has somebody other than the reader sign a file off, the way a
+// command run beside the window does.
+func agentApproves(t *testing.T, m Model, by string, paths ...string) Model {
+	t.Helper()
+	err := review.Update(m.repo, m.branch, 0, func(st *review.State) error {
+		for _, p := range paths {
+			st.Approve(p, "", by)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return polled(t, m)
+}
+
+// polled is the window a tick later: whatever was written to the review has
+// been noticed, and the reading of git that an approval is judged against —
+// when there was one to judge — has come back.
+func polled(t *testing.T, m Model) Model {
+	t.Helper()
+	if cmd := m.pickUpChanges(); cmd != nil {
+		m = drive(t, m, cmd())
+	}
+	return m
+}
+
+// A window left open does not hear about an edit to the tree. An approval of
+// the file as it now stands, given from a command line while the window still
+// shows the file as it was, is judged against the tree and not the screen.
+func TestAnApprovalIsNotJudgedByAStaleDiff(t *testing.T) {
+	m := newTestModel(t)
+	stale := fileIn(t, m, "foo.txt").digest
+
+	// The author edits the file, and the reviewer approves what it now says.
+	// Nothing rescans the window in between.
+	writeFile(t, m.repo.Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nFIVE\n")
+	scan, err := m.repo.Rescan("main", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := ""
+	for _, p := range git.ParseMulti(scan.Diff) {
+		if p.Path == "foo.txt" {
+			now = review.Digest(p)
+		}
+	}
+	if now == "" || now == stale {
+		t.Fatalf("the edit did not move the digest: %q, was %q", now, stale)
+	}
+	err = review.Update(m.repo, m.branch, 0, func(st *review.State) error {
+		st.Approve("foo.txt", now, "claude")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m = polled(t, m)
+	st := reviewJSON(t, m.repo)
+	if !st.Approved("foo.txt", "claude") || st.Nullified("foo.txt", "claude") {
+		t.Errorf("an approval of the file as it stands was struck down by the diff on screen: %+v", st.VerdictOf("foo.txt", "claude"))
+	}
+	if got := fileIn(t, m, "foo.txt").digest; got != now {
+		t.Errorf("the window is still showing the file as it was: digest %q, want %q", got, now)
+	}
+
+	// And one given with no digest is stamped with the tree's, not the screen's.
+	writeFile(t, m.repo.Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nfive!\n")
+	m = agentApproves(t, m, "reviewer", "foo.txt")
+	if v := reviewJSON(t, m.repo).VerdictOf("foo.txt", "reviewer"); v == nil || !v.Approved || v.Digest != fileIn(t, m, "foo.txt").digest || v.Digest == now {
+		t.Errorf("stamped %+v, want the digest of the file as it now stands", v)
+	}
+}
+
+// A file an agent has approved is not one the reader has read. It says so in
+// a column of its own, and everything the window does about an approved file —
+// fold it, count it, hide it — waits for the reader's own.
+func TestSomebodyElsesApprovalIsNotTheReaders(t *testing.T) {
+	m := newTestModel(t)
+	m = agentApproves(t, m, "claude", "beta.go", "foo.txt")
+
+	f := fileIn(t, m, "beta.go")
+	if f.approved || f.done() || f.verdict() != "○" || f.theirVerdict() != "✓" {
+		t.Errorf("beta.go: approved %v, verdicts %q %q", f.approved, f.verdict(), f.theirVerdict())
+	}
+	if !strings.Contains(plain(m), "✓ by claude") {
+		t.Errorf("the heading does not say whose approval it is:\n%s", plain(m))
+	}
+	if !strings.Contains(plain(m), "0/4 approved") || !strings.Contains(plain(m), "4 to read") {
+		t.Errorf("the counts took the agent's approvals for the reader's:\n%s", plain(m))
+	}
+
+	// f hides what the reader is done with, and that is nothing yet.
+	m = drive(t, m, letterKey("f"))
+	if m.view.hidden != 0 || len(pathsOf(m)) != 4 {
+		t.Fatalf("f hid %d files on an agent's word, leaving %v", m.view.hidden, pathsOf(m))
+	}
+	m = drive(t, m, letterKey("f"))
+
+	// The reader's own approval goes in beside the agent's.
+	m = onLine(t, m, "beta.go", '+', "package beta")
+	m = drive(t, m, letterKey("a"))
+	st := reviewJSON(t, m.repo)
+	if !st.Approved("beta.go", "Test") || !st.Approved("beta.go", "claude") {
+		t.Fatalf("approvers = %v, want both", st.Approvers("beta.go"))
+	}
+	f = fileIn(t, m, "beta.go")
+	if f.verdict() != "✓" || f.theirVerdict() != "✓" || !f.done() {
+		t.Errorf("beta.go: verdicts %q %q, done %v", f.verdict(), f.theirVerdict(), f.done())
+	}
+	m = drive(t, m, letterKey("f"))
+	if got := pathsOf(m); m.view.hidden != 1 || slices.Contains(got, "beta.go") || !slices.Contains(got, "foo.txt") {
+		t.Errorf("hidden %d, showing %v: want beta.go gone and foo.txt, which only the agent approved, still here", m.view.hidden, got)
+	}
+	m = drive(t, m, letterKey("f"))
+
+	// And taking it back takes back the reader's alone.
+	m = onLine(t, m, "beta.go", '+', "package beta")
+	m = drive(t, m, letterKey("a"))
+	st = reviewJSON(t, m.repo)
+	if st.Approved("beta.go", "Test") || !st.Approved("beta.go", "claude") {
+		t.Errorf("approvers = %v, want the agent's left standing", st.Approvers("beta.go"))
+	}
+}
+
+// Approving everything is the reader approving everything they have not: a
+// file somebody else has been through is still one of them.
+func TestApprovingEverythingIsTheReadersOwn(t *testing.T) {
+	m := newTestModel(t)
+	m = agentApproves(t, m, "claude", "beta.go")
+	m = drive(t, m, letterKey("A"), letterKey("y"))
+	st := reviewJSON(t, m.repo)
+	for _, p := range pathsOf(m) {
+		if !st.Approved(p, "Test") {
+			t.Errorf("%s was left out: %v", p, st.Approvers(p))
+		}
+	}
+	if !st.Approved("beta.go", "claude") {
+		t.Error("the agent's approval was replaced rather than joined")
+	}
+}
+
+// An approval somebody else gave falls with the file like any other, and the
+// second column says that it did.
+func TestSomebodyElsesApprovalFallsToo(t *testing.T) {
+	m := newTestModel(t)
+	m = agentApproves(t, m, "claude", "foo.txt")
+	m = drive(t, m, m.rescanCmd()())
+	writeFile(t, m.repo.Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nFIVE\n")
+	m = drive(t, m, m.rescanCmd()())
+
+	f := fileIn(t, m, "foo.txt")
+	if f.theirVerdict() != "◈" || f.nullified || f.verdict() != "○" {
+		t.Errorf("verdicts %q %q, nullified %v", f.verdict(), f.theirVerdict(), f.nullified)
+	}
+	if !strings.Contains(plain(m), "◈ by claude") {
+		t.Errorf("the heading does not say whose approval fell:\n%s", plain(m))
+	}
+}
+
+// A verdict written by hand can have no name on it. The heading says so
+// rather than leaving a gap where the name goes.
+func TestAVerdictWithNoNameIsNotDrawnAsOne(t *testing.T) {
+	m := newTestModel(t)
+	m = agentApproves(t, m, "", "beta.go")
+	m = agentApproves(t, m, "claude", "beta.go")
+	if got := plain(m); !strings.Contains(got, "✓ by nobody named, claude") || strings.Contains(got, "by ,") {
+		t.Errorf("the heading reads:\n%s", got)
+	}
+}
+
+// A review from before a hunk's sign-off carried a name: the window that
+// opens it takes those hunks as its reader's, so what was read stays read.
+func TestTheWindowClaimsHunksSignedOffUnderNoName(t *testing.T) {
+	repo := changedRepo(t, 60, map[int]string{4: "FOUR", 50: "FIFTY"})
+	blocks := fileIn(t, modelFor(t, repo), "foo.txt").blocks
+	if err := repo.WriteStateFile(review.FileName,
+		`{"version": 1, "files": [{"path": "foo.txt", "approved": false, "hunks": ["`+blocks[0][0]+`"]}]}`); err != nil {
+		t.Fatal(err)
+	}
+
+	m := modelFor(t, repo)
+	if n, of := fileIn(t, m, "foo.txt").hunksApproved(); n != 1 || of != 2 {
+		t.Errorf("%d of %d hunks signed off, want the one that was", n, of)
+	}
+	st := reviewJSON(t, repo)
+	if len(st.ApprovedHunks("foo.txt", "Test")) != 1 || st.VerdictOf("foo.txt", "") != nil {
+		t.Errorf("the review was left as %s", st.Bytes())
+	}
+}
+
+// What t says f has hidden is what f hid: the open comments on the files it
+// took away, counted as it takes them. Reading one commit puts other files off
+// the screen too, and none of that is f's doing.
+func TestOnlyWhatFHidIsBlamedOnF(t *testing.T) {
+	m := newTestModel(t)
+	m = onLine(t, m, "bar.txt", '+', "beta")
+	m = comment(t, m, "hold on")
+	m = drive(t, m, letterKey("f"))
+	if m.view.hiddenOpen != 0 {
+		t.Fatalf("hiddenOpen = %d with nothing approved", m.view.hiddenOpen)
+	}
+	m = selectCommit(t, m, "add beta")
+	m = drive(t, m, letterKey("t"), letterKey("t"))
+	if m.view.hiddenOpen != 0 || strings.Contains(m.status, "hidden") {
+		t.Errorf("t said %q, and hiddenOpen = %d, of a comment on a file nobody approved", m.status, m.view.hiddenOpen)
+	}
+
+	// Approved, the file goes and its comment is counted as gone with it.
+	m = selectCommit(t, m, "capitalise two")
+	m.history.moveTo(0)
+	m = runCmd(t, m, m.selectedCommitCmd())
+	m = drive(t, m, letterKey("f"))
+	m = onLine(t, m, "bar.txt", '+', "beta")
+	m = drive(t, m, letterKey("a"), letterKey("f"))
+	if m.view.hiddenOpen != 1 {
+		t.Errorf("hiddenOpen = %d, want the one comment on the file f hid", m.view.hiddenOpen)
 	}
 }

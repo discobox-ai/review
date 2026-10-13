@@ -77,7 +77,7 @@ func TestParseRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !back.Approved("a.go") {
+	if !back.Approved("a.go", "Darren") {
 		t.Error("the approval did not survive")
 	}
 	got := back.Thread(th.ID)
@@ -111,7 +111,7 @@ func TestAHandWrittenReviewIsEnough(t *testing.T) {
 	if s.Version != Version {
 		t.Errorf("version = %d, want %d filled in", s.Version, Version)
 	}
-	if !s.Approved("a.go") {
+	if !s.Approved("a.go", "") {
 		t.Error("an approval written without a digest was not honoured")
 	}
 	if len(s.Threads) != 1 {
@@ -187,13 +187,13 @@ func TestReconcileNullifiesAStaleApproval(t *testing.T) {
 	if len(nullified) != 1 || nullified[0] != "a.go" {
 		t.Errorf("nullified = %v", nullified)
 	}
-	if s.Approved("a.go") {
+	if s.Approved("a.go", "Darren") {
 		t.Error("the approval survived the file changing")
 	}
-	if !s.Nullified("a.go") {
+	if !s.Nullified("a.go", "Darren") {
 		t.Error("nothing records that the approval fell rather than never being given")
 	}
-	if f := s.FileFor("a.go"); f.Digest != "before" {
+	if f := s.VerdictOf("a.go", "Darren"); f.Digest != "before" {
 		t.Errorf("the digest that was approved was lost: %q", f.Digest)
 	}
 }
@@ -206,7 +206,7 @@ func TestReconcileLeavesAGoodApprovalAlone(t *testing.T) {
 	if changed, _ := s.Reconcile(map[string]string{"a.go": "same"}); changed {
 		t.Error("an unchanged file was reported as changed")
 	}
-	if !s.Approved("a.go") {
+	if !s.Approved("a.go", "Darren") {
 		t.Error("the approval was dropped")
 	}
 }
@@ -222,10 +222,10 @@ func TestReconcileStampsAnApprovalWrittenByHand(t *testing.T) {
 	if !changed || len(nullified) != 0 {
 		t.Errorf("changed=%v nullified=%v; want a stamp, not a nullification", changed, nullified)
 	}
-	if f := s.FileFor("a.go"); f.Digest != "current" {
+	if f := s.VerdictOf("a.go", ""); f.Digest != "current" {
 		t.Errorf("digest = %q, want the current one", f.Digest)
 	}
-	if !s.Approved("a.go") {
+	if !s.Approved("a.go", "") {
 		t.Error("stamping the digest dropped the approval")
 	}
 	// And now it behaves like any other approval.
@@ -243,7 +243,7 @@ func TestReconcileIgnoresAFileNotInTheReview(t *testing.T) {
 	if changed, _ := s.Reconcile(map[string]string{"b.go": "x"}); changed {
 		t.Error("a file outside the review was reconciled anyway")
 	}
-	if !s.Approved("a.go") {
+	if !s.Approved("a.go", "Darren") {
 		t.Error("the approval was dropped for a file that is not being shown")
 	}
 }
@@ -253,11 +253,11 @@ func TestReconcileIgnoresAFileNotInTheReview(t *testing.T) {
 func TestUnapproveIsNotANullification(t *testing.T) {
 	s := New("main")
 	s.Approve("a.go", "d", "Darren")
-	s.Unapprove("a.go")
-	if s.Approved("a.go") {
+	s.Unapprove("a.go", "Darren")
+	if s.Approved("a.go", "Darren") {
 		t.Error("still approved")
 	}
-	if s.Nullified("a.go") {
+	if s.Nullified("a.go", "Darren") {
 		t.Error("withdrawing an approval marked the file as having changed")
 	}
 }
@@ -710,17 +710,201 @@ func TestHunkDigestsDoNotDependOnContext(t *testing.T) {
 // cannot come back with the change.
 func TestPruneHunksDropsWhatIsGone(t *testing.T) {
 	s := &State{}
-	s.SetHunks("f", []string{"aaa", "bbb"})
+	s.SetHunks("f", "Darren", []string{"aaa", "bbb"})
 	if !s.PruneHunks("f", map[string]bool{"bbb": true}) {
 		t.Fatal("nothing was pruned")
 	}
-	if got := s.FileFor("f").Hunks; len(got) != 1 || got[0] != "bbb" {
+	if got := s.VerdictOf("f", "Darren").Hunks; len(got) != 1 || got[0] != "bbb" {
 		t.Errorf("hunks are %v, want [bbb]", got)
 	}
 	if s.PruneHunks("f", map[string]bool{"bbb": true}) {
 		t.Error("a second prune reported a change")
 	}
-	if s.PruneHunks("f", nil); s.FileFor("f").Hunks != nil {
-		t.Error("the last hunk gone did not leave the list empty")
+	if s.PruneHunks("f", nil); s.FileFor("f") != nil {
+		t.Error("the last hunk gone left a verdict that says nothing")
+	}
+}
+
+// A file has a verdict for each reviewer. One approving does not approve for
+// another, and one taking theirs back leaves the other's standing.
+func TestEachReviewerHasTheirOwnVerdict(t *testing.T) {
+	s := New("main")
+	s.Approve("a.go", "d", "claude")
+	if s.Approved("a.go", "Darren") {
+		t.Fatal("an agent's approval was taken for the person's")
+	}
+	s.Approve("a.go", "d", "Darren")
+	if got := s.Approvers("a.go"); len(got) != 2 || got[0] != "Darren" || got[1] != "claude" {
+		t.Errorf("approvers = %v, want both, by name", got)
+	}
+
+	back, err := Parse(s.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !back.Approved("a.go", "claude") || !back.Approved("a.go", "Darren") {
+		t.Errorf("both approvals did not survive a save:\n%s", s.Bytes())
+	}
+
+	s.Unapprove("a.go", "Darren")
+	if s.Approved("a.go", "Darren") || !s.Approved("a.go", "claude") {
+		t.Errorf("taking one approval back moved the other: %v", s.Approvers("a.go"))
+	}
+	s.UnapproveAll("a.go")
+	if s.FileFor("a.go") != nil {
+		t.Error("a file nobody has a verdict on kept its entry")
+	}
+}
+
+// The file changing is the file changing for everybody who approved it.
+func TestAChangeNullifiesEveryApproval(t *testing.T) {
+	s := New("main")
+	s.Approve("a.go", "before", "claude")
+	s.Approve("a.go", "before", "Darren")
+	_, nullified := s.Reconcile(map[string]string{"a.go": "after"})
+	if len(nullified) != 1 || nullified[0] != "a.go" {
+		t.Errorf("nullified = %v, want the path once", nullified)
+	}
+	if got := s.Fallen("a.go"); len(got) != 2 || len(s.Approvers("a.go")) != 0 {
+		t.Errorf("fallen = %v, approvers = %v", got, s.Approvers("a.go"))
+	}
+
+	// One of them reads it again; the other's is still the one that fell.
+	s.Approve("a.go", "after", "Darren")
+	if !s.Approved("a.go", "Darren") || !s.Nullified("a.go", "claude") {
+		t.Errorf("verdicts = %+v", s.FileFor("a.go").Verdicts)
+	}
+}
+
+// A review written before a file had a verdict for each reviewer kept the one
+// approval on the file itself. It is read as the verdict of whoever signed it.
+func TestAVersionOneReviewIsCarriedOver(t *testing.T) {
+	s, err := Parse([]byte(`{
+	  "version": 1,
+	  "files": [
+	    {"path": "a.go", "approved": true, "digest": "d", "hunks": ["h"], "by": "Darren", "at": "2026-08-28T19:41:02Z"},
+	    {"path": "b.go", "approved": false, "nullified": true, "digest": "old", "by": "claude"},
+	    {"path": "c.go", "approved": false, "at": "2026-08-28T19:41:02Z"}
+	  ]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := s.VerdictOf("a.go", "Darren")
+	if v == nil || !v.Approved || v.Digest != "d" || len(v.Hunks) != 1 || v.At == "" {
+		t.Errorf("a.go came over as %+v", v)
+	}
+	if !s.Nullified("b.go", "claude") {
+		t.Error("an approval that had fallen did not come over as one")
+	}
+	if s.FileFor("c.go") != nil {
+		t.Error("an approval taken back came over as a verdict")
+	}
+
+	out := string(s.Bytes())
+	if !strings.Contains(out, `"version": 2`) || !strings.Contains(out, `"verdicts"`) {
+		t.Errorf("it was not written back in the new shape:\n%s", out)
+	}
+	if back, err := Parse([]byte(out)); err != nil || !back.Approved("a.go", "Darren") {
+		t.Errorf("the carried review did not read back: %v\n%s", err, out)
+	}
+}
+
+// A review from a newer discobox-review holds things this one would drop on
+// the way back out, so it is refused rather than read.
+func TestParseRefusesANewerVersion(t *testing.T) {
+	if _, err := Parse([]byte(`{"version": 99, "files": []}`)); err == nil {
+		t.Error("a review newer than this program was read as though understood")
+	}
+}
+
+// Hunks are signed off by somebody too.
+func TestHunksAreAReviewersOwn(t *testing.T) {
+	s := New("main")
+	s.SetHunks("f", "claude", []string{"aaa"})
+	s.SetHunks("f", "Darren", []string{"bbb"})
+	if got := s.ApprovedHunks("f", "Darren"); len(got) != 1 || !got["bbb"] {
+		t.Errorf("Darren's hunks = %v", got)
+	}
+	s.PruneHunks("f", map[string]bool{"bbb": true})
+	if s.VerdictOf("f", "claude") != nil || len(s.ApprovedHunks("f", "Darren")) != 1 {
+		t.Errorf("pruning left %+v", s.FileFor("f").Verdicts)
+	}
+}
+
+// Somebody approving by hand may add an entry for a path that has one. Both
+// are what is said about the file.
+func TestAPathNamedTwiceIsOneFile(t *testing.T) {
+	s, err := Parse([]byte(`{"files": [
+	  {"path": "a.go", "verdicts": [{"by": "Darren", "approved": true}]},
+	  {"path": "a.go", "by": "claude", "approved": true}
+	]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Files) != 1 || !s.Approved("a.go", "Darren") || !s.Approved("a.go", "claude") {
+		t.Errorf("files = %d, approvers = %v", len(s.Files), s.Approvers("a.go"))
+	}
+}
+
+// A reviewer whose approval fell, approving again by hand, adds a verdict
+// below the one that is there. The later one is the one they meant.
+func TestALaterVerdictByTheSameNameStands(t *testing.T) {
+	for name, files := range map[string]string{
+		"in the list": `[{"path": "a.go", "verdicts": [
+			{"by": "claude", "approved": false, "nullified": true, "digest": "old", "hunks": ["h"]},
+			{"by": "claude", "approved": true}]}]`,
+		"on the file": `[{"path": "a.go", "by": "claude", "approved": true, "verdicts": [
+			{"by": "claude", "approved": false, "nullified": true, "digest": "old", "hunks": ["h"]}]}]`,
+		"in an entry of its own": `[
+			{"path": "a.go", "verdicts": [{"by": "claude", "approved": false, "nullified": true, "digest": "old", "hunks": ["h"]}]},
+			{"path": "a.go", "by": "claude", "approved": true}]`,
+	} {
+		s, err := Parse([]byte(`{"files": ` + files + `}`))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		v := s.VerdictOf("a.go", "claude")
+		if v == nil || !v.Approved || v.Nullified || v.Digest != "" {
+			t.Errorf("%s: the approval lost to the one that fell: %+v", name, v)
+		}
+		if v != nil && len(v.Hunks) != 1 {
+			t.Errorf("%s: the hunks signed off before did not come along: %v", name, v.Hunks)
+		}
+		if len(s.Files) != 1 || len(s.Files[0].Verdicts) != 1 {
+			t.Errorf("%s: left %s", name, s.Bytes())
+		}
+	}
+}
+
+// Version 1 named nobody for a hunk signed off on its own, and nobody for an
+// approval written by hand without a name. The hunks were a window's, so its
+// reader takes them; the approval was anybody's, so nobody does.
+func TestNamelessHunksGoToWhoeverClaimsThem(t *testing.T) {
+	s, err := Parse([]byte(`{"version": 1, "files": [
+	  {"path": "a.go", "approved": false, "hunks": ["h1", "h2"]},
+	  {"path": "b.go", "approved": true, "hunks": ["h3"]},
+	  {"path": "c.go", "approved": true}
+	]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.ClaimHunks("Darren") {
+		t.Fatal("nothing was claimed")
+	}
+	if got := s.ApprovedHunks("a.go", "Darren"); len(got) != 2 {
+		t.Errorf("a.go: Darren's hunks = %v, want both", got)
+	}
+	if s.VerdictOf("a.go", "") != nil {
+		t.Error("a.go: a verdict that says nothing was left under no name")
+	}
+	if got := s.ApprovedHunks("b.go", "Darren"); len(got) != 1 || s.Approved("b.go", "Darren") {
+		t.Errorf("b.go: hunks %v, approved %v: want the hunks and not the approval", got, s.Approved("b.go", "Darren"))
+	}
+	if !s.Approved("b.go", "") || !s.Approved("c.go", "") || s.Approved("c.go", "Darren") {
+		t.Errorf("an approval under no name was moved: %s", s.Bytes())
+	}
+	if s.ClaimHunks("claude") {
+		t.Error("a second reader found something left to claim")
 	}
 }
