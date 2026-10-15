@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -247,10 +248,15 @@ func (f *fakeSystem) DevNull() string          { return "/dev/null" }
 // A repository driven entirely through a fake System behaves normally, which
 // is what makes a remote backend a matter of implementing this one interface.
 func TestRepoRunsOnAFakeSystem(t *testing.T) {
+	// An absolute path on this platform, spelled the way git spells it there.
+	root := "/work/repo"
+	if runtime.GOOS == "windows" {
+		root = "C:/work/repo"
+	}
 	fake := &fakeSystem{
 		git: map[string]string{
-			"rev-parse --show-toplevel":                                "/work/repo\n",
-			"rev-parse --git-dir":                                      "/work/repo/.git\n",
+			"rev-parse --show-toplevel":                                root + "\n",
+			"rev-parse --git-dir":                                      root + "/.git\n",
 			"rev-parse --verify --quiet HEAD":                          "abc123\n",
 			"diff-index --cached -M --ignore-submodules=dirty -z HEAD": ":100644 100644 aaa bbb M\x00staged.txt\x00",
 			"diff-files --ignore-submodules=dirty -z":                  ":100644 100644 aaa bbb M\x00worktree.txt\x00",
@@ -258,14 +264,14 @@ func TestRepoRunsOnAFakeSystem(t *testing.T) {
 			"ls-files --unmerged -z":                                   "",
 			"symbolic-ref --short HEAD":                                "main\n",
 		},
-		files: map[string]string{"/work/repo/.git/discobox-review.json": `{"version":1,"branch":"main"}`},
+		files: map[string]string{filepath.Join(root, ".git", "discobox-review.json"): `{"version":1,"branch":"main"}`},
 	}
 
-	repo, err := OpenWith(fake, "/work/repo")
+	repo, err := OpenWith(fake, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repo.Dir != "/work/repo" || repo.GitDir != "/work/repo/.git" {
+	if repo.Dir != root || repo.GitDir != root+"/.git" {
 		t.Fatalf("repo = %+v", repo)
 	}
 
