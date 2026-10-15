@@ -25,7 +25,7 @@ clean:
 # ---------------------------------------------------------------------------
 #
 # They are taken from the running window rather than drawn by hand: the
-# generator in internal/ui drives the real model over a fixture repository and
+# generator in ui drives the real model over a fixture repository and
 # writes out the frames, and freeze turns each frame into a picture. A picture
 # of a program is a claim about it, and this is how the claim stays true.
 #
@@ -44,7 +44,7 @@ screenshots:
 	@command -v convert >/dev/null || { echo "need ImageMagick"; exit 1; }
 	@command -v fc-match >/dev/null || { echo "need fontconfig"; exit 1; }
 	@mkdir -p $(SHOTDIR)
-	SHOTS=$(CURDIR)/$(SHOTDIR) go test ./internal/ui -run TestWriteScreenshots -count=1
+	SHOTS=$(CURDIR)/$(SHOTDIR) go test ./ui -run TestWriteScreenshots -count=1
 	@font=$$(fc-match -f '%{file}' "$(SHOTFONT)"); \
 	for f in $(SHOTDIR)/*.ansi; do \
 		png=$${f%.ansi}.png; \
