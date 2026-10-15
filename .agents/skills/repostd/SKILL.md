@@ -159,10 +159,40 @@ inside a git repository, `$RC` says so; stop and tell the user.
   - `DESIGN.md` describes current state only, never planned work. Parents
     link to children instead of repeating them. Prefer Mermaid for
     structure and flows. Keep them short, directive and scannable.
-  - `REVIEW.md` is a bullet list of review rules and pitfalls.
+  - `REVIEW.md` is covered next, under Review notes.
 - Every Mermaid block starts with a known diagram type. `docs.mermaid`
 - No plan or task documents in the repo: plans belong in the branch or task.
   `docs.no-plans`
+
+### Review notes (`REVIEW.md`)
+
+- A `REVIEW.md` is review notes, not a reviewer. It is a bullet list of
+  what to check in the code below it and the pitfalls already hit there,
+  for any agent that reviews or changes that code. The reviewers a discobox
+  runs are defined in `.discobox/review/*.md`. Each of them, and the general
+  reviewer above all, reads the notes.
+- A reviewer reads every `REVIEW.md` from the root down to each directory
+  the change touches. A change that breaks a note is a finding, and the
+  finding cites the note.
+- Add a note when:
+  - a review or a fix turns up something a future reviewer of this code
+    should check and would not think to: a constraint the code cannot show,
+    or an invariant that is easy to break from somewhere else;
+  - the same mistake is made a second time;
+  - a regression is fixed. The note says what to check so it does not come
+    back.
+- The author writes the note, in the change that fixes what prompted it. A
+  reviewer edits nothing, so a reviewer that thinks a note is due says so in
+  its comment.
+- A note goes in the `REVIEW.md` of the closest directory that holds the code
+  and has a `DESIGN.md` (`docs.review-design`). The root always has one.
+- A note is one bullet: the rule, stated directively, then why, naming the
+  incident, commit or issue behind it.
+- Where a test or a lint can catch the mistake, add that as well. The note is
+  for what only a reader will see.
+- Delete a note once the code makes the mistake impossible, and fix it when
+  the code it describes changes. When a `REVIEW.md` grows past what is read
+  in one sitting, move its notes down into the directories they are about.
 
 ### ADRs (`docs/adr`)
 
