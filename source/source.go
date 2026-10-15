@@ -25,15 +25,23 @@ type Source interface {
 	// Scan reads the whole review in one go. base is the ref the review is
 	// measured from, or empty to let the source decide; context is how many
 	// unchanged lines every diff is taken with.
+	//
+	// context is a hint. A source that cannot choose — a hosting service
+	// sends the context it sends — gives what it has: the window shows the
+	// rest of a file from FileContent, between the hunks, either way.
 	Scan(base string, context int) (Scan, error)
 
 	// CommitDiff is everything one commit changed, as a unified diff taken
-	// with context lines of context.
+	// with context lines of context — a hint, as it is for Scan.
 	CommitDiff(hash string, context int) (string, error)
 
 	// FileContent is a file's whole text as commit recorded it, or as the
 	// review's new side has it — the working tree, a pull request's head —
 	// when commit is empty.
+	//
+	// A scan reads every changed file, and reads several at once: FileContent
+	// is called from more than one goroutine at a time, and has to be safe
+	// for that.
 	FileContent(commit, path string) (string, error)
 }
 

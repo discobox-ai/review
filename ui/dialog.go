@@ -24,7 +24,8 @@ type dialog struct {
 	kind   dialogKind
 	title  string
 	body   string
-	items  []string
+	items  []string // what the action is handed back
+	shown  []string // the same, as they are drawn
 	cursor int
 	offset int
 	input  textinput.Model
@@ -35,16 +36,25 @@ type dialog struct {
 	action func(result string) tea.Cmd
 }
 
+// A dialog's words are often somebody else's — an error from git, a path, a
+// remark, a branch — so they are made printable when it is made. A list's
+// items are drawn printable, but what the action is handed back is the item
+// as it was given: a branch whose name is not UTF-8 is still that branch.
+
 func messageDialog(title, body string, isErr bool) *dialog {
-	return &dialog{kind: dlgMessage, title: title, body: body, err: isErr}
+	return &dialog{kind: dlgMessage, title: printable(title), body: printableLines(body), err: isErr}
 }
 
 func confirmDialog(title, body string, action func(string) tea.Cmd) *dialog {
-	return &dialog{kind: dlgConfirm, title: title, body: body, action: action}
+	return &dialog{kind: dlgConfirm, title: printable(title), body: printableLines(body), action: action}
 }
 
 func listDialog(title, body string, items []string, action func(string) tea.Cmd) *dialog {
-	return &dialog{kind: dlgList, title: title, body: body, items: items, action: action}
+	shown := make([]string, len(items))
+	for i, it := range items {
+		shown[i] = printable(it)
+	}
+	return &dialog{kind: dlgList, title: printable(title), body: printableLines(body), items: items, shown: shown, action: action}
 }
 
 func inputDialog(title, body, placeholder string, action func(string) tea.Cmd) *dialog {
@@ -179,7 +189,7 @@ func (d *dialog) view(st *styles, width, height int) string {
 			start = d.cursor - visible + 1
 		}
 		for i := start; i < len(d.items) && i < start+visible; i++ {
-			line := pad("  "+d.items[i], inner)
+			line := pad("  "+d.shown[i], inner)
 			if i == d.cursor {
 				b.WriteString(st.sel.Render(line) + "\n")
 			} else {

@@ -1261,7 +1261,16 @@ m = m.SetOrigin(0, 1)         // where that room is: under the host's own line
 
 The mouse reports where it is on the terminal, so a window drawn anywhere
 but the top left corner has to be told where it is; a press outside it is
-left alone.
+left alone. `Step` is `Update` handing back a `ui.Model` rather than a
+`tea.Model`, for a host that keeps the window as one.
+
+**Nothing a source says reaches the terminal as anything but text.** A pull
+request is written by whoever opened it, and a terminal takes an escape
+sequence in a diff, a file, a commit's subject or a remark in the review as an
+instruction — a link to a site it does not name, a write to the clipboard, a
+cleared screen. Every control character is drawn as the symbol Unicode keeps
+for it, one column for one, so `ESC` shows as `␛` and nothing moves. A Windows
+line's closing carriage return is dropped rather than shown.
 
 **What the window offers follows from what the source is.** Three more
 interfaces in `source` say what a source can do besides being read, and the
@@ -1289,6 +1298,10 @@ second. A host that knows the source has moved — a new head commit — sends
 out is in, if there is one, so that an answer about the old head never lands
 after one about the new. `Typing` says whether
 keys are going into a text field, for a host deciding whether a key is its own.
+
+A scan reads the text of every changed file, for the unchanged lines between
+its hunks, and it reads up to eight at once: from a source across a network,
+one after another is a round trip each.
 
 `*git.Repo`, in `internal/git`, is the source the command uses, and it is all
 four.

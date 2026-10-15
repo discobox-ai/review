@@ -429,13 +429,15 @@ func (f *reviewFile) setGap(g int, open bool) {
 	lines, texts := make([]git.DiffLine, gp.n), make([]string, gp.n)
 	for k := range lines {
 		// A file with DOS line endings keeps its carriage returns when it is
-		// read whole, and one sent to the terminal moves the cursor.
-		s := strings.TrimSuffix(f.full[gp.new-1+k], "\r")
+		// read whole, and one sent to the terminal moves the cursor. The line
+		// is kept as the file has it, as a line of the diff is, for what a
+		// comment quotes; what is drawn is made printable.
+		raw := f.full[gp.new-1+k]
 		lines[k] = git.DiffLine{
-			Text: " " + s, Kind: ' ', Hunk: -1, Line: g,
+			Text: " " + strings.TrimSuffix(raw, "\r"), Kind: ' ', Hunk: -1, Line: g,
 			Old: gp.old + k, New: gp.new + k, Seam: gp.new + k,
 		}
-		texts[k] = expandTabs(s)
+		texts[k] = expandTabs(printableCode(raw))
 	}
 	var spans [][]span
 	// A gap can be most of a file, and this runs where the keys are read.
@@ -1041,16 +1043,16 @@ func (v *reviewView) threadRows(t *review.Thread, fi, line, wrap int, loose bool
 		return r
 	}
 	if t.Resolved && !v.expanded[t.ID] {
-		head := "✓ " + t.ID + " · resolved"
+		head := "✓ " + printable(t.ID) + " · resolved"
 		if n := len(t.Comments); n > 0 {
 			head += " · " + plural(n, "comment", "comments")
-			head += " · " + firstLine(t.Comments[0].Body)
+			head += " · " + printable(firstLine(t.Comments[0].Body))
 		}
 		return []reviewRow{row(truncate(head, wrap), thFoot, true)}
 	}
 
 	var out []reviewRow
-	head := t.ID + " · " + plural(len(t.Comments), "comment", "comments")
+	head := printable(t.ID) + " · " + plural(len(t.Comments), "comment", "comments")
 	if first, last := t.Span(); last > first {
 		head += " · lines " + itoa(first) + "–" + itoa(last)
 	}
@@ -1064,12 +1066,14 @@ func (v *reviewView) threadRows(t *review.Thread, fi, line, wrap int, loose bool
 		out = append(out, row(head, thBorder, true))
 	}
 	for at, c := range t.Comments {
-		who := c.By
+		// Whoever wrote to the review wrote these, and an agent's remark is
+		// drawn as text like anybody's.
+		who := printable(c.By)
 		if who == "" {
 			who = "someone"
 		}
 		out = append(out, said(who+"  "+shortTime(c.At), thAuthor, at))
-		for _, l := range wrapText(c.Body, wrap-2) {
+		for _, l := range wrapText(printableLines(c.Body), wrap-2) {
 			out = append(out, said("  "+l, thBody, at))
 		}
 	}
@@ -1124,10 +1128,13 @@ func wrapText(s string, w int) []string {
 
 // shortTime keeps the date off a timestamp that is already in a list of them.
 func shortTime(at string) string {
+	// The time is written into the review file like the remark is, and by
+	// whoever wrote that, so what is drawn of it is made printable — after
+	// it is cut, so the cut falls between the file's bytes.
 	if len(at) >= 16 && at[10] == 'T' {
-		return at[:10] + " " + at[11:16]
+		return printable(at[:10] + " " + at[11:16])
 	}
-	return at
+	return printable(at)
 }
 
 // ---------------------------------------------------------------------------
@@ -1846,9 +1853,9 @@ func (v *reviewView) fileHeader(f *reviewFile, st *styles, band lipgloss.Style, 
 	if f.folded {
 		fold = "▸ "
 	}
-	name := f.path
+	name := printable(f.path)
 	if f.from != "" {
-		name = f.from + " → " + f.path
+		name = printable(f.from) + " → " + name
 	}
 
 	// The tail gets whatever the whole name leaves. Only when that is not
@@ -1947,7 +1954,7 @@ func (f *reviewFile) verdictStyle(st *styles) lipgloss.Style {
 func reviewerNames(names []string) string {
 	out := make([]string, len(names))
 	for i, n := range names {
-		if out[i] = n; n == "" {
+		if out[i] = printable(n); n == "" {
 			out[i] = "nobody named"
 		}
 	}
@@ -2185,6 +2192,8 @@ func (v *reviewView) diffRowForLine(f *reviewFile, i int, st *styles, rowW int, 
 		case 'g':
 			style, text = st.dimText, f.gapText(i)
 		}
+		// A file's name and the line a hunk header quotes are the source's.
+		text = printable(text)
 		return diffRow{
 			bar: bar, mark: mark, marked: marked,
 			numW: v.numW, numSty: numSty,

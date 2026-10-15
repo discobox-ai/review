@@ -341,12 +341,19 @@ type ClosedMsg struct{}
 // source.
 type RescanMsg struct{}
 
+// Step is [Model.Update] for a program holding the window as a Model rather
+// than as a [tea.Model]: the same, with the window handed back as what it is.
+func (m Model) Step(msg tea.Msg) (Model, tea.Cmd) {
+	next, cmd := m.Update(msg)
+	return next.(Model), cmd
+}
+
 // SetSize gives the window the room it has to draw in. It is the same as
 // sending it a [tea.WindowSizeMsg], for a program that lays the window out
 // inside its own.
 func (m Model) SetSize(width, height int) Model {
-	next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})
-	return next.(Model)
+	next, _ := m.Step(tea.WindowSizeMsg{Width: width, Height: height})
+	return next
 }
 
 // SetOrigin says where on the terminal the window's top left corner is drawn,
@@ -435,6 +442,7 @@ func (m Model) rescanCmd() tea.Cmd {
 	src, baseRef, context := m.src, m.baseRef, m.context
 	return func() tea.Msg {
 		scan, err := src.Scan(baseRef, context)
+		scan = drawable(scan)
 		if err != nil {
 			return rescanMsg{scan: scan, err: err}
 		}
@@ -489,6 +497,23 @@ func (m Model) commitCmd(hash string) tea.Cmd {
 	}
 }
 
+// drawable is a scan with what the window only shows made printable: the
+// base's names, the commits, the source's word on an incomplete diff. What is
+// used to ask the source anything — the branch the review is kept under, the
+// hashes — is left as the source said it, and made printable where it is
+// drawn.
+func drawable(s source.Scan) source.Scan {
+	s.Base.Ref, s.Base.Commit, s.Base.Err = printable(s.Base.Ref), printable(s.Base.Commit), printable(s.Base.Err)
+	s.Incomplete = printable(s.Incomplete)
+	commits := make([]source.Commit, len(s.Commits))
+	for i, c := range s.Commits {
+		c.Short, c.Subject, c.Author, c.When = printable(c.Short), printable(c.Subject), printable(c.Author), printable(c.When)
+		commits[i] = c
+	}
+	s.Commits = commits
+	return s
+}
+
 // op wraps a command whose result lands in the status bar.
 func op(text string, rescan bool, fn func() error) tea.Cmd {
 	return func() tea.Msg {
@@ -528,9 +553,9 @@ func buildFiles(diff, pending string, states map[string]git.State) []*reviewFile
 		f.texts = make([]string, len(f.lines))
 		for i, l := range f.lines {
 			if isCodeLine(l.Kind) {
-				f.texts[i] = expandTabs(codeText(l.Text))
+				f.texts[i] = expandTabs(printableCode(codeText(l.Text)))
 			} else {
-				f.texts[i] = l.Text
+				f.texts[i] = printable(l.Text)
 			}
 		}
 		f.emph = pairEmphasis(f.lines, f.texts)
@@ -553,20 +578,38 @@ const maxGapBytes = 4 << 20
 // addGaps reads each file as the diff's new side has it — the working tree, or
 // a commit — and marks the stretches of it the diff leaves out. A file that
 // cannot be read has none marked, and is drawn the way it always was.
+//
+// The files are read several at a time. From a working tree that hardly
+// matters; from a source on the far side of a network, one file after
+// another is a round trip each, and a review of forty files took seconds.
 func addGaps(src source.Source, commit string, files []*reviewFile) {
+	var wg sync.WaitGroup
+	slot := make(chan struct{}, gapReaders)
 	for _, f := range files {
 		// Nothing is read for a file with no hunks — a binary, a change of
 		// mode — since it has no gaps to count and may be very large.
 		if f.patch == nil || len(f.patch.Hunks) == 0 || noNewSide(f.patch) {
 			continue
 		}
-		// The text is kept, to open a gap from without reading again, so a
-		// file too big to be worth keeping goes without its gaps.
-		if text, err := src.FileContent(commit, f.path); err == nil && len(text) <= maxGapBytes {
-			f.addGaps(text)
-		}
+		wg.Add(1)
+		go func(f *reviewFile) {
+			defer wg.Done()
+			slot <- struct{}{}
+			defer func() { <-slot }()
+			// The text is kept, to open a gap from without reading again, so
+			// a file too big to be worth keeping goes without its gaps.
+			if text, err := src.FileContent(commit, f.path); err == nil && len(text) <= maxGapBytes {
+				f.addGaps(text)
+			}
+		}(f)
 	}
+	wg.Wait()
 }
+
+// gapReaders is how many files addGaps reads at once: enough to hide a
+// network's round trips, few enough not to look like a flood to a service
+// that limits how fast it is asked.
+const gapReaders = 8
 
 // noNewSide reports whether there is no file to read the unchanged lines of a
 // patch from: it is of a symbolic link, whose content is the name it points
@@ -2479,12 +2522,12 @@ func (m Model) doComment() (tea.Model, tea.Cmd) {
 		c.origin = &review.Origin{Commit: m.commit, Side: side, Line: line}
 	}
 
-	where := f.path + ":" + itoa(c.line)
+	where := printable(f.path) + ":" + itoa(c.line)
 	switch {
 	case c.line == 0:
-		where = f.path + " (no longer a line in the working tree)"
+		where = printable(f.path) + " (no longer a line in the working tree)"
 	case c.span > 1:
-		where = f.path + ":" + itoa(c.line) + "–" + itoa(c.line+c.span-1)
+		where = printable(f.path) + ":" + itoa(c.line) + "–" + itoa(c.line+c.span-1)
 	}
 	c.title = "Comment on " + where
 	m.view.clearVisual()
@@ -2504,7 +2547,7 @@ func (m Model) doReply() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.openCompose(&compose{
-		title: "Reply to " + t.ID + " on " + t.Path, thread: t.ID, path: t.Path, at: -1,
+		title: "Reply to " + printable(t.ID) + " on " + printable(t.Path), thread: t.ID, path: t.Path, at: -1,
 	})
 }
 
@@ -3289,13 +3332,18 @@ func (m Model) markdownKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // Status
 // ---------------------------------------------------------------------------
 
-func (m *Model) clearStatus()   { m.status, m.statusOK, m.statusEr, m.statusWa = "", false, false, false }
-func (m *Model) setOK(s string) { m.status, m.statusOK, m.statusEr, m.statusWa = s, true, false, false }
+func (m *Model) clearStatus() { m.status, m.statusOK, m.statusEr, m.statusWa = "", false, false, false }
+
+// The status bar says things about paths, refs and errors from outside the
+// window, so what it is handed is made printable on the way in.
+func (m *Model) setOK(s string) {
+	m.status, m.statusOK, m.statusEr, m.statusWa = printable(s), true, false, false
+}
 func (m *Model) setWarn(s string) {
-	m.status, m.statusOK, m.statusEr, m.statusWa = s, false, false, true
+	m.status, m.statusOK, m.statusEr, m.statusWa = printable(s), false, false, true
 }
 func (m *Model) setError(s string) {
-	m.status, m.statusOK, m.statusEr, m.statusWa = s, false, true, false
+	m.status, m.statusOK, m.statusEr, m.statusWa = printable(s), false, true, false
 }
 
 func firstLine(s string) string {
