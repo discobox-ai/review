@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,10 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	binary = filepath.Join(dir, "discobox-review")
+	if runtime.GOOS == "windows" {
+		// Windows runs a program by its extension; without one, it is not found.
+		binary += ".exe"
+	}
 	out, err := exec.CommandContext(context.Background(), "go", "build", "-o", binary, ".").CombinedOutput()
 	if err != nil {
 		panic(string(out))
