@@ -265,8 +265,8 @@ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/denis-tingaikin/go-header v0.5.0 h1:SRdnP5ZKvcO9KKRP1KJrhFR3RrlGuD+42t4429eC9k8=
 github.com/denis-tingaikin/go-header v0.5.0/go.mod h1:mMenU5bWrok6Wl2UsZjy+1okegmwQ3UgWl4V1D8gjlY=
-github.com/discobox-ai/repostd v0.0.0-20261010035226-4780c40b462a h1:rFQIFUp+NhEpZNQocFcqclkidOnjnJ4cViRoEWO4Yh8=
-github.com/discobox-ai/repostd v0.0.0-20261010035226-4780c40b462a/go.mod h1:PzfYl7jMRBycDGFY0ZQBUk4lGX4zVwHLmGiKyU6huVQ=
+github.com/discobox-ai/repostd v0.0.0-20261015052039-ed20cf47eac2 h1:DFIv3hbYr2HqPowxXOcagZrTgFnlk1ZV2zoQa5BijOE=
+github.com/discobox-ai/repostd v0.0.0-20261015052039-ed20cf47eac2/go.mod h1:PzfYl7jMRBycDGFY0ZQBUk4lGX4zVwHLmGiKyU6huVQ=
 github.com/discobox-ai/x v0.0.0-20260828205057-2567df0ccf27 h1:5YxUixwIYTJhHszbiH8x8jZImryn8Z3t6waapi7/2mk=
 github.com/discobox-ai/x v0.0.0-20260828205057-2567df0ccf27/go.mod h1:ozoGHzU8woLHyDsmXikg5H1raf07miXC7vg51QtkQew=
 github.com/dlclark/regexp2 v1.12.0 h1:0j4c5qQmnC6XOWNjP3PIXURXN2gWx76rd3KvgdPkCz8=
