@@ -90,7 +90,7 @@ func newFileView(path, base string, side fileSide, text string, changed map[int]
 		// grey.
 		v.lines[i] = git.DiffLine{Text: " " + l, Kind: ' ', Hunk: 0, Line: i,
 			Old: i + 1, New: i + 1, Seam: i + 1}
-		v.texts[i] = expandTabs(l)
+		v.texts[i] = expandTabs(printableCode(l))
 	}
 	v.spans = highlightLines(path, v.lines, v.texts)
 	v.numW = numberWidth(v.lines)
@@ -189,11 +189,11 @@ func (v *fileView) goToLine(n int) {
 func (v *fileView) title() string {
 	if v.side == sideBefore {
 		if v.base != "" {
-			return v.path + "  ·  as " + v.base + " has it"
+			return printable(v.path) + "  ·  as " + v.base + " has it"
 		}
-		return v.path + "  ·  before"
+		return printable(v.path) + "  ·  before"
 	}
-	return v.path
+	return printable(v.path)
 }
 
 func (v *fileView) view(st *styles) string {

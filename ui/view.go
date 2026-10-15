@@ -236,10 +236,11 @@ func (m Model) branchBar() (string, []barSpan) {
 	var spans []barSpan
 
 	const label = "Reviewing: "
-	left := m.st.branchLabel.Render(label) + m.st.branchBar.Render(m.branch)
+	branch := printable(m.branch)
+	left := m.st.branchLabel.Render(label) + m.st.branchBar.Render(branch)
 	at := width(label)
-	spans = append(spans, barSpan{at, width(m.branch), barBranch})
-	at += width(m.branch)
+	spans = append(spans, barSpan{at, width(branch), barBranch})
+	at += width(branch)
 
 	if m.merging {
 		// A merge in progress is the loudest reason a tree is not clean, and
@@ -711,6 +712,8 @@ func (m Model) helpText() string {
 		"  same choices K and b offer.",
 	})
 	if m.store == nil {
+		lines = replaceLine(lines, "    Enter  the same as Space. A comment begins with c, and only c.",
+			"    Enter  the same as Space.")
 		lines = replaceParagraph(lines, "  The window opens as the list of what changed", []string{
 			"  The window opens as the list of what changed: every file folded",
 			"  to its heading, which says how much it changed. Space opens the",
@@ -823,6 +826,15 @@ func dropSection(lines []string, title string) []string {
 		}
 	}
 	return slices.Delete(slices.Clone(lines), at-1, end)
+}
+
+// replaceLine puts with in place of the line that reads old.
+func replaceLine(lines []string, old, with string) []string {
+	if i := slices.Index(lines, old); i >= 0 {
+		lines = slices.Clone(lines)
+		lines[i] = with
+	}
+	return lines
 }
 
 // replaceParagraph puts with in place of the paragraph that begins with the

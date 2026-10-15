@@ -2,8 +2,10 @@ package ui_test
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,8 +183,7 @@ func answers(cmd tea.Cmd) []tea.Msg {
 
 func press(m ui.Model, keys ...tea.KeyPressMsg) ui.Model {
 	for _, k := range keys {
-		next, _ := m.Update(k)
-		m = next.(ui.Model)
+		m, _ = m.Step(k)
 	}
 	return m
 }
@@ -202,6 +203,7 @@ func TestASourceWithoutAWorkingTreeOffersNoneOfIt(t *testing.T) {
 		"comment on this line", "approve every file", "reply to this comment",
 		"resolve / reopen", "click the branch name", ".git/discobox-review.json",
 		"An approval is of a change", "What is not committed yet",
+		"A comment begins with c",
 	} {
 		if strings.Contains(help, gone) {
 			t.Errorf("the help still offers %q", gone)
@@ -251,6 +253,62 @@ func TestEmbeddedClosingIsCalledClosing(t *testing.T) {
 	top, _, _ := strings.Cut(m.View().Content, "\n")
 	if !strings.Contains(top, "Ctrl-Q close") || strings.Contains(top, "quit") {
 		t.Errorf("the top bar of an embedded window: %q", top)
+	}
+}
+
+// hostileSource is a pull request written to attack whoever opens it: escape
+// sequences in its diff, its file, its branch, its commits and its excuses.
+type hostileSource struct{}
+
+const evil = "\x1b]8;;https://evil.example\x07click\x1b]8;;\x07 \x1b]52;c;aGk=\x07 \x1b[2J \x1b[31mred\r\bX"
+
+func (hostileSource) Scan(base string, context int) (source.Scan, error) {
+	return source.Scan{
+		Branch: "pr/" + evil, HasHEAD: true,
+		Base: source.Base{Ref: "main" + evil, SHA: "1111111aaaaaaa", Commit: "1111111"},
+		Commits: []source.Commit{{
+			Hash: "2222222bbbbbbb", Short: "2222222",
+			Subject: "subject " + evil, Author: "author " + evil, When: "now",
+		}},
+		Diff: "diff --git a/hello.go b/hello.go\n--- a/hello.go\n+++ b/hello.go\n" +
+			"@@ -1,2 +1,2 @@ " + evil + "\n package hello\n-// old\n+// " + evil + "\n",
+		Incomplete: "cut " + evil,
+	}, nil
+}
+
+func (s hostileSource) CommitDiff(hash string, context int) (string, error) {
+	scan, _ := s.Scan("", context)
+	return scan.Diff, nil
+}
+
+func (hostileSource) FileContent(commit, path string) (string, error) {
+	return "package hello\n// " + evil + "\n", nil
+}
+
+// Nothing a source says reaches the terminal as anything but text: not a
+// link, not a write to the clipboard, not a clear, not a colour, not a
+// carriage return — and no line is lost or added doing it.
+func TestASourceCannotDrawOnTheTerminal(t *testing.T) {
+	m := opened(t, hostileSource{}, ui.Options{Author: "reader"})
+	m = press(m, letter(" "), letter("j"), letter("j"))
+	screens := map[string]string{"the review": m.View().Content}
+	next, cmd := m.Update(letter("v"))
+	if cmd != nil {
+		next, _ = next.(ui.Model).Update(cmd())
+	}
+	screens["the reader"] = next.(ui.Model).View().Content
+	for name, view := range screens {
+		for _, bad := range []string{"\x1b]", "\x07", "\x1b[2J", "\x1b[31m", "\r", "\b"} {
+			if strings.Contains(view, bad) {
+				t.Errorf("%s drew %q from the source", name, bad)
+			}
+		}
+		if !strings.Contains(view, "␛]8;;https://evil.example␇click") {
+			t.Errorf("%s does not show the source's text as text:\n%s", name, view)
+		}
+		if n := strings.Count(view, "\n") + 1; n != 30 {
+			t.Errorf("%s is %d lines tall, want 30", name, n)
+		}
 	}
 }
 
@@ -396,6 +454,49 @@ func TestADragLetGoOutsideTheWindowEnds(t *testing.T) {
 func above(s string) string {
 	s = strings.TrimRight(s, "\n")
 	return s[:strings.LastIndex(s, "\n")]
+}
+
+// manyFiles is a pull request of twenty files whose every read takes a while,
+// the way a read from a hosting service does, and which notes how many reads
+// are under way at once.
+type manyFiles struct {
+	mu        *sync.Mutex
+	now, most *int
+}
+
+func (s manyFiles) Scan(base string, context int) (source.Scan, error) {
+	var diff strings.Builder
+	for i := range 20 {
+		name := fmt.Sprintf("f%02d.go", i)
+		fmt.Fprintf(&diff, "diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1,1 +1,1 @@\n-old\n+new\n", name, name, name, name)
+	}
+	return source.Scan{Branch: "pr/7", HasHEAD: true, Base: source.Base{Ref: "main", SHA: "1111111"}, Diff: diff.String()}, nil
+}
+
+func (manyFiles) CommitDiff(string, int) (string, error) { return "", nil }
+
+func (s manyFiles) FileContent(commit, path string) (string, error) {
+	s.mu.Lock()
+	*s.now++
+	*s.most = max(*s.most, *s.now)
+	s.mu.Unlock()
+	time.Sleep(20 * time.Millisecond)
+	s.mu.Lock()
+	*s.now--
+	s.mu.Unlock()
+	return "new\nmore\n", nil
+}
+
+// A scan reads the files it needs several at a time — not one after another,
+// a round trip each, and not all at once either.
+func TestAScanReadsFilesSeveralAtATime(t *testing.T) {
+	var mu sync.Mutex
+	now, most := 0, 0
+	m := ui.New(manyFiles{&mu, &now, &most}, ui.Options{Author: "reader"}).SetSize(120, 30)
+	answers(m.Init())
+	if most < 2 || most > 8 {
+		t.Errorf("at most %d files were read at once, want between 2 and 8", most)
+	}
 }
 
 // countingSource is a pull request that counts how often it is read.

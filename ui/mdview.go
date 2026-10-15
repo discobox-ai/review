@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"charm.land/glamour/v2"
@@ -51,7 +52,9 @@ const mdGutter = 2
 const mdLead = 3
 
 func newMdView(title, raw string, changedSrc map[int]bool, width, height int) *mdView {
-	v := &mdView{title: title, raw: raw, changedSrc: changedSrc, cur: -1}
+	// The markdown is rendered into escape sequences of the renderer's own;
+	// any already in it are the file's, and are drawn as text.
+	v := &mdView{title: printable(title), raw: printableLines(raw), changedSrc: changedSrc, cur: -1}
 	v.resize(width, height)
 	return v
 }
@@ -131,7 +134,7 @@ func (v *mdView) resize(width, height int) {
 		out := seg.text
 		if err == nil {
 			if rendered, rerr := r.Render(seg.text); rerr == nil {
-				out = strings.Trim(rendered, "\n")
+				out = unlinked(strings.Trim(rendered, "\n"))
 			}
 		}
 		if i > 0 {
@@ -319,4 +322,19 @@ func (v *mdView) view(st *styles) string {
 	}
 	b.WriteString(st.dimText.Render(hint))
 	return b.String()
+}
+
+// hyperlink is the escape sequence a terminal takes as a link, in either of
+// the forms it may be closed with.
+var hyperlink = regexp.MustCompile("\x1b\\]8;[^\x07\x1b]*(?:\x07|\x1b\\\\)")
+
+// unlinked is rendered markdown with its links made text. The renderer turns
+// a link into one the terminal will follow, to wherever the file says, and it
+// prints the address beside the words as well — so taking the link away
+// leaves the reader everything, and the file's author nothing to dress up.
+func unlinked(rendered string) string {
+	if !strings.Contains(rendered, "\x1b]8;") {
+		return rendered
+	}
+	return hyperlink.ReplaceAllString(rendered, "")
 }
