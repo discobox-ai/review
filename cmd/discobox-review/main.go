@@ -23,7 +23,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/discobox-ai/review/internal/cli"
 	"github.com/discobox-ai/review/internal/git"
-	"github.com/discobox-ai/review/internal/ui"
+	"github.com/discobox-ai/review/ui"
 )
 
 var version = "dev"

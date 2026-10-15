@@ -1265,25 +1265,25 @@ carries a comment in and out of it.
 | `internal/review/review.go` | The review document: approvals, digests, threads, and the JSON they live in |
 | `internal/review/store.go` | Reading and writing it, the lock that makes the two one step, and the branch swap — shared by the window and the commands |
 | `internal/cli/cli.go` | discobox-review without the window: the subcommands |
-| `internal/ui/model.go` | The Bubble Tea model: state, keys, actions |
-| `internal/ui/view.go` | Where each pane goes, the bars above and below them, and what the view asks of the screen |
-| `internal/ui/reviewview.go` | The stack: rows, folds, comment blocks, navigation |
-| `internal/ui/keys.go` | Every binding, in one table |
-| `internal/ui/diffrow.go` | One line of code, drawn |
-| `internal/ui/fileview.go` | The full screen reader for a whole file, either side of the change |
-| `internal/ui/scroll.go` | Drawing the bars |
-| `internal/ui/scrollbar.go` | Taking hold of one and pulling it |
-| `internal/ui/commitlist.go` | The history |
-| `internal/ui/syntax.go` | Lexing a hunk and the syntax palette |
-| `internal/ui/emphasis.go` | Tabs, and finding the characters that changed |
-| `internal/ui/mdview.go` | The markdown reader |
-| `internal/ui/dialog.go` | The modal layer |
-| `internal/ui/theme.go` | The palette |
-| `internal/ui/mouse.go` | Mouse routing, hit testing, zoom gestures and the clipboard |
-| `internal/ui/grid.go` | Rendered rows read back as cells, for selecting and highlighting |
-| `internal/ui/select.go` | What each pane calls content, and where on screen it starts |
-| `internal/ui/util.go` | Width-aware padding and truncation |
-| `internal/ui/shot_test.go` | The generator behind the pictures in this README |
+| `ui/model.go` | The Bubble Tea model: state, keys, actions |
+| `ui/view.go` | Where each pane goes, the bars above and below them, and what the view asks of the screen |
+| `ui/reviewview.go` | The stack: rows, folds, comment blocks, navigation |
+| `ui/keys.go` | Every binding, in one table |
+| `ui/diffrow.go` | One line of code, drawn |
+| `ui/fileview.go` | The full screen reader for a whole file, either side of the change |
+| `ui/scroll.go` | Drawing the bars |
+| `ui/scrollbar.go` | Taking hold of one and pulling it |
+| `ui/commitlist.go` | The history |
+| `ui/syntax.go` | Lexing a hunk and the syntax palette |
+| `ui/emphasis.go` | Tabs, and finding the characters that changed |
+| `ui/mdview.go` | The markdown reader |
+| `ui/dialog.go` | The modal layer |
+| `ui/theme.go` | The palette |
+| `ui/mouse.go` | Mouse routing, hit testing, zoom gestures and the clipboard |
+| `ui/grid.go` | Rendered rows read back as cells, for selecting and highlighting |
+| `ui/select.go` | What each pane calls content, and where on screen it starts |
+| `ui/util.go` | Width-aware padding and truncation |
+| `ui/shot_test.go` | The generator behind the pictures in this README |
 
 ### The system boundary
 
@@ -1318,7 +1318,7 @@ the pending diff naming only what is not committed; the base following the
 upstream, the remote default and a ref you named; and carrying a line number
 between a commit and the working tree. `internal/review` covers the file format
 an agent has to write, the digest, and what nullifies an approval. The
-`internal/ui` tests drive the model with synthetic key and mouse messages and
+`ui` tests drive the model with synthetic key and mouse messages and
 assert on the rendered frame — including that a comment written against one
 commit turns up beside the same code in the whole review, and that one whose
 line has gone is kept rather than lost.
@@ -1330,7 +1330,7 @@ make screenshots
 ```
 
 The screenshots in this README are taken from the running window rather than
-drawn by hand. `internal/ui/shot_test.go` builds a small repository with a rate
+drawn by hand. `ui/shot_test.go` builds a small repository with a rate
 limiter being added to it, drives the real model over it with the real keys,
 and writes each frame out; [freeze](https://github.com/charmbracelet/freeze)
 turns the frames into images. It is a test so that it compiles with everything
