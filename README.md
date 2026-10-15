@@ -1238,6 +1238,61 @@ highlights a line, so the syntax offsets, the emphasis offsets and the padding
 all count the same columns. It also stops a tab rendering as an unpainted gap
 in the middle of a band.
 
+## Embedding the window
+
+The window is a library as well as a command. `ui.New` builds it over a
+`source.Source` — anything that can hand over a unified diff, the commits it
+was made in, and a file's text at a commit — so a program that has a change
+from somewhere other than a Git checkout can show it the same way. The
+discobox console's pull request page is the case it was built for: the diff
+comes from GitHub, with no box, no fetch and no working tree.
+
+```go
+m := ui.New(src, ui.Options{
+	Author:   "who is reading",
+	Embedded: true,               // closing sends ui.ClosedMsg, not tea.Quit
+	Reserved: []string{"ctrl+a"}, // the host's leader key; the window lets it be
+	Poll:     -1,                 // no review file to watch
+	Theme:    theme,              // the host's palette; nil colours are the default's
+})
+m = m.SetSize(width, height)  // the room the host gives it
+m = m.SetOrigin(0, 1)         // where that room is: under the host's own line
+```
+
+The mouse reports where it is on the terminal, so a window drawn anywhere
+but the top left corner has to be told where it is; a press outside it is
+left alone.
+
+**What the window offers follows from what the source is.** Three more
+interfaces in `source` say what a source can do besides being read, and the
+window asks once, when it is made:
+
+| Interface | What it adds | Without it |
+| --- | --- | --- |
+| `source.Store` | somewhere to keep the review: approvals, comments, the base | the change is read with no review over it — nothing to approve, nowhere to comment, and no a, A, c, r, x, X, V, t, T or f |
+| `source.Worktree` | branches, checkout, `$EDITOR`, any ref or commit as the base | K, e and b are not there |
+| `source.Carrier` | carrying a comment through a commit to the review and back | reading one commit still works; comments stay on the whole review |
+
+What is not there is not offered anywhere: the keys do nothing, and the help,
+the hints in the status bar and the clicks on the top bar leave it out. The
+same goes for a key the host reserves.
+
+A source that was handed only part of its diff — a hosting service caps how
+much of one it sends — says why in `Scan.Incomplete`, and the top bar says so
+for as long as that scan is on screen, rather than passing part of a change
+off as all of it.
+
+The window watches its review for changes made elsewhere, once a second, and
+never its source: re-reading a pull request every second would be a request a
+second. A host that knows the source has moved — a new head commit — sends
+`ui.RescanMsg`, and the window reads it again as R does: once the scan already
+out is in, if there is one, so that an answer about the old head never lands
+after one about the new. `Typing` says whether
+keys are going into a text field, for a host deciding whether a key is its own.
+
+`*git.Repo`, in `internal/git`, is the source the command uses, and it is all
+four.
+
 ## Cost
 
 One rescan is about a dozen git commands, whatever the size of the change: the
@@ -1264,6 +1319,8 @@ carries a comment in and out of it.
 | `internal/git/patch.go` | Unified diff parsing, splitting one diff into many files, and carrying a line number across a diff |
 | `internal/review/review.go` | The review document: approvals, digests, threads, and the JSON they live in |
 | `internal/review/store.go` | Reading and writing it, the lock that makes the two one step, and the branch swap — shared by the window and the commands |
+| `source/source.go` | What the window reads a change from: the source interfaces and the scan's types |
+| `ui/embed_test.go` | The window driven from outside the package, over a source that is not Git |
 | `internal/cli/cli.go` | discobox-review without the window: the subcommands |
 | `ui/model.go` | The Bubble Tea model: state, keys, actions |
 | `ui/view.go` | Where each pane goes, the bars above and below them, and what the view asks of the screen |

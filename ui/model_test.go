@@ -141,13 +141,13 @@ func newTestModel(t *testing.T) Model {
 // where scrolling — and so where a pane's idea of the reader's place — matters.
 func shortTestModel(t *testing.T) Model {
 	t.Helper()
-	m := New(testRepo(t), "main", "Test")
+	m := New(testRepo(t), Options{Base: "main", Author: "Test"})
 	return opened(drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()()))
 }
 
 func modelFor(t *testing.T, repo *git.Repo) Model {
 	t.Helper()
-	m := New(repo, "main", "Test")
+	m := New(repo, Options{Base: "main", Author: "Test"})
 	return opened(drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40}, m.rescanCmd()()))
 }
 
@@ -426,7 +426,7 @@ func TestApproveWritesTheReviewFile(t *testing.T) {
 	m = onLine(t, m, "beta.go", '+', "package beta")
 	m = drive(t, m, letterKey("a"))
 
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	if !st.Approved("beta.go", "Test") {
 		t.Fatalf("beta.go was not approved: %s", st.Bytes())
 	}
@@ -443,7 +443,7 @@ func TestApproveWritesTheReviewFile(t *testing.T) {
 
 	// And pressing it again takes the approval back.
 	m = drive(t, m, letterKey("a"))
-	st = reviewJSON(t, m.repo)
+	st = reviewJSON(t, m.src.(*git.Repo))
 	if st.Approved("beta.go", "Test") {
 		t.Error("a second press did not withdraw the approval")
 	}
@@ -458,14 +458,14 @@ func TestApprovalIsNullifiedWhenTheFileChanges(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = drive(t, m, letterKey("a"))
-	if !reviewJSON(t, m.repo).Approved("foo.txt", "Test") {
+	if !reviewJSON(t, m.src.(*git.Repo)).Approved("foo.txt", "Test") {
 		t.Fatal("foo.txt was not approved to begin with")
 	}
 
-	writeFile(t, m.repo.Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nFIVE\n")
+	writeFile(t, m.src.(*git.Repo).Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nFIVE\n")
 	m = drive(t, m, m.rescanCmd()())
 
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	if st.Approved("foo.txt", "Test") {
 		t.Error("the approval survived the file changing")
 	}
@@ -491,7 +491,7 @@ func TestContextDoesNotNullifyApprovals(t *testing.T) {
 	if m.context == defaultContext {
 		t.Fatal("the context did not change")
 	}
-	if !reviewJSON(t, m.repo).Approved("foo.txt", "Test") {
+	if !reviewJSON(t, m.src.(*git.Repo)).Approved("foo.txt", "Test") {
 		t.Error("changing the diff context nullified an approval")
 	}
 	if !fileIn(t, m, "foo.txt").approved {
@@ -545,11 +545,11 @@ func TestApproveEverythingAsksFirst(t *testing.T) {
 	if m.dialog == nil {
 		t.Fatal("A approved everything without asking")
 	}
-	if reviewJSON2(m.repo) != nil && reviewJSON2(m.repo).Open() != 0 {
+	if reviewJSON2(m.src.(*git.Repo)) != nil && reviewJSON2(m.src.(*git.Repo)).Open() != 0 {
 		t.Error("something was written before the question was answered")
 	}
 	m = drive(t, m, letterKey("y"))
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	for _, p := range pathsOf(m) {
 		if !st.Approved(p, "Test") {
 			t.Errorf("%s was not approved", p)
@@ -591,7 +591,7 @@ func TestCommentHangsOffTheLine(t *testing.T) {
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "why shout?")
 
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	if len(st.Threads) != 1 {
 		t.Fatalf("threads = %+v", st.Threads)
 	}
@@ -624,7 +624,7 @@ func TestCommentOnARemovedLine(t *testing.T) {
 	m = onLine(t, m, "foo.txt", '-', "two")
 	m = comment(t, m, "this was fine")
 
-	th := reviewJSON(t, m.repo).Threads[0]
+	th := reviewJSON(t, m.src.(*git.Repo)).Threads[0]
 	if th.Side != review.SideOld || th.Line != 2 {
 		t.Errorf("anchored at %s:%d, want old:2", th.Side, th.Line)
 	}
@@ -650,7 +650,7 @@ func TestReplyAndResolve(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "why shout?")
-	id := reviewJSON(t, m.repo).Threads[0].ID
+	id := reviewJSON(t, m.src.(*git.Repo)).Threads[0].ID
 
 	m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == id && r.first })
 	m = drive(t, m, letterKey("r"))
@@ -660,7 +660,7 @@ func TestReplyAndResolve(t *testing.T) {
 	m.editor.SetValue("because it is a shout")
 	m = drive(t, m, ctrlKey("j"))
 
-	th := reviewJSON(t, m.repo).Thread(id)
+	th := reviewJSON(t, m.src.(*git.Repo)).Thread(id)
 	if len(th.Comments) != 2 || th.Comments[1].Body != "because it is a shout" {
 		t.Fatalf("comments = %+v", th.Comments)
 	}
@@ -668,7 +668,7 @@ func TestReplyAndResolve(t *testing.T) {
 	// Resolving closes it, and it collapses to one line.
 	m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == id && r.first })
 	m = drive(t, m, letterKey("x"))
-	if !reviewJSON(t, m.repo).Thread(id).Resolved {
+	if !reviewJSON(t, m.src.(*git.Repo)).Thread(id).Resolved {
 		t.Fatal("x did not resolve the thread")
 	}
 	rows := 0
@@ -687,7 +687,7 @@ func TestReplyAndResolve(t *testing.T) {
 	// Space opens it again without reopening it.
 	m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == id })
 	m = drive(t, m, letterKey(" "))
-	if !reviewJSON(t, m.repo).Thread(id).Resolved {
+	if !reviewJSON(t, m.src.(*git.Repo)).Thread(id).Resolved {
 		t.Error("unfolding a resolved thread reopened it")
 	}
 	if !strings.Contains(plain(m), "because it is a shout") {
@@ -697,7 +697,7 @@ func TestReplyAndResolve(t *testing.T) {
 	// And x again reopens it.
 	m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == id && r.first })
 	m = drive(t, m, letterKey("x"))
-	if reviewJSON(t, m.repo).Thread(id).Resolved {
+	if reviewJSON(t, m.src.(*git.Repo)).Thread(id).Resolved {
 		t.Error("x did not reopen the thread")
 	}
 }
@@ -706,18 +706,18 @@ func TestDeletingAThreadAsksFirst(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "never mind")
-	id := reviewJSON(t, m.repo).Threads[0].ID
+	id := reviewJSON(t, m.src.(*git.Repo)).Threads[0].ID
 
 	m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == id && r.first })
 	m = drive(t, m, letterKey("X"))
 	if m.dialog == nil {
 		t.Fatal("X deleted the thread without asking")
 	}
-	if reviewJSON(t, m.repo).Thread(id) == nil {
+	if reviewJSON(t, m.src.(*git.Repo)).Thread(id) == nil {
 		t.Fatal("the thread went before the question was answered")
 	}
 	m = drive(t, m, letterKey("y"))
-	if reviewJSON(t, m.repo).Thread(id) != nil {
+	if reviewJSON(t, m.src.(*git.Repo)).Thread(id) != nil {
 		t.Error("the thread survived the answer")
 	}
 }
@@ -732,7 +732,7 @@ func TestJumpingBetweenOpenComments(t *testing.T) {
 	m = comment(t, m, "second")
 
 	ids := []string{}
-	for _, th := range reviewJSON(t, m.repo).Threads {
+	for _, th := range reviewJSON(t, m.src.(*git.Repo)).Threads {
 		ids = append(ids, th.ID)
 	}
 	// Close the first, then walk from the top.
@@ -807,7 +807,7 @@ func TestACommentMadeOnACommitIsCarriedToTheReview(t *testing.T) {
 	m := newTestModel(t)
 	// Push the line the commit touched further down the file, so that the
 	// commit's own numbering and the working tree's disagree.
-	writeFile(t, m.repo.Dir, "foo.txt", "zero a\nzero b\none\nTWO\nthree\nFOUR\nfive\n")
+	writeFile(t, m.src.(*git.Repo).Dir, "foo.txt", "zero a\nzero b\none\nTWO\nthree\nFOUR\nfive\n")
 	m = drive(t, m, m.rescanCmd()())
 
 	m = selectCommit(t, m, "capitalise two")
@@ -817,7 +817,7 @@ func TestACommentMadeOnACommitIsCarriedToTheReview(t *testing.T) {
 	}
 	m = comment(t, m, "shouting again")
 
-	th := reviewJSON(t, m.repo).Threads[0]
+	th := reviewJSON(t, m.src.(*git.Repo)).Threads[0]
 	if th.Line != 4 {
 		t.Errorf("thread anchored at working-tree line %d, want 4", th.Line)
 	}
@@ -900,7 +900,7 @@ func TestCommentsSurviveTheChangeGoingAway(t *testing.T) {
 	m = onLine(t, m, "new.txt", '+', "brand new")
 	m = comment(t, m, "do we need this?")
 
-	if err := os.Remove(filepath.Join(m.repo.Dir, "new.txt")); err != nil {
+	if err := os.Remove(filepath.Join(m.src.(*git.Repo).Dir, "new.txt")); err != nil {
 		t.Fatal(err)
 	}
 	m = drive(t, m, m.rescanCmd()())
@@ -930,14 +930,14 @@ func TestAnAgentsEditIsPickedUp(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "why shout?")
-	id := reviewJSON(t, m.repo).Threads[0].ID
+	id := reviewJSON(t, m.src.(*git.Repo)).Threads[0].ID
 
 	// An agent answers and closes the thread, and approves a file.
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	st.Reply(id, "claude", "toned it down")
 	st.SetResolved(id, true)
 	st.Approve("beta.go", "", "claude")
-	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 
@@ -950,7 +950,7 @@ func TestAnAgentsEditIsPickedUp(t *testing.T) {
 	}
 	// An approval written without a digest is stamped with the current one, so
 	// that it can be nullified like any other.
-	if got := reviewJSON(t, m.repo).VerdictOf("beta.go", "claude").Digest; got == "" {
+	if got := reviewJSON(t, m.src.(*git.Repo)).VerdictOf("beta.go", "claude").Digest; got == "" {
 		t.Error("the hand written approval was not stamped with a digest")
 	}
 }
@@ -962,7 +962,7 @@ func TestAHalfWrittenReviewIsNotTakenSeriously(t *testing.T) {
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "still here")
 
-	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, `{"version":1,`); err != nil {
 		t.Fatal(err)
 	}
 	m.pickUpChanges()
@@ -987,16 +987,16 @@ func TestAConcurrentEditIsNotClobbered(t *testing.T) {
 	m = comment(t, m, "mine")
 
 	// Somebody else appends a thread without discobox-review noticing.
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	st.Start(&review.Thread{Path: "bar.txt", Side: review.SideNew, Line: 1}, "claude", "theirs")
-	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 
 	m = onLine(t, m, "beta.go", '+', "package beta")
 	m = drive(t, m, letterKey("a"))
 
-	back := reviewJSON(t, m.repo)
+	back := reviewJSON(t, m.src.(*git.Repo))
 	if len(back.Threads) != 2 {
 		t.Fatalf("threads = %+v, want both", back.Threads)
 	}
@@ -1017,20 +1017,20 @@ func TestStampingAnApprovalDoesNotClobberAConcurrentEdit(t *testing.T) {
 	st := review.New(m.branch)
 	st.Base = m.baseRef
 	st.Approve("beta.go", "", "claude")
-	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 	m.readReview()
 
 	// A comment lands before the window gets to it.
 	st.Start(&review.Thread{Path: "bar.txt", Side: review.SideNew, Line: 1}, "claude", "theirs")
-	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 
 	m.reconcile(true)
 
-	back := reviewJSON(t, m.repo)
+	back := reviewJSON(t, m.src.(*git.Repo))
 	if len(back.Threads) != 1 {
 		t.Fatalf("the stamp was written over the comment: threads = %+v", back.Threads)
 	}
@@ -1050,7 +1050,7 @@ func TestTheWindowWaitsForTheLock(t *testing.T) {
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "mine")
 
-	unlock, err := review.Lock(m.repo, 0)
+	unlock, err := review.Lock(m.src.(*git.Repo), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1066,9 +1066,9 @@ func TestTheWindowWaitsForTheLock(t *testing.T) {
 	}
 
 	// Whoever holds the lock finishes what it was doing.
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	st.Start(&review.Thread{Path: "bar.txt", Side: review.SideNew, Line: 1}, "claude", "theirs")
-	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 	unlock()
@@ -1078,7 +1078,7 @@ func TestTheWindowWaitsForTheLock(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the window never got the lock")
 	}
-	back := reviewJSON(t, m.repo)
+	back := reviewJSON(t, m.src.(*git.Repo))
 	if len(back.Threads) != 2 || !back.Approved("beta.go", "Test") {
 		t.Errorf("want both comments and the approval, got %d threads, approved = %v",
 			len(back.Threads), back.Approved("beta.go", "Test"))
@@ -1093,7 +1093,7 @@ func TestALockThatIsNotLetGoOfDoesNotStopTheWindow(t *testing.T) {
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "mine")
 
-	unlock, err := review.Lock(m.repo, 0)
+	unlock, err := review.Lock(m.src.(*git.Repo), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1103,7 +1103,7 @@ func TestALockThatIsNotLetGoOfDoesNotStopTheWindow(t *testing.T) {
 	if !errors.Is(err, git.ErrLocked) {
 		t.Fatalf("err = %v, want the window told the review is locked", err)
 	}
-	if m.rv.Approved("beta.go", "Test") || reviewJSON(t, m.repo).Approved("beta.go", "Test") {
+	if m.rv.Approved("beta.go", "Test") || reviewJSON(t, m.src.(*git.Repo)).Approved("beta.go", "Test") {
 		t.Error("the approval shows although it was never saved")
 	}
 
@@ -1119,7 +1119,7 @@ func TestALockThatIsNotLetGoOfDoesNotStopTheWindow(t *testing.T) {
 	if !m.statusEr {
 		t.Errorf("status = %q, want the failure and not a success", m.status)
 	}
-	if n := len(reviewJSON(t, m.repo).Threads); n != 1 {
+	if n := len(reviewJSON(t, m.src.(*git.Repo)).Threads); n != 1 {
 		t.Errorf("threads on disk = %d, want only the first", n)
 	}
 }
@@ -1132,16 +1132,16 @@ func TestAWriteDoesNotPutBackABaseSomethingElseChanged(t *testing.T) {
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "mine")
 
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	st.Base = "main~0"
-	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 
 	m = onLine(t, m, "beta.go", '+', "package beta")
 	m = drive(t, m, letterKey("a"))
 
-	back := reviewJSON(t, m.repo)
+	back := reviewJSON(t, m.src.(*git.Repo))
 	if back.Base != "main~0" {
 		t.Errorf("base on disk = %q: the window wrote its own over the one just set", back.Base)
 	}
@@ -1159,13 +1159,13 @@ func TestAWriteDoesNotPutBackABaseSomethingElseChanged(t *testing.T) {
 // The window does not write its own copy over it.
 func TestAHalfWrittenReviewIsNotWrittenOver(t *testing.T) {
 	m := newTestModel(t)
-	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, `{"version":1,`); err != nil {
 		t.Fatal(err)
 	}
 	m = onLine(t, m, "beta.go", '+', "package beta")
 	m = drive(t, m, letterKey("a"))
 
-	if body, _ := m.repo.ReadStateFile(review.FileName); body != `{"version":1,` {
+	if body, _ := m.src.(*git.Repo).ReadStateFile(review.FileName); body != `{"version":1,` {
 		t.Errorf("the file was overwritten: %q", body)
 	}
 	if !m.statusEr {
@@ -1180,13 +1180,13 @@ func TestAStampThatCannotBeSavedIsNotShown(t *testing.T) {
 	st := review.New(m.branch)
 	st.Base = m.baseRef
 	st.Approve("beta.go", "", "claude")
-	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 	m.readReview()
 
 	// The file stops being one that can be written back to.
-	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, `{"version":1,`); err != nil {
 		t.Fatal(err)
 	}
 	m.reconcile(true)
@@ -1209,7 +1209,7 @@ func TestAnotherBranchsReviewIsNotPutOnScreen(t *testing.T) {
 
 	theirs := review.New("some-other-branch")
 	theirs.Start(&review.Thread{Path: "bar.txt", Side: review.SideNew, Line: 1}, "claude", "theirs")
-	if err := m.repo.WriteStateFile(review.FileName, string(theirs.Bytes())); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(theirs.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 	m.pickUpChanges()
@@ -1246,13 +1246,13 @@ func TestAReplyToAThreadThatHasGoneIsNotThrownAway(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "mine")
-	id := reviewJSON(t, m.repo).Threads[0].ID
+	id := reviewJSON(t, m.src.(*git.Repo)).Threads[0].ID
 
 	m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == id })
 	m = drive(t, m, letterKey("r"))
 	m = typeText(t, m, "an answer")
 
-	err := review.Update(m.repo, m.branch, 0, func(st *review.State) error {
+	err := review.Update(m.src.(*git.Repo), m.branch, 0, func(st *review.State) error {
 		st.Remove(id)
 		return nil
 	})
@@ -1276,16 +1276,16 @@ func TestEachBranchKeepsItsOwnReview(t *testing.T) {
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "on the feature branch")
 
-	gitRun(t, m.repo.Dir, "add", "-A")
-	gitRun(t, m.repo.Dir, "commit", "-qm", "finish the work")
-	gitRun(t, m.repo.Dir, "checkout", "-q", "main")
+	gitRun(t, m.src.(*git.Repo).Dir, "add", "-A")
+	gitRun(t, m.src.(*git.Repo).Dir, "commit", "-qm", "finish the work")
+	gitRun(t, m.src.(*git.Repo).Dir, "checkout", "-q", "main")
 	m.baseRef, m.basePinned = "", false
 	m = drive(t, m, m.rescanCmd()())
 	if len(m.rv.Threads) != 0 {
 		t.Errorf("main inherited feature's comments: %+v", m.rv.Threads)
 	}
 
-	gitRun(t, m.repo.Dir, "checkout", "-q", "feature")
+	gitRun(t, m.src.(*git.Repo).Dir, "checkout", "-q", "feature")
 	m.baseRef, m.basePinned = "main", true
 	m = drive(t, m, m.rescanCmd()())
 	if len(m.rv.Threads) != 1 || m.rv.Threads[0].Comments[0].Body != "on the feature branch" {
@@ -1306,7 +1306,7 @@ func TestChoosingABaseIsRemembered(t *testing.T) {
 	if m.baseRef != "HEAD~1" {
 		t.Fatalf("baseRef = %q", m.baseRef)
 	}
-	if got := reviewJSON(t, m.repo).Base; got != "HEAD~1" {
+	if got := reviewJSON(t, m.src.(*git.Repo)).Base; got != "HEAD~1" {
 		t.Errorf("the review file says base %q", got)
 	}
 	// Measured from the branch's own last commit, the change it made two
@@ -1430,7 +1430,7 @@ func TestNoCtrlCommandsOutsideTheComposer(t *testing.T) {
 // The help lists every command letter, so the window can be learned from
 // inside it.
 func TestHelpNamesEveryCommand(t *testing.T) {
-	help := helpText()
+	help := New(testRepo(t), Options{Author: "Test"}).helpText()
 	for _, b := range commandBindings(newKeyMap()) {
 		if len(b.Keys()) == 0 {
 			t.Errorf("%q has no key at all", b.name)
@@ -1443,6 +1443,24 @@ func TestHelpNamesEveryCommand(t *testing.T) {
 		if !strings.Contains(help, "    "+key+"  ") && !strings.Contains(help, " "+key+" ") {
 			t.Errorf("%q (%s) is not in the help", key, b.name)
 		}
+	}
+}
+
+// Over a source that can do everything, the help reads as it always has: two
+// entries that share a line still share it.
+func TestTheFullHelpKeepsItsLines(t *testing.T) {
+	help := New(testRepo(t), Options{Author: "Test"}).helpText()
+	for _, line := range []string{
+		"    c  comment on this line   r  reply to this comment\n",
+		"    v  read the whole file      o  read it as the base has it\n",
+		"    Ctrl-C or q  quit         F1 or ?  these keys\n",
+	} {
+		if !strings.Contains(help, line) {
+			t.Errorf("the help has lost the line %q", line)
+		}
+	}
+	if strings.Contains(help, pair) {
+		t.Error("the help shows the mark that pairs two entries")
 	}
 }
 
@@ -1478,7 +1496,7 @@ func TestMarkdownReaderRefusesWhatItCannotRender(t *testing.T) {
 
 func TestMarkdownReaderOpens(t *testing.T) {
 	m := newTestModel(t)
-	writeFile(t, m.repo.Dir, "doc.md", "# Title\n\nSome prose.\n\nAnd more.\n")
+	writeFile(t, m.src.(*git.Repo).Dir, "doc.md", "# Title\n\nSome prose.\n\nAnd more.\n")
 	m = drive(t, m, m.rescanCmd()())
 	m = onLine(t, m, "doc.md", '+', "And more")
 	m = drive(t, m, letterKey("m"))
@@ -1516,7 +1534,7 @@ func TestACleanBranchSaysSo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(repo, "", "Test")
+	m := New(repo, Options{Base: "", Author: "Test"})
 	m = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 30}, m.rescanCmd()())
 	if len(m.view.files) != 0 {
 		t.Fatalf("a clean tree has %v to review", pathsOf(m))
@@ -1534,7 +1552,7 @@ func TestTheReviewFileIsPlainJSON(t *testing.T) {
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "hello")
 
-	body, ok := m.repo.ReadStateFile(review.FileName)
+	body, ok := m.src.(*git.Repo).ReadStateFile(review.FileName)
 	if !ok {
 		t.Fatal("no review file")
 	}
@@ -1575,7 +1593,7 @@ func TestCommentingOnABlockOfLines(t *testing.T) {
 	m = comment(t, m, "these two shouts")
 
 	// TWO down to five: four lines of the file as it now stands.
-	th := reviewJSON(t, m.repo).Threads[0]
+	th := reviewJSON(t, m.src.(*git.Repo)).Threads[0]
 	if th.Line != 2 || th.Lines != 4 {
 		t.Fatalf("thread covers line %d for %d lines, want 2 for 4", th.Line, th.Lines)
 	}
@@ -1749,8 +1767,8 @@ func TestApprovingAfterOpeningEverythingStillFolds(t *testing.T) {
 func TestCountThenGGoesToTheLine(t *testing.T) {
 	m := newTestModel(t)
 	// A file long enough that its line numbers are worth naming.
-	writeFile(t, m.repo.Dir, "long.txt", numberedLines(1, 40))
-	gitRun(t, m.repo.Dir, "add", "long.txt")
+	writeFile(t, m.src.(*git.Repo).Dir, "long.txt", numberedLines(1, 40))
+	gitRun(t, m.src.(*git.Repo).Dir, "add", "long.txt")
 	m = drive(t, m, m.rescanCmd()())
 
 	// From the file's own heading, which is where you land coming off the list.
@@ -1786,8 +1804,8 @@ func TestCountThenGGoesToTheLine(t *testing.T) {
 // G takes a count too, which is what vim trained everyone's hands to type.
 func TestCountThenShiftGAlsoGoesToTheLine(t *testing.T) {
 	m := newTestModel(t)
-	writeFile(t, m.repo.Dir, "long.txt", numberedLines(1, 40))
-	gitRun(t, m.repo.Dir, "add", "long.txt")
+	writeFile(t, m.src.(*git.Repo).Dir, "long.txt", numberedLines(1, 40))
+	gitRun(t, m.src.(*git.Repo).Dir, "add", "long.txt")
 	m = drive(t, m, m.rescanCmd()())
 	m = cursorTo(t, m, func(r reviewRow) bool {
 		return r.kind == rowFile && m.view.files[r.file].path == "long.txt"
@@ -2091,13 +2109,13 @@ func TestPostingLeavesTheCursorOnTheNewThread(t *testing.T) {
 	if _, _, ok := draftRows(m); ok {
 		t.Error("the box outlived the comment")
 	}
-	id := reviewJSON(t, m.repo).Threads[0].ID
+	id := reviewJSON(t, m.src.(*git.Repo)).Threads[0].ID
 	if got := m.view.thread(); got != id {
 		t.Errorf("cursor is on thread %q, want %q", got, id)
 	}
 	// So the very next key can answer it.
 	m = drive(t, m, letterKey("x"))
-	if !reviewJSON(t, m.repo).Thread(id).Resolved {
+	if !reviewJSON(t, m.src.(*git.Repo)).Thread(id).Resolved {
 		t.Error("x did not reach the thread just written")
 	}
 }
@@ -2151,7 +2169,7 @@ func TestTheReplyBoxGoesUnderTheThread(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "why shout?")
-	id := reviewJSON(t, m.repo).Threads[0].ID
+	id := reviewJSON(t, m.src.(*git.Repo)).Threads[0].ID
 
 	m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == id && r.first })
 	m = drive(t, m, letterKey("r"))
@@ -2211,7 +2229,7 @@ func TestEveryWayOfPostingAComment(t *testing.T) {
 		m.editor.SetValue("posted with " + k.String())
 		m = drive(t, m, k)
 
-		st := reviewJSON(t, m.repo)
+		st := reviewJSON(t, m.src.(*git.Repo))
 		if len(st.Threads) != 1 {
 			t.Errorf("%s did not post: threads = %+v", k.String(), st.Threads)
 			continue
@@ -2238,7 +2256,7 @@ func TestEnterInTheBoxIsANewline(t *testing.T) {
 	if got := m.editor.Value(); !strings.Contains(got, "\n") {
 		t.Errorf("Enter did not put a newline in: %q", got)
 	}
-	if reviewJSON2(m.repo) != nil && len(reviewJSON2(m.repo).Threads) != 0 {
+	if reviewJSON2(m.src.(*git.Repo)) != nil && len(reviewJSON2(m.src.(*git.Repo)).Threads) != 0 {
 		t.Error("something was posted")
 	}
 }
@@ -2314,7 +2332,7 @@ func TestTheHeadingCountsOpenComments(t *testing.T) {
 
 	// Once they are all answered it counts what was said rather than what is
 	// outstanding, since nothing is.
-	for _, th := range reviewJSON(t, m.repo).Threads {
+	for _, th := range reviewJSON(t, m.src.(*git.Repo)).Threads {
 		m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == th.ID && r.first })
 		m = drive(t, m, letterKey("x"))
 	}
@@ -2646,8 +2664,8 @@ func TestEditFromInsideTheReader(t *testing.T) {
 // be walked by its changes rather than by its length.
 func TestTheReaderHopsBetweenChangedRuns(t *testing.T) {
 	m := newTestModel(t)
-	writeFile(t, m.repo.Dir, "long.txt", numberedLines(1, 60))
-	gitRun(t, m.repo.Dir, "add", "long.txt")
+	writeFile(t, m.src.(*git.Repo).Dir, "long.txt", numberedLines(1, 60))
+	gitRun(t, m.src.(*git.Repo).Dir, "add", "long.txt")
 	m = drive(t, m, m.rescanCmd()())
 	m = cursorTo(t, m, func(r reviewRow) bool {
 		return r.kind == rowFile && m.view.files[r.file].path == "long.txt"
@@ -2692,7 +2710,7 @@ func TestTheReaderOwnsTheKeys(t *testing.T) {
 	}
 	// A command letter is the reader's too, not the review's.
 	m = drive(t, m, letterKey("a"))
-	if reviewJSON2(m.repo) != nil && len(reviewJSON2(m.repo).Files) != 0 {
+	if reviewJSON2(m.src.(*git.Repo)) != nil && len(reviewJSON2(m.src.(*git.Repo)).Files) != 0 {
 		t.Error("a approved a file from inside the reader")
 	}
 
@@ -2866,7 +2884,7 @@ func TestCommentsSurviveTheSplit(t *testing.T) {
 	// unified: the review does not know which way it was being read.
 	m = onLine(t, m, "foo.txt", '+', "TWO")
 	m = comment(t, m, "and this")
-	th := reviewJSON(t, m.repo).Threads[1]
+	th := reviewJSON(t, m.src.(*git.Repo)).Threads[1]
 	if th.Side != review.SideNew || th.Line != 2 {
 		t.Errorf("anchored at %s:%d, want new:2", th.Side, th.Line)
 	}
@@ -2937,7 +2955,7 @@ func TestSideKeyReachesTheRemovedLine(t *testing.T) {
 	}
 
 	m = comment(t, m, "why was this dropped?")
-	th := reviewJSON(t, m.repo).Threads[0]
+	th := reviewJSON(t, m.src.(*git.Repo)).Threads[0]
 	if th.Side != review.SideOld || th.Line != 2 {
 		t.Errorf("anchored at %s:%d, want old:2 — the removed line", th.Side, th.Line)
 	}
@@ -2965,7 +2983,7 @@ func TestSideKeyFallsBackToTheSideThatExists(t *testing.T) {
 		t.Fatalf("on a pure insertion the cursor is on %+v, want the added line", l)
 	}
 	m = comment(t, m, "fine")
-	th := reviewJSON(t, m.repo).Threads[0]
+	th := reviewJSON(t, m.src.(*git.Repo)).Threads[0]
 	if th.Side != review.SideNew {
 		t.Errorf("anchored on the %s side, want new: there is no old line here", th.Side)
 	}
@@ -3158,7 +3176,7 @@ func TestGoToLineComesBackToTheNewSide(t *testing.T) {
 	}
 	// And a comment goes where the status said it would.
 	m = comment(t, m, "here")
-	th := reviewJSON(t, m.repo).Threads[0]
+	th := reviewJSON(t, m.src.(*git.Repo)).Threads[0]
 	if th.Side != review.SideNew || th.Line != 4 {
 		t.Errorf("anchored at %s:%d, want new:4 — the line jumped to", th.Side, th.Line)
 	}
@@ -3291,7 +3309,7 @@ func TestRelayKeepsTheCursorOnTheSameConversation(t *testing.T) {
 	m = comment(t, m, "second remark")
 
 	// Sit on the first conversation, about to reply to it.
-	want := reviewJSON(t, m.repo).Threads[0].ID
+	want := reviewJSON(t, m.src.(*git.Repo)).Threads[0].ID
 	m = cursorTo(t, m, func(r reviewRow) bool {
 		return r.kind == rowThread && r.thread == want && r.first
 	})
@@ -3377,7 +3395,7 @@ func TestSpaceStillFoldsAndUnfolds(t *testing.T) {
 	// A resolved conversation collapses to one line, and Space opens it.
 	m = onLine(t, m, "foo.txt", '+', "TWO")
 	m = comment(t, m, "answer this")
-	id := reviewJSON(t, m.repo).Threads[0].ID
+	id := reviewJSON(t, m.src.(*git.Repo)).Threads[0].ID
 	m = drive(t, m, letterKey("x")) // resolve it
 	m = cursorTo(t, m, func(r reviewRow) bool {
 		return r.kind == rowThread && r.thread == id && r.first
@@ -3399,7 +3417,7 @@ func TestSpaceOnAnOpenCommentDoesNotReply(t *testing.T) {
 		m := newTestModel(t)
 		m = onLine(t, m, "foo.txt", '+', "TWO")
 		m = comment(t, m, "why shout?")
-		id := reviewJSON(t, m.repo).Threads[0].ID
+		id := reviewJSON(t, m.src.(*git.Repo)).Threads[0].ID
 		m = cursorTo(t, m, func(r reviewRow) bool {
 			return r.kind == rowThread && r.thread == id && r.first
 		})
@@ -3533,7 +3551,7 @@ func twoComments(t *testing.T) (Model, string) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "why shout?")
-	id := reviewJSON(t, m.repo).Threads[0].ID
+	id := reviewJSON(t, m.src.(*git.Repo)).Threads[0].ID
 	m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == id && r.first })
 	m = drive(t, m, letterKey("r"))
 	m.editor.SetValue("because it is a shout")
@@ -3544,7 +3562,7 @@ func twoComments(t *testing.T) (Model, string) {
 // X on one remark of a conversation takes that remark and leaves the rest.
 func TestDeletingOneComment(t *testing.T) {
 	m, id := twoComments(t)
-	if got := len(reviewJSON(t, m.repo).Thread(id).Comments); got != 2 {
+	if got := len(reviewJSON(t, m.src.(*git.Repo)).Thread(id).Comments); got != 2 {
 		t.Fatalf("%d comments to begin with", got)
 	}
 
@@ -3556,12 +3574,12 @@ func TestDeletingOneComment(t *testing.T) {
 	if m.dialog == nil {
 		t.Fatal("X deleted without asking")
 	}
-	if len(reviewJSON(t, m.repo).Thread(id).Comments) != 2 {
+	if len(reviewJSON(t, m.src.(*git.Repo)).Thread(id).Comments) != 2 {
 		t.Fatal("it went before the question was answered")
 	}
 	m = drive(t, m, letterKey("y"))
 
-	th := reviewJSON(t, m.repo).Thread(id)
+	th := reviewJSON(t, m.src.(*git.Repo)).Thread(id)
 	if th == nil {
 		t.Fatal("the whole conversation went")
 	}
@@ -3585,7 +3603,7 @@ func TestDeletingTheOpeningRemark(t *testing.T) {
 	})
 	m = drive(t, m, letterKey("X"), letterKey("y"))
 
-	th := reviewJSON(t, m.repo).Thread(id)
+	th := reviewJSON(t, m.src.(*git.Repo)).Thread(id)
 	if th == nil || len(th.Comments) != 1 {
 		t.Fatalf("thread = %+v", th)
 	}
@@ -3607,7 +3625,7 @@ func TestDeletingTheWholeConversation(t *testing.T) {
 		t.Errorf("the question is %q, want it to name what goes", m.dialog.body)
 	}
 	m = drive(t, m, letterKey("y"))
-	if reviewJSON(t, m.repo).Thread(id) != nil {
+	if reviewJSON(t, m.src.(*git.Repo)).Thread(id) != nil {
 		t.Error("the conversation survived")
 	}
 }
@@ -3618,7 +3636,7 @@ func TestDeletingTheLastCommentTakesTheThread(t *testing.T) {
 	m := newTestModel(t)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = comment(t, m, "never mind")
-	id := reviewJSON(t, m.repo).Threads[0].ID
+	id := reviewJSON(t, m.src.(*git.Repo)).Threads[0].ID
 
 	m = cursorTo(t, m, func(r reviewRow) bool { return r.thread == id && r.comment == 0 })
 	m = drive(t, m, letterKey("X"))
@@ -3627,7 +3645,7 @@ func TestDeletingTheLastCommentTakesTheThread(t *testing.T) {
 		t.Errorf("question = %q, want the whole-conversation one", m.dialog.body)
 	}
 	m = drive(t, m, letterKey("y"))
-	if len(reviewJSON(t, m.repo).Threads) != 0 {
+	if len(reviewJSON(t, m.src.(*git.Repo)).Threads) != 0 {
 		t.Error("an empty conversation was left behind")
 	}
 }
@@ -3672,7 +3690,7 @@ func TestChoosingACommitAsTheBase(t *testing.T) {
 	if m.baseRef != hash {
 		t.Errorf("baseRef = %q, want %q", m.baseRef, hash)
 	}
-	if got := reviewJSON(t, m.repo).Base; got != hash {
+	if got := reviewJSON(t, m.src.(*git.Repo)).Base; got != hash {
 		t.Errorf("the review file says base %q", got)
 	}
 	// Measured from "capitalise two", that commit's own change is behind the
@@ -3846,7 +3864,7 @@ func TestAApprovesJustTheHunk(t *testing.T) {
 	if m.rv.Approved("foo.txt", "Test") {
 		t.Fatal("approving one hunk of two approved the file")
 	}
-	if n := len(reviewJSON(t, m.repo).Files[0].Verdicts[0].Hunks); n != 1 {
+	if n := len(reviewJSON(t, m.src.(*git.Repo)).Files[0].Verdicts[0].Hunks); n != 1 {
 		t.Errorf("the review records %d approved hunks, want 1", n)
 	}
 	if _, n := hunkRows(m, "foo.txt"); n == 0 || n >= before {
@@ -4022,9 +4040,9 @@ func TestApprovingAHunkKeepsWhatAnotherWriterSigned(t *testing.T) {
 
 	// Somebody else signs off the last hunk, and this window has not looked.
 	other := fileIn(t, m, "foo.txt").blocks[2]
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	st.SetHunks("foo.txt", "Test", append(st.VerdictOf("foo.txt", "Test").Hunks, other...))
-	if err := m.repo.WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4032,7 +4050,7 @@ func TestApprovingAHunkKeepsWhatAnotherWriterSigned(t *testing.T) {
 	m = drive(t, m, letterKey("a"))
 	if !m.rv.Approved("foo.txt", "Test") {
 		t.Errorf("the third hunk signed off elsewhere was lost: %v (status %q)",
-			reviewJSON(t, m.repo).VerdictOf("foo.txt", "Test").Hunks, m.status)
+			reviewJSON(t, m.src.(*git.Repo)).VerdictOf("foo.txt", "Test").Hunks, m.status)
 	}
 }
 
@@ -4094,7 +4112,7 @@ func TestAHunkApprovalThatIsNotSavedMovesNoFold(t *testing.T) {
 	m.hunks[k] = false
 
 	// A review caught halfway through being written cannot be saved over.
-	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, `{"version":1,`); err != nil {
 		t.Fatal(err)
 	}
 	m = drive(t, m, letterKey("a"))
@@ -4197,40 +4215,40 @@ func TestAHunkApprovalFallsWithItsChangeAndStaysFallen(t *testing.T) {
 	m := modelFor(t, twoHunkRepo(t))
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
 	m = drive(t, m, letterKey("a"))
-	if n := len(reviewJSON(t, m.repo).VerdictOf("foo.txt", "Test").Hunks); n != 1 {
+	if n := len(reviewJSON(t, m.src.(*git.Repo)).VerdictOf("foo.txt", "Test").Hunks); n != 1 {
 		t.Fatalf("%d hunks recorded, want 1", n)
 	}
-	is, err := os.ReadFile(filepath.Join(m.repo.Dir, "foo.txt"))
+	is, err := os.ReadFile(filepath.Join(m.src.(*git.Repo).Dir, "foo.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	edited := strings.Replace(string(is), "FOUR\n", "FOUR AND MORE\n", 1)
 
 	// A review that cannot be saved over keeps what it showed.
-	writeFile(t, m.repo.Dir, "foo.txt", edited)
-	saved := string(reviewJSON(t, m.repo).Bytes())
-	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+	writeFile(t, m.src.(*git.Repo).Dir, "foo.txt", edited)
+	saved := string(reviewJSON(t, m.src.(*git.Repo)).Bytes())
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, `{"version":1,`); err != nil {
 		t.Fatal(err)
 	}
 	m = drive(t, m, m.rescanCmd()())
 	if len(m.rv.ApprovedHunks("foo.txt", "Test")) != 1 {
 		t.Error("the approval left the screen though dropping it was never saved")
 	}
-	if err := m.repo.WriteStateFile(review.FileName, saved); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, saved); err != nil {
 		t.Fatal(err)
 	}
 
 	m = drive(t, m, m.rescanCmd()())
-	if f := reviewJSON(t, m.repo).VerdictOf("foo.txt", "Test"); f != nil && len(f.Hunks) != 0 {
+	if f := reviewJSON(t, m.src.(*git.Repo)).VerdictOf("foo.txt", "Test"); f != nil && len(f.Hunks) != 0 {
 		t.Fatalf("the approval of a change that is gone was kept: %v", f.Hunks)
 	}
 	if len(m.rv.ApprovedHunks("foo.txt", "Test")) != 0 {
 		t.Error("the window still shows the hunk approved")
 	}
 
-	writeFile(t, m.repo.Dir, "foo.txt", string(is))
+	writeFile(t, m.src.(*git.Repo).Dir, "foo.txt", string(is))
 	m = drive(t, m, m.rescanCmd()())
-	if f := reviewJSON(t, m.repo).VerdictOf("foo.txt", "Test"); f != nil && len(f.Hunks) != 0 {
+	if f := reviewJSON(t, m.src.(*git.Repo)).VerdictOf("foo.txt", "Test"); f != nil && len(f.Hunks) != 0 {
 		t.Errorf("undoing the edit brought the approval back: %v", f.Hunks)
 	}
 }
@@ -4239,7 +4257,7 @@ func TestAHunkApprovalFallsWithItsChangeAndStaysFallen(t *testing.T) {
 // command run beside the window does.
 func agentApproves(t *testing.T, m Model, by string, paths ...string) Model {
 	t.Helper()
-	err := review.Update(m.repo, m.branch, 0, func(st *review.State) error {
+	err := review.Update(m.src.(*git.Repo), m.branch, 0, func(st *review.State) error {
 		for _, p := range paths {
 			st.Approve(p, "", by)
 		}
@@ -4271,8 +4289,8 @@ func TestAnApprovalIsNotJudgedByAStaleDiff(t *testing.T) {
 
 	// The author edits the file, and the reviewer approves what it now says.
 	// Nothing rescans the window in between.
-	writeFile(t, m.repo.Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nFIVE\n")
-	scan, err := m.repo.Rescan("main", 0)
+	writeFile(t, m.src.(*git.Repo).Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nFIVE\n")
+	scan, err := m.src.(*git.Repo).Scan("main", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4285,7 +4303,7 @@ func TestAnApprovalIsNotJudgedByAStaleDiff(t *testing.T) {
 	if now == "" || now == stale {
 		t.Fatalf("the edit did not move the digest: %q, was %q", now, stale)
 	}
-	err = review.Update(m.repo, m.branch, 0, func(st *review.State) error {
+	err = review.Update(m.src.(*git.Repo), m.branch, 0, func(st *review.State) error {
 		st.Approve("foo.txt", now, "claude")
 		return nil
 	})
@@ -4294,7 +4312,7 @@ func TestAnApprovalIsNotJudgedByAStaleDiff(t *testing.T) {
 	}
 
 	m = polled(t, m)
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	if !st.Approved("foo.txt", "claude") || st.Nullified("foo.txt", "claude") {
 		t.Errorf("an approval of the file as it stands was struck down by the diff on screen: %+v", st.VerdictOf("foo.txt", "claude"))
 	}
@@ -4303,9 +4321,9 @@ func TestAnApprovalIsNotJudgedByAStaleDiff(t *testing.T) {
 	}
 
 	// And one given with no digest is stamped with the tree's, not the screen's.
-	writeFile(t, m.repo.Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nfive!\n")
+	writeFile(t, m.src.(*git.Repo).Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nfive!\n")
 	m = agentApproves(t, m, "reviewer", "foo.txt")
-	if v := reviewJSON(t, m.repo).VerdictOf("foo.txt", "reviewer"); v == nil || !v.Approved || v.Digest != fileIn(t, m, "foo.txt").digest || v.Digest == now {
+	if v := reviewJSON(t, m.src.(*git.Repo)).VerdictOf("foo.txt", "reviewer"); v == nil || !v.Approved || v.Digest != fileIn(t, m, "foo.txt").digest || v.Digest == now {
 		t.Errorf("stamped %+v, want the digest of the file as it now stands", v)
 	}
 }
@@ -4338,7 +4356,7 @@ func TestSomebodyElsesApprovalIsNotTheReaders(t *testing.T) {
 	// The reader's own approval goes in beside the agent's.
 	m = onLine(t, m, "beta.go", '+', "package beta")
 	m = drive(t, m, letterKey("a"))
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	if !st.Approved("beta.go", "Test") || !st.Approved("beta.go", "claude") {
 		t.Fatalf("approvers = %v, want both", st.Approvers("beta.go"))
 	}
@@ -4355,7 +4373,7 @@ func TestSomebodyElsesApprovalIsNotTheReaders(t *testing.T) {
 	// And taking it back takes back the reader's alone.
 	m = onLine(t, m, "beta.go", '+', "package beta")
 	m = drive(t, m, letterKey("a"))
-	st = reviewJSON(t, m.repo)
+	st = reviewJSON(t, m.src.(*git.Repo))
 	if st.Approved("beta.go", "Test") || !st.Approved("beta.go", "claude") {
 		t.Errorf("approvers = %v, want the agent's left standing", st.Approvers("beta.go"))
 	}
@@ -4367,7 +4385,7 @@ func TestApprovingEverythingIsTheReadersOwn(t *testing.T) {
 	m := newTestModel(t)
 	m = agentApproves(t, m, "claude", "beta.go")
 	m = drive(t, m, letterKey("A"), letterKey("y"))
-	st := reviewJSON(t, m.repo)
+	st := reviewJSON(t, m.src.(*git.Repo))
 	for _, p := range pathsOf(m) {
 		if !st.Approved(p, "Test") {
 			t.Errorf("%s was left out: %v", p, st.Approvers(p))
@@ -4384,7 +4402,7 @@ func TestSomebodyElsesApprovalFallsToo(t *testing.T) {
 	m := newTestModel(t)
 	m = agentApproves(t, m, "claude", "foo.txt")
 	m = drive(t, m, m.rescanCmd()())
-	writeFile(t, m.repo.Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nFIVE\n")
+	writeFile(t, m.src.(*git.Repo).Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nFIVE\n")
 	m = drive(t, m, m.rescanCmd()())
 
 	f := fileIn(t, m, "foo.txt")

@@ -1,6 +1,12 @@
 package ui
 
-import "charm.land/bubbles/v2/key"
+import (
+	"reflect"
+	"slices"
+	"strings"
+
+	"charm.land/bubbles/v2/key"
+)
 
 // keyMap follows one rule:
 //
@@ -195,4 +201,98 @@ func newKeyMap() keyMap {
 		Accept: key.NewBinding(key.WithKeys("enter")),
 		Cancel: key.NewBinding(key.WithKeys("esc")),
 	}
+}
+
+// lacks is what the window's source cannot do, and so what the window must
+// not offer.
+type lacks struct {
+	review   bool // nowhere to keep a review: nothing to approve or comment on
+	worktree bool // no working tree: no branch to change, editor or base to pick
+}
+
+// without is the key map with the commands the source cannot do switched off,
+// and the keys reserved by whatever the window is drawn in taken out of every
+// binding that has them. A binding left with no keys at all is switched off
+// too, since a binding with none is otherwise only one nothing presses.
+//
+// A switched off binding matches nothing and is left out of the help and the
+// hints, which is the whole of how a command goes missing: nothing that acts
+// on one has to ask.
+func (k keyMap) without(l lacks, reserved []string) keyMap {
+	if l.review {
+		for _, b := range []*key.Binding{
+			&k.ApproveKey, &k.ApproveAll, &k.CommentKey, &k.ReplyKey,
+			&k.ResolveKey, &k.DeleteKey, &k.Post, &k.Visual,
+			// Walking the open comments, and hiding what has been
+			// approved, have nothing to act on either.
+			&k.NextThread, &k.PrevThread, &k.HideDone,
+		} {
+			b.SetEnabled(false)
+		}
+	}
+	if l.worktree {
+		for _, b := range []*key.Binding{&k.BaseKey, &k.EditKey, &k.CheckoutKey} {
+			b.SetEnabled(false)
+		}
+	}
+	if len(reserved) == 0 {
+		return k
+	}
+	for _, b := range k.all() {
+		keys := slices.DeleteFunc(slices.Clone(b.Keys()), func(s string) bool {
+			return slices.Contains(reserved, s)
+		})
+		if len(keys) == len(b.Keys()) {
+			continue
+		}
+		enabled := b.Enabled()
+		b.SetKeys(keys...)
+		b.SetEnabled(enabled && len(keys) > 0)
+	}
+	return k
+}
+
+// all is every binding in the map.
+func (k *keyMap) all() []*key.Binding {
+	v := reflect.ValueOf(k).Elem()
+	out := make([]*key.Binding, 0, v.NumField())
+	for i := range v.NumField() {
+		if b, ok := v.Field(i).Addr().Interface().(*key.Binding); ok {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// state reads a key the help or a hint names — spelled the way they spell it,
+// "c", "Space", "Ctrl-S" — and reports whether it is a key of the map's at all
+// and, if so, whether a binding still switched on has it. An arrow or a count
+// is not a key of the map's.
+func (k *keyMap) state(name string) (known, on bool) {
+	// "Ctrl-S" is ctrl+s, but "-" on its own is the minus key and "K" the
+	// letter K, not k.
+	want := name
+	if len(name) > 1 {
+		want = strings.ReplaceAll(strings.ToLower(name), "-", "+")
+	}
+	full := newKeyMap()
+	for _, b := range full.all() {
+		if slices.Contains(b.Keys(), want) {
+			known = true
+			break
+		}
+	}
+	for _, b := range k.all() {
+		if b.Enabled() && slices.Contains(b.Keys(), want) {
+			return known, true
+		}
+	}
+	return known, false
+}
+
+// off reports whether a key the help or a hint names is one the window has
+// stopped answering.
+func (k *keyMap) off(name string) bool {
+	known, on := k.state(name)
+	return known && !on
 }

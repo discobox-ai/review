@@ -110,7 +110,7 @@ func TestReviewDiffCoversStagedUnstagedAndUntracked(t *testing.T) {
 	write(t, r.Dir, "foo.txt", "one\nTWO\nthree\nfour\nfive\n") // unstaged
 	write(t, r.Dir, "untracked.txt", "brand new\n")
 
-	scan, err := r.Rescan("", 3)
+	scan, err := r.Scan("", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestPendingDiffNamesOnlyUncommittedLines(t *testing.T) {
 	// …and one that is not committed.
 	write(t, r.Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nfive\n")
 
-	scan, err := r.Rescan("HEAD~1", 3)
+	scan, err := r.Scan("HEAD~1", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestRescanFallsBackToHEADWithNoRemote(t *testing.T) {
 	r := testRepo(t)
 	write(t, r.Dir, "foo.txt", "one\nTWO\nthree\nfour\nfive\n")
 
-	scan, err := r.Rescan("", 3)
+	scan, err := r.Scan("", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestRescanGathersTheWholeScan(t *testing.T) {
 	write(t, r.Dir, "foo.txt", "one\nTWO\nthree\nfour\nfive\n")
 	write(t, r.Dir, "new.txt", "brand new\n")
 
-	scan, err := r.Rescan("", 3)
+	scan, err := r.Scan("", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,11 +216,11 @@ func TestDiffContextLines(t *testing.T) {
 	r := testRepo(t)
 	write(t, r.Dir, "foo.txt", "one\ntwo\nthree\nFOUR\nfive\n")
 
-	narrow, err := r.Rescan("", 1)
+	narrow, err := r.Scan("", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wide, err := r.Rescan("", 5)
+	wide, err := r.Scan("", 5)
 	if err != nil {
 		t.Fatal(err)
 	}

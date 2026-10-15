@@ -233,3 +233,7 @@ func wrap(s string, width int) []string {
 	}
 	return out
 }
+
+// typing reports whether the dialog takes text, where every key is a letter
+// of it.
+func (d *dialog) typing() bool { return d.kind == dlgInput }

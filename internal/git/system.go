@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/discobox-ai/review/source"
 )
 
 // System is every call discobox-review makes outside its own process: running git, and
@@ -68,15 +70,9 @@ type System interface {
 	DevNull() string
 }
 
-// Editor is a command that owns the terminal until it exits. The shape is what
-// bubbletea's exec support wants, written out here so that nothing above this
-// file has to know what a process is.
-type Editor interface {
-	Run() error
-	SetStdin(io.Reader)
-	SetStdout(io.Writer)
-	SetStderr(io.Writer)
-}
+// Editor is a command that owns the terminal until it exits: see
+// [source.Editor].
+type Editor = source.Editor
 
 // FileInfo is the part of a stat discobox-review uses. It is deliberately small: a
 // remote backend should not have to synthesise a full fs.FileInfo to answer
@@ -148,7 +144,7 @@ func (Local) Rename(oldPath, newPath string) error { return os.Rename(oldPath, n
 
 // ErrLocked is what taking a lock fails with when somebody else held it for
 // longer than the caller was willing to wait.
-var ErrLocked = errors.New("locked by another program")
+var ErrLocked = source.ErrLocked
 
 // lockPoll is how often a lock somebody else holds is asked for again.
 const lockPoll = 5 * time.Millisecond

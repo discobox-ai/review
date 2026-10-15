@@ -2,37 +2,89 @@ package ui
 
 import (
 	"image/color"
+	"reflect"
 
 	"charm.land/lipgloss/v2"
 )
 
-// Colours chosen to echo the Tk git-gui palette discobox-review grew out of:
-// lavender for the history and gold for the review's own heading.
-var (
-	colGold     = lipgloss.Color("220")
-	colSky      = lipgloss.Color("153")
-	colLavender = lipgloss.Color("183")
-	colBlack    = lipgloss.Color("232")
-	colGrey     = lipgloss.Color("245")
-	colDim      = lipgloss.Color("240")
-	colSelBG    = lipgloss.Color("24")
-	colSelRange = lipgloss.Color("17")
-	colInactive = lipgloss.Color("236")
+// Theme is the window's palette. A program that draws the window inside its
+// own can hand it one, so that the two look like one program; the zero Theme,
+// or any colour left nil in one, is [DefaultTheme]'s.
+//
+// The bands behind added and removed lines are not in it. They are
+// backgrounds, so they have to follow whether the terminal is light or dark,
+// which the window asks the terminal for itself.
+type Theme struct {
+	// Accent is the review's own colour: its pane's title, the cursor, the
+	// author of a comment, a focused button.
+	Accent color.Color
+	// Commit titles the review while it is showing one commit, and History
+	// titles the strip of commits under it.
+	Commit  color.Color
+	History color.Color
+	// TitleText is the text written on those three titles.
+	TitleText color.Color
+	// Muted is secondary text, and Faint is text that is barely there: rules,
+	// hints, the diff's own headers.
+	Muted color.Color
+	Faint color.Color
+	// Selection is the row the cursor is on, SelectionRange the band over a
+	// visual selection, and Inactive both the cursor row of a pane without the
+	// focus and the title of a pane that is folded.
+	Selection      color.Color
+	SelectionRange color.Color
+	Inactive       color.Color
+	// Hunk is a hunk's header.
+	Hunk color.Color
+	// Band is the background behind a file's heading, BandCursor the same
+	// with the cursor on it, and Comment the colour a comment is written in.
+	Band       color.Color
+	BandCursor color.Color
+	Comment    color.Color
+	// Warn is "not finished with yet": the margin beside an uncommitted line,
+	// an approval that has fallen, a warning in the status bar. Error and OK
+	// are the status bar's other two, and a removal's and an addition's
+	// count.
+	Warn  color.Color
+	Error color.Color
+	OK    color.Color
+}
 
-	colHunk = lipgloss.Color("111")
-	// The review's own colours: the band behind a file's heading, and the
-	// blue a comment is written in.
-	colBandBg   = lipgloss.Color("237")
-	colBandOnBg = lipgloss.Color("24")
-	colComment  = lipgloss.Color("153")
+// DefaultTheme is discobox-review's own palette, chosen to echo the Tk git-gui
+// palette it grew out of: lavender for the history and gold for the review's
+// own heading.
+func DefaultTheme() Theme {
+	return Theme{
+		Accent:         lipgloss.Color("220"),
+		Commit:         lipgloss.Color("153"),
+		History:        lipgloss.Color("183"),
+		TitleText:      lipgloss.Color("232"),
+		Muted:          lipgloss.Color("245"),
+		Faint:          lipgloss.Color("240"),
+		Selection:      lipgloss.Color("24"),
+		SelectionRange: lipgloss.Color("17"),
+		Inactive:       lipgloss.Color("236"),
+		Hunk:           lipgloss.Color("111"),
+		Band:           lipgloss.Color("237"),
+		BandCursor:     lipgloss.Color("24"),
+		Comment:        lipgloss.Color("153"),
+		Warn:           lipgloss.Color("214"),
+		Error:          lipgloss.Color("196"),
+		OK:             lipgloss.Color("83"),
+	}
+}
 
-	// Amber is "not finished with yet": the margin beside an uncommitted
-	// line, an approval that has fallen, and a warning in the status bar all
-	// mean the same kind of thing.
-	colWarn = lipgloss.Color("214")
-	colErr  = lipgloss.Color("196")
-	colOK   = lipgloss.Color("83")
-)
+// filled is the theme with every colour it leaves nil taken from
+// [DefaultTheme].
+func (t Theme) filled() Theme {
+	v, def := reflect.ValueOf(&t).Elem(), reflect.ValueOf(DefaultTheme())
+	for i := range v.NumField() {
+		if v.Field(i).IsNil() {
+			v.Field(i).Set(def.Field(i))
+		}
+	}
+	return t
+}
 
 type styles struct {
 	branchBar   lipgloss.Style
@@ -128,9 +180,28 @@ func bands(dark bool) (addBg, addEmphBg, delBg, delEmphBg color.Color) {
 		pick(lipgloss.Color("217"), lipgloss.Color("88"))
 }
 
-// newStyles builds the palette. dark says what the terminal's own background
-// is, which discobox-review asks the terminal for and is told once it answers.
-func newStyles(dark bool) *styles {
+// newStyles builds the styles out of a theme. dark says what the terminal's
+// own background is, which discobox-review asks the terminal for and is told
+// once it answers.
+func newStyles(t Theme, dark bool) *styles {
+	var (
+		colGold     = t.Accent
+		colSky      = t.Commit
+		colLavender = t.History
+		colBlack    = t.TitleText
+		colGrey     = t.Muted
+		colDim      = t.Faint
+		colSelBG    = t.Selection
+		colSelRange = t.SelectionRange
+		colInactive = t.Inactive
+		colHunk     = t.Hunk
+		colBandBg   = t.Band
+		colBandOnBg = t.BandCursor
+		colComment  = t.Comment
+		colWarn     = t.Warn
+		colErr      = t.Error
+		colOK       = t.OK
+	)
 	s := &styles{}
 	colAddBg, colAddEmphBg, colDelBg, colDelEmphBg := bands(dark)
 	s.branchBar = lipgloss.NewStyle().Bold(true)

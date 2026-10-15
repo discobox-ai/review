@@ -493,7 +493,7 @@ func diff(out io.Writer, repo *git.Repo, st *review.State, o options) error {
 	if o.base != "" {
 		base = o.base
 	}
-	scan, err := repo.Rescan(base, o.context)
+	scan, err := repo.Scan(base, o.context)
 	if err != nil {
 		return err
 	}
@@ -710,7 +710,7 @@ func status(out io.Writer, repo *git.Repo, st *review.State, branch string, o op
 	}
 	// Context of none: the file names are all this wants, and every line of
 	// context is a line to produce and parse for nothing.
-	scan, err := repo.Rescan(base, 0)
+	scan, err := repo.Scan(base, 0)
 	if err != nil {
 		return err
 	}

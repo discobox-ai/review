@@ -350,8 +350,8 @@ func shotRepo(t *testing.T) *git.Repo {
 // terminal gets — which is the one the images are rendered against.
 func shotModel(t *testing.T, repo *git.Repo, w, h int) Model {
 	t.Helper()
-	m := New(repo, "main", "darren")
-	m.dark, m.st = true, newStyles(true)
+	m := New(repo, Options{Base: "main", Author: "darren"})
+	m.dark, m.st = true, newStyles(DefaultTheme(), true)
 	return drive(t, m, tea.WindowSizeMsg{Width: w, Height: h}, m.rescanCmd()())
 }
 
@@ -382,7 +382,7 @@ func shotReview(t *testing.T, m Model) Model {
 	m = comment(t, m, "This map only grows: one entry per address, kept for "+
 		"the life of the process. A busy afternoon is a memory leak.")
 
-	err := review.Update(m.repo, "rate-limit", 0, func(st *review.State) error {
+	err := review.Update(m.src.(*git.Repo), "rate-limit", 0, func(st *review.State) error {
 		// An agent has been through two of the files already, which is the
 		// second column of verdicts: its approval stands beside the reader's
 		// own and is not taken for it.

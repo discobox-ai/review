@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/discobox-ai/review/source"
 )
 
 // Repo is a handle on a working tree, reached through a System.
@@ -72,115 +74,27 @@ const EmptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 // File states
 // ---------------------------------------------------------------------------
 
-// State is a two character file state: the first character describes the index
-// (HEAD vs index) and the second the working directory (index vs file). '_'
-// means "no difference", 'O' means untracked and 'U' unmerged.
-//
-// The review does not care which side of the index a change is on — it reads
-// the working tree as one thing — but it does care whether a change has been
-// committed, and this is what answers that.
-type State string
-
-// Index returns the HEAD-vs-index status character.
-func (s State) Index() byte {
-	if len(s) > 0 {
-		return s[0]
-	}
-	return '_'
-}
-
-// Work returns the index-vs-worktree status character.
-func (s State) Work() byte {
-	if len(s) > 1 {
-		return s[1]
-	}
-	return '_'
-}
-
-// Unmerged reports whether the path is in a conflicted state.
-func (s State) Unmerged() bool { return s.Index() == 'U' || s.Work() == 'U' }
-
-// Untracked reports whether git has never been told about the path.
-func (s State) Untracked() bool { return s.Work() == 'O' }
-
-// Committed reports whether the working tree agrees with HEAD about the path,
-// which is the state the whole review is trying to reach.
-func (s State) Committed() bool { return s.Index() == '_' && s.Work() == '_' }
-
-// Staged reports whether the change is in the index but not yet in a commit.
-func (s State) Staged() bool {
-	c := s.Index()
-	return c != '_' && c != 'U'
-}
-
-// File is one entry of the working tree scan.
-type File struct {
-	Path  string
-	From  string // original path for renames/copies
-	State State
-}
-
-// Pending names, in one word, what still stands between a path and a clean
-// tree. It is empty for a path that is already committed.
-func (s State) Pending() string {
-	switch {
-	case s.Unmerged():
-		return "unmerged"
-	case s.Untracked():
-		return "untracked"
-	case s.Work() == 'D':
-		return "deleted"
-	case s.Work() != '_' && s.Staged():
-		return "part staged"
-	case s.Staged():
-		return "staged"
-	case s.Work() != '_':
-		return "uncommitted"
-	}
-	return ""
-}
+// The types a scan is made of are the source package's, since they are what
+// the window reads from any source, this one included.
+type (
+	State  = source.State
+	File   = source.File
+	Scan   = source.Scan
+	Base   = source.Base
+	Commit = source.Commit
+	Stamp  = source.Stamp
+)
 
 // ---------------------------------------------------------------------------
 // The scan
 // ---------------------------------------------------------------------------
 
-// Scan is everything one pass over the repository learns: where the branch
-// stands, what it has committed since the base, what the working tree looks
-// like, and the two diffs the review is drawn from.
-type Scan struct {
-	Branch  string
-	HasHEAD bool
-	Merging bool
-
-	// Base is what the review is measured from. Ref is the name the user
-	// chose or discobox-review worked out, and SHA the merge base itself — the commit
-	// the branch and that ref last had in common, which is where this branch's
-	// work begins.
-	Base Base
-
-	// Commits are the branch's own commits, newest first: everything on HEAD
-	// that the merge base does not have.
-	Commits []Commit
-
-	// Files is the working tree status of every path git has anything to say
-	// about, which is where the "not committed yet" marks come from.
-	Files []File
-
-	// Diff is the review itself: every change from the merge base to the
-	// working tree, staged and unstaged alike, untracked files included.
-	Diff string
-
-	// Pending is the same tree measured from HEAD instead, so the lines in
-	// Diff that have not been committed yet can be picked out of it.
-	Pending string
-}
-
-// Rescan collects the whole scan in one go.
+// Scan collects the whole scan in one go.
 //
 // baseRef is the ref the review is measured against, or empty to let discobox-review
 // work one out. context is how many lines of context every diff is taken with,
 // so that changing it re-reads the review rather than re-rendering a stale one.
-func (r *Repo) Rescan(baseRef string, context int) (Scan, error) {
+func (r *Repo) Scan(baseRef string, context int) (Scan, error) {
 	s := Scan{HasHEAD: r.HasHEAD()}
 	s.Branch = r.CurrentBranch()
 	s.Merging = r.IsMerging()
@@ -427,18 +341,6 @@ func (r *Repo) HasHEAD() bool {
 // IsMerging reports whether a merge is in progress.
 func (r *Repo) IsMerging() bool { return r.StateFileExists("MERGE_HEAD") }
 
-// Base is what the review is measured from: a ref, the commit it and this
-// branch last had in common, and how far each has moved since.
-type Base struct {
-	Ref    string // the ref chosen or worked out, "origin/main"
-	SHA    string // the merge base itself, in full
-	Commit string // the same, abbreviated for the bar
-	Ahead  int    // commits on HEAD since the merge base
-	Behind int    // commits on Ref since the merge base
-	Auto   bool   // true when discobox-review picked the ref rather than the user
-	Err    string // why a ref the user named could not be used
-}
-
 // ResolveBase settles what the review is measured from.
 //
 // A ref named by the user wins, and is reported back with its error rather
@@ -609,16 +511,6 @@ func (r *Repo) Refs() []string {
 // ---------------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------------
-
-// Commit is one entry of the branch's own history: a commit made since the
-// merge base, and so one of the commits this branch is adding.
-type Commit struct {
-	Hash    string
-	Short   string
-	Subject string
-	Author  string
-	When    string
-}
 
 // Commits lists the commits on HEAD that base does not have, newest first.
 func (r *Repo) Commits(base string) ([]Commit, error) {
@@ -848,16 +740,6 @@ func (r *Repo) StateFileExists(name string) bool {
 	return err == nil
 }
 
-// Stamp is enough of a file to tell whether it has changed since it was last
-// read: when it was written and how long it was. The size is there because a
-// filesystem's modification times can be too coarse to separate two writes in
-// the same second, which is exactly the interval an agent editing the review
-// works on.
-type Stamp struct {
-	ModTime int64
-	Size    int64
-}
-
 // StateFileStamp reports a git directory file's stamp. A missing file has the
 // zero stamp, which is a state like any other: it is how "the review has been
 // deleted" arrives.
@@ -868,3 +750,12 @@ func (r *Repo) StateFileStamp(name string) Stamp {
 	}
 	return Stamp{ModTime: info.ModTime.UnixNano(), Size: info.Size}
 }
+
+// A Repo is every kind of source there is: it has a working tree, it keeps a
+// review in its git directory, and it can carry a comment through a commit.
+var (
+	_ source.Source   = (*Repo)(nil)
+	_ source.Carrier  = (*Repo)(nil)
+	_ source.Store    = (*Repo)(nil)
+	_ source.Worktree = (*Repo)(nil)
+)
