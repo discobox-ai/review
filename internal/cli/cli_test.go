@@ -47,7 +47,7 @@ func testRepo(t *testing.T) *git.Repo {
 
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(t.Context(), "git", args...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v: %s", args, err, out)
@@ -459,7 +459,7 @@ func TestCommandsRunTogetherAllLand(t *testing.T) {
 
 	const n = 24
 	errs := make(chan error, 2*n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		go func() {
 			r, err := git.Open(repo.Dir)
 			if err != nil {
@@ -480,7 +480,7 @@ func TestCommandsRunTogetherAllLand(t *testing.T) {
 			errs <- Run(r, []string{"status"}, &out)
 		}()
 	}
-	for i := 0; i < 2*n; i++ {
+	for range 2 * n {
 		if err := <-errs; err != nil {
 			t.Error(err)
 		}
@@ -531,7 +531,7 @@ func TestStatusSaysWhenTheBaseWasWorkedOut(t *testing.T) {
 func fields(t *testing.T, out string) map[string]string {
 	t.Helper()
 	got := map[string]string{}
-	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+	for l := range strings.SplitSeq(strings.TrimRight(out, "\n"), "\n") {
 		if l == "" {
 			continue
 		}
@@ -548,7 +548,7 @@ func fields(t *testing.T, out string) map[string]string {
 // gitOut runs git and returns what it said.
 func gitOut(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(t.Context(), "git", args...)
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -620,7 +620,7 @@ func TestHelpNamesEveryCommand(t *testing.T) {
 			t.Errorf("help does not mention %q:\n%s", c.Name, out.String())
 		}
 		if !Is(c.Name) {
-			t.Errorf("%q is listed but not recognised as a command", c.Name)
+			t.Errorf("%q is listed but not recognized as a command", c.Name)
 		}
 	}
 	if Is("somedir") {
@@ -642,7 +642,7 @@ func TestDiffLineNumbersAreTheOnesCommentTakes(t *testing.T) {
 
 	// Find the added line and read its number straight off the output.
 	var number string
-	for _, l := range strings.Split(got, "\n") {
+	for l := range strings.SplitSeq(got, "\n") {
 		if strings.Contains(l, "return write()") {
 			number = strings.Fields(l)[0]
 		}
@@ -659,7 +659,7 @@ func TestDiffLineNumbersAreTheOnesCommentTakes(t *testing.T) {
 
 	// And the diff then says so on that very line.
 	again := run(t, repo, "diff")
-	for _, l := range strings.Split(again, "\n") {
+	for l := range strings.SplitSeq(again, "\n") {
 		if strings.Contains(l, "return write()") {
 			if !strings.Contains(l, "<t1>") {
 				t.Errorf("the line does not carry its comment: %q", l)
@@ -677,7 +677,7 @@ func TestDiffHeadsEachFile(t *testing.T) {
 
 	got := run(t, repo, "diff")
 	head := ""
-	for _, l := range strings.Split(got, "\n") {
+	for l := range strings.SplitSeq(got, "\n") {
 		if strings.HasPrefix(l, "===") {
 			head = l
 		}
@@ -699,7 +699,7 @@ func TestDiffMarksWhatIsNotCommitted(t *testing.T) {
 
 	got := run(t, repo, "diff")
 	var committed, uncommitted string
-	for _, l := range strings.Split(got, "\n") {
+	for l := range strings.SplitSeq(got, "\n") {
 		switch {
 		case strings.Contains(l, "return write()"):
 			committed = l
@@ -911,7 +911,7 @@ func TestTheCommandTableIsConsistent(t *testing.T) {
 		}
 		// A flag shown in the one-line summary has to be one the command
 		// really accepts, or the listing is telling people the wrong thing.
-		for _, word := range strings.Fields(c.Args) {
+		for word := range strings.FieldsSeq(c.Args) {
 			name := strings.TrimLeft(strings.Trim(word, "[]"), "-")
 			if !strings.HasPrefix(strings.Trim(word, "[]"), "--") {
 				continue

@@ -23,10 +23,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/discobox-ai/review/internal/cli"
 	"github.com/discobox-ai/review/internal/git"
-	"github.com/discobox-ai/review/ui"
+	"github.com/discobox-ai/review/internal/version"
+	"github.com/discobox-ai/review/pkg/ui"
 )
-
-var version = "dev"
 
 func main() {
 	// A subcommand is read before the flag package sees anything, so that a
@@ -60,7 +59,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("discobox-review", version)
+		fmt.Println("discobox-review", version.Get())
 		return
 	}
 

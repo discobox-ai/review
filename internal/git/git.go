@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/discobox-ai/review/source"
+	"github.com/discobox-ai/review/pkg/source"
 )
 
 // Repo is a handle on a working tree, reached through a System.
@@ -233,8 +233,8 @@ func (r *Repo) Status() ([]File, error) {
 	}
 	for _, rec := range splitZ(out) {
 		// "<mode> <sha> <stage>\t<path>"
-		if i := strings.IndexByte(rec, '\t'); i >= 0 {
-			s := at(rec[i+1:])
+		if _, after, ok := strings.Cut(rec, "\t"); ok {
+			s := at(after)
 			s[0], s[1] = 'U', 'U'
 		}
 	}
@@ -254,7 +254,7 @@ func (r *Repo) Status() ([]File, error) {
 // splitZ splits NUL terminated output into its records.
 func splitZ(out string) []string {
 	var records []string
-	for _, rec := range strings.Split(out, "\x00") {
+	for rec := range strings.SplitSeq(out, "\x00") {
 		if rec != "" {
 			records = append(records, rec)
 		}
@@ -497,7 +497,7 @@ func (r *Repo) Refs() []string {
 		if err != nil {
 			continue
 		}
-		for _, l := range strings.Split(strings.TrimSpace(text), "\n") {
+		for l := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
 			l = strings.TrimSpace(l)
 			if l == "" || strings.HasSuffix(l, "/HEAD") {
 				continue
@@ -543,7 +543,7 @@ func (r *Repo) log(args ...string) ([]Commit, error) {
 		return nil, err
 	}
 	var commits []Commit
-	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(out, "\n"), "\n") {
 		if line == "" {
 			continue
 		}
@@ -646,7 +646,7 @@ func (r *Repo) Branches() ([]string, error) {
 		return nil, err
 	}
 	var names []string
-	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+	for l := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		if l != "" {
 			names = append(names, l)
 		}
@@ -661,7 +661,7 @@ func (r *Repo) Remotes() ([]string, error) {
 		return nil, err
 	}
 	var names []string
-	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+	for l := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		if l != "" {
 			names = append(names, l)
 		}

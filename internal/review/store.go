@@ -143,7 +143,7 @@ func adopt(fs Files, branch string) error {
 	if data, ok := fs.ReadStateFile(FileName); ok {
 		st, err := Parse([]byte(data))
 		if err != nil || st.Branch == "" || st.Branch == branch {
-			return nil
+			return nil //nolint:nilerr // a review that does not parse is left where it is, not archived
 		}
 		if err := fs.RenameStateFile(FileName, ArchiveName(st.Branch)); err != nil {
 			return err
