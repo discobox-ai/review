@@ -2,6 +2,7 @@ package git
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/discobox-ai/review/source"
+	"github.com/discobox-ai/review/pkg/source"
 )
 
 // System is every call discobox-review makes outside its own process: running git, and
@@ -75,7 +76,7 @@ type System interface {
 type Editor = source.Editor
 
 // FileInfo is the part of a stat discobox-review uses. It is deliberately small: a
-// remote backend should not have to synthesise a full fs.FileInfo to answer
+// remote backend should not have to synthesize a full fs.FileInfo to answer
 // "does this exist", "which of these two is newer", and "has this file changed
 // since I last read it" — the last of which wants the size as well, since a
 // filesystem's modification times can be too coarse to catch two writes in the
@@ -94,7 +95,7 @@ var _ System = Local{}
 
 // Git runs git in dir.
 func (Local) Git(dir string, stdin []byte, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(context.Background(), "git", args...)
 	cmd.Dir = dir
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
@@ -102,7 +103,7 @@ func (Local) Git(dir string, stdin []byte, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	// A pager would block forever, and a localised git would break the output
+	// A pager would block forever, and a localized git would break the output
 	// parsing.
 	cmd.Env = append(os.Environ(), "GIT_PAGER=cat", "LC_ALL=C")
 
@@ -124,7 +125,7 @@ func (Local) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
 
 // WriteFile writes a file, creating it if needed.
 func (Local) WriteFile(path string, data []byte) error {
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, 0o644) //nolint:gosec // files in the repository, readable like the rest of it
 }
 
 // Remove deletes a file, and is not an error when it is already gone.
@@ -218,7 +219,7 @@ var inProcess sync.Map
 
 // WriteTempFile puts data in a read-only file of its own under the system
 // temporary directory. Keeping the given name, rather than the mangled one
-// os.CreateTemp would pick, is what lets an editor recognise the file type;
+// os.CreateTemp would pick, is what lets an editor recognize the file type;
 // the fresh directory is what keeps the name from colliding.
 func (Local) WriteTempFile(name string, data []byte) (string, error) {
 	dir, err := os.MkdirTemp("", "discobox-review-")
@@ -226,7 +227,7 @@ func (Local) WriteTempFile(name string, data []byte) (string, error) {
 		return "", err
 	}
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, data, 0o444); err != nil {
+	if err := os.WriteFile(path, data, 0o444); err != nil { //nolint:gosec // read-only, inside a fresh 0700 directory
 		_ = os.RemoveAll(dir)
 		return "", err
 	}
@@ -261,7 +262,7 @@ func (Local) Editor(dir, path string) Editor {
 	if len(fields) == 0 {
 		fields = []string{defaultEditor}
 	}
-	cmd := exec.Command(fields[0], append(fields[1:], path)...)
+	cmd := exec.CommandContext(context.Background(), fields[0], append(fields[1:], path)...) //nolint:gosec // running $EDITOR is the point
 	cmd.Dir = dir
 	cmd.Env = os.Environ()
 	return editorCmd{cmd}

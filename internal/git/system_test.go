@@ -51,7 +51,7 @@ func TestSystemIsTheOnlyBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var offences []string
+	var offenses []string
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -59,6 +59,11 @@ func TestSystemIsTheOnlyBoundary(t *testing.T) {
 		if d.IsDir() {
 			// Skip anything that is not ours.
 			if name := d.Name(); name == ".git" || name == "vendor" || strings.HasPrefix(name, ".") && name != "." {
+				return filepath.SkipDir
+			}
+			// The repository's own tools, such as the screenshot taker, are
+			// not discobox-review and have no System to go through.
+			if rel, _ := filepath.Rel(root, path); rel == filepath.Join("internal", "cmd") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -82,7 +87,7 @@ func TestSystemIsTheOnlyBoundary(t *testing.T) {
 		for _, imp := range file.Imports {
 			p := strings.Trim(imp.Path.Value, `"`)
 			if forbiddenImports[p] {
-				offences = append(offences, rel+": imports "+p)
+				offenses = append(offenses, rel+": imports "+p)
 			}
 			name := filepath.Base(p)
 			if imp.Name != nil {
@@ -107,7 +112,7 @@ func TestSystemIsTheOnlyBoundary(t *testing.T) {
 			}
 			if banned, ok := forbidden[pkg]; ok && banned[sel.Sel.Name] {
 				pos := fset.Position(sel.Pos())
-				offences = append(offences,
+				offenses = append(offenses,
 					rel+":"+itoaTest(pos.Line)+": calls "+pkg+"."+sel.Sel.Name)
 			}
 			return true
@@ -118,9 +123,9 @@ func TestSystemIsTheOnlyBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(offences) > 0 {
+	if len(offenses) > 0 {
 		t.Errorf("external calls outside %s — move them behind the System interface:\n  %s",
-			systemFile, strings.Join(offences, "\n  "))
+			systemFile, strings.Join(offenses, "\n  "))
 	}
 }
 
@@ -149,7 +154,7 @@ type fakeSystem struct {
 	fileCalls []string
 }
 
-func (f *fakeSystem) Git(dir string, stdin []byte, args ...string) (string, error) {
+func (f *fakeSystem) Git(_ string, _ []byte, args ...string) (string, error) {
 	key := strings.Join(args, " ")
 	f.gitCalls = append(f.gitCalls, key)
 	if out, ok := f.git[key]; ok {
@@ -186,7 +191,7 @@ func (f *fakeSystem) RemoveAll(path string) error {
 	return nil
 }
 
-func (f *fakeSystem) Lock(path string, wait time.Duration) (func(), error) {
+func (f *fakeSystem) Lock(path string, _ time.Duration) (func(), error) {
 	f.fileCalls = append(f.fileCalls, "lock "+path)
 	return func() { f.fileCalls = append(f.fileCalls, "unlock "+path) }, nil
 }
@@ -231,7 +236,7 @@ func (fakeEditor) SetStdin(io.Reader)  {}
 func (fakeEditor) SetStdout(io.Writer) {}
 func (fakeEditor) SetStderr(io.Writer) {}
 
-func (f *fakeSystem) Editor(dir, path string) Editor {
+func (f *fakeSystem) Editor(_, path string) Editor {
 	f.fileCalls = append(f.fileCalls, "edit "+path)
 	return fakeEditor{path: path}
 }

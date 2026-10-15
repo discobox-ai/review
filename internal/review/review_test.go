@@ -3,7 +3,6 @@ package review
 import (
 	"encoding/json"
 	"errors"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -112,7 +111,7 @@ func TestAHandWrittenReviewIsEnough(t *testing.T) {
 		t.Errorf("version = %d, want %d filled in", s.Version, Version)
 	}
 	if !s.Approved("a.go", "") {
-		t.Error("an approval written without a digest was not honoured")
+		t.Error("an approval written without a digest was not honored")
 	}
 	if len(s.Threads) != 1 {
 		t.Fatalf("threads = %+v", s.Threads)
@@ -480,7 +479,7 @@ func TestAnUpdateThatChangesNothingWritesNothing(t *testing.T) {
 		st.Approve("a.go", "d", "Darren")
 		return refused
 	})
-	if err != refused {
+	if !errors.Is(err, refused) {
 		t.Errorf("err = %v, want the change's own error handed back", err)
 	}
 	if log := strings.Join(fs.log, ", "); strings.Contains(log, "write") {
@@ -671,15 +670,6 @@ func TestAReviewThatCannotBePutAwayIsNotOverwritten(t *testing.T) {
 	if st, err := Parse([]byte(fs.fakeFiles[FileName])); err != nil || len(st.Threads) != 1 {
 		t.Errorf("feature/x's review was overwritten: %q", fs.fakeFiles[FileName])
 	}
-}
-
-func keysOf(fs fakeFiles) []string {
-	var out []string
-	for k := range fs {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // A hunk's approval is recorded against the runs of changed lines in it, so

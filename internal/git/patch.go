@@ -49,8 +49,8 @@ func ParsePatch(text string) *Patch {
 	cur := -1
 	for _, l := range lines {
 		if strings.HasPrefix(l, "@@") {
-			old, new := parseHunkHeader(l)
-			p.Hunks = append(p.Hunks, Hunk{Header: l, OldStart: old, NewStart: new})
+			oldStart, newStart := parseHunkHeader(l)
+			p.Hunks = append(p.Hunks, Hunk{Header: l, OldStart: oldStart, NewStart: newStart})
 			cur = len(p.Hunks) - 1
 			continue
 		}
@@ -177,8 +177,8 @@ func parseHunkHeader(h string) (oldStart, newStart int) {
 	if i := strings.Index(body[2:], "@@"); i >= 0 {
 		body = body[:i+4]
 	}
-	fields := strings.Fields(strings.Trim(body, "@ "))
-	for _, f := range fields {
+	fields := strings.FieldsSeq(strings.Trim(body, "@ "))
+	for f := range fields {
 		if len(f) < 2 {
 			continue
 		}
@@ -323,7 +323,7 @@ func (p *Patch) ChangedNewLines() map[int]bool {
 func (p *Patch) MapOldToNew(old int) (int, bool) { return p.mapLine(old, false) }
 
 // MapNewToOld is MapOldToNew in the other direction.
-func (p *Patch) MapNewToOld(new int) (int, bool) { return p.mapLine(new, true) }
+func (p *Patch) MapNewToOld(n int) (int, bool) { return p.mapLine(n, true) }
 
 func (p *Patch) mapLine(n int, reverse bool) (int, bool) {
 	if n <= 0 {

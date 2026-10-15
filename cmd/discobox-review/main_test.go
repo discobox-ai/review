@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +24,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	binary = filepath.Join(dir, "discobox-review")
-	out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput()
+	out, err := exec.CommandContext(context.Background(), "go", "build", "-o", binary, ".").CombinedOutput()
 	if err != nil {
 		panic(string(out))
 	}
@@ -41,7 +43,7 @@ func repoDir(t *testing.T) string {
 		{"config", "user.email", "test@example.com"},
 		{"config", "commit.gpgsign", "false"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := exec.CommandContext(t.Context(), "git", args...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
@@ -51,7 +53,7 @@ func repoDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "initial"}} {
-		cmd := exec.Command("git", args...)
+		cmd := exec.CommandContext(t.Context(), "git", args...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
@@ -64,12 +66,13 @@ func repoDir(t *testing.T) string {
 // no terminal anywhere near it — the way anything but a person runs it.
 func runBin(t *testing.T, dir string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
-	cmd := exec.Command(binary, args...)
+	cmd := exec.CommandContext(t.Context(), binary, args...)
 	cmd.Dir = dir
 	var out, errs strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &errs
 	err := cmd.Run()
-	if ee, ok := err.(*exec.ExitError); ok {
+	ee := &exec.ExitError{}
+	if errors.As(err, &ee) {
 		code = ee.ExitCode()
 	} else if err != nil {
 		t.Fatalf("running discobox-review %v: %v", args, err)
@@ -144,15 +147,13 @@ func TestProgramsRunTogetherAllLand(t *testing.T) {
 	var wg sync.WaitGroup
 	codes := make([]int, n)
 	for i := range codes {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			cmd := exec.Command(binary, "comment", "--by", "a"+strconv.Itoa(i%3), "a.txt:1", "c"+strconv.Itoa(i))
+		wg.Go(func() {
+			cmd := exec.CommandContext(t.Context(), binary, "comment", "--by", "a"+strconv.Itoa(i%3), "a.txt:1", "c"+strconv.Itoa(i)) //nolint:gosec // the binary this test built
 			cmd.Dir = dir
 			if err := cmd.Run(); err != nil {
 				codes[i] = 1
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	for i, code := range codes {

@@ -185,12 +185,7 @@ func find(name string) (Command, bool) {
 
 // takes reports whether a command accepts a flag.
 func (c Command) takes(flag string) bool {
-	for _, f := range c.Flags {
-		if f == flag {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.Flags, flag)
 }
 
 // Is reports whether a word names a subcommand, which is what tells the
@@ -245,7 +240,7 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 
 	// A command that writes a remark writes a name with it, and there is no
 	// name to fall back on: see Author.
-	if c.takes("by") && !(c.ByOptional && opts.by == "") {
+	if c.takes("by") && (!c.ByOptional || opts.by != "") {
 		if opts.by, err = Author(repo, opts.by); err != nil {
 			return fmt.Errorf("%s: %w", c.Name, err)
 		}
@@ -293,7 +288,7 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 		case "comment":
 			note, cmdErr = comment(st, repo, rest, opts)
 		case "reply":
-			note, cmdErr = reply(st, repo, rest, opts)
+			note, cmdErr = reply(st, rest, opts)
 		case "resolve":
 			note, cmdErr = setResolved(st, rest, true)
 		case "reopen":
@@ -303,9 +298,9 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 		case "delete":
 			note, cmdErr = remove(st, rest)
 		case "approve":
-			note, cmdErr = setApproved(st, repo, rest, opts, true)
+			note, cmdErr = setApproved(st, rest, opts, true)
 		case "unapprove":
-			note, cmdErr = setApproved(st, repo, rest, opts, false)
+			note, cmdErr = setApproved(st, rest, opts, false)
 		}
 		return cmdErr
 	})
@@ -348,7 +343,7 @@ func helpFor(out io.Writer, name string) error {
 	fmt.Fprintf(out, "  %s\n", c.What)
 	if c.Long != "" {
 		fmt.Fprintln(out)
-		for _, l := range strings.Split(c.Long, "\n") {
+		for l := range strings.SplitSeq(c.Long, "\n") {
 			// A blank line stays blank rather than becoming two spaces.
 			if l == "" {
 				fmt.Fprintln(out)
@@ -682,7 +677,7 @@ func show(out io.Writer, st *review.State, args []string) error {
 	}
 	for i, c := range t.Comments {
 		fmt.Fprintf(out, "\n  [%d] %s  %s\n", i, c.By, c.At)
-		for _, l := range strings.Split(strings.TrimRight(c.Body, "\n"), "\n") {
+		for l := range strings.SplitSeq(strings.TrimRight(c.Body, "\n"), "\n") {
 			fmt.Fprintf(out, "      %s\n", l)
 		}
 	}
@@ -879,7 +874,7 @@ func lineText(repo *git.Repo, st *review.State, side, path string, line int) str
 	return strings.TrimRight(lines[line-1], "\r")
 }
 
-func reply(st *review.State, repo *git.Repo, args []string, o options) (string, error) {
+func reply(st *review.State, args []string, o options) (string, error) {
 	if len(args) < 2 {
 		return "", errors.New("reply wants an id and something to say")
 	}
@@ -956,7 +951,7 @@ func setBase(out io.Writer, st *review.State, args []string, o options) (string,
 	return "", errors.New("base wants one ref, or none to show it")
 }
 
-func setApproved(st *review.State, repo *git.Repo, args []string, o options, want bool) (string, error) {
+func setApproved(st *review.State, args []string, o options, want bool) (string, error) {
 	if len(args) == 0 {
 		return "", errors.New("wants at least one path")
 	}
@@ -1048,15 +1043,8 @@ func opening(t *review.Thread) string {
 }
 
 func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i]) + " …"
+	if before, _, ok := strings.Cut(s, "\n"); ok {
+		return strings.TrimSpace(before) + " …"
 	}
 	return strings.TrimSpace(s)
-}
-
-func plural(n int, one, many string) string {
-	if n == 1 {
-		return one
-	}
-	return many
 }
