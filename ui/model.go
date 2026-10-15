@@ -18,6 +18,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/discobox-ai/review/internal/git"
 	"github.com/discobox-ai/review/internal/review"
+	"github.com/discobox-ai/review/source"
 )
 
 type focusArea int
@@ -57,9 +58,28 @@ const maxLexLines = 10000
 
 // Model is the review window.
 type Model struct {
-	repo *git.Repo
-	st   *styles
-	keys keyMap
+	// src is the change under review, and the rest are what it can do
+	// besides: carry a comment through a commit, keep the review, and change
+	// the working tree. Each is nil when the source cannot.
+	src     source.Source
+	carrier source.Carrier
+	store   source.Store
+	wt      source.Worktree
+
+	// embedded is the window drawn inside somebody else's program, which
+	// closing hands back to rather than ending. poll is how often the review
+	// is looked at for changes made elsewhere, and none at all when it is
+	// zero.
+	embedded bool
+	poll     time.Duration
+
+	// originX and originY are where the window's top left corner is on the
+	// terminal, which the mouse reports its positions against.
+	originX, originY int
+
+	theme Theme
+	st    *styles
+	keys  keyMap
 
 	width, height int
 	ready         bool
@@ -83,6 +103,10 @@ type Model struct {
 	base    git.Base
 	merging bool
 	context int
+
+	// incomplete is the source's word that the diff is not the whole of the
+	// change, kept for as long as the scan that said it.
+	incomplete string
 
 	// basePinned is set once the base has been chosen for this session — on
 	// the command line, or with b — and stops the saved review handing it
@@ -108,6 +132,11 @@ type Model struct {
 	hunks      map[hunkKey]bool // the hunks folded away inside files that are open
 	gapsOpen   map[hunkKey]bool // the unchanged stretches between hunks that have been opened
 	rescanning bool
+
+	// rescanAgain is a scan asked for while one was out: what it is to read
+	// may have moved since that one began, so another goes once it is in.
+	// See [Model.scan].
+	rescanAgain bool
 
 	// hideDone takes the files the reader has approved off the screen
 	// altogether, leaving what they have yet to. Folding puts a file out of
@@ -171,13 +200,50 @@ type compose struct {
 	origin *review.Origin
 }
 
-// New builds the initial model for a repository.
+// Options are what the window is told when it is made, beyond the source
+// it reads.
+type Options struct {
+	// Base is the ref the review is measured from, or empty to take whatever
+	// the saved review names and, failing that, whatever the source works
+	// out.
+	Base string
+
+	// Author is the name the comments written here are filed under, which the
+	// caller has already resolved — the window never guesses it.
+	Author string
+
+	// Embedded is the window drawn inside another program. Closing it sends
+	// [ClosedMsg] for that program to act on, rather than ending it.
+	Embedded bool
+
+	// Poll is how often the review is checked for changes made outside the
+	// window: a second when it is zero, and never when it is negative. It is
+	// only ever the review that is polled — never the source's diff, which is
+	// read again when [RescanMsg] arrives.
+	Poll time.Duration
+
+	// Reserved are keys the window must leave alone, because the program it
+	// is drawn in has them: a leader key, say. They are taken out of every
+	// binding that has them, and out of the help with it.
+	Reserved []string
+
+	// Theme is the palette, [DefaultTheme] when it is the zero Theme.
+	Theme Theme
+}
+
+// New builds the window over a source.
 //
-// base is the ref the review is measured from, or empty to take whatever the
-// saved review names and, failing that, whatever discobox-review works out.
-// author is the name the comments written here are filed under, which the
-// caller has already resolved — the window never guesses it.
-func New(repo *git.Repo, base, author string) Model {
+// What it offers follows from what src is. A source that is also a
+// [source.Store] keeps a review, and one that is not is read with no review
+// over it: nothing to approve and nowhere to comment, and the window offers
+// neither. A source that is also a [source.Worktree] can change branch, open a
+// file in the editor and be measured from any base; one that is not has those
+// keys left out, of the help as well.
+//
+// The window reads its source first from [Model.Init], and every later
+// reading waits for that one: a program embedding the window runs Init's
+// command, as a Bubble Tea program does with the model it is given.
+func New(src source.Source, opts Options) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Write a comment"
 	ta.ShowLineNumbers = false
@@ -191,16 +257,27 @@ func New(repo *git.Repo, base, author string) Model {
 	ta.MinHeight = 1
 	ta.MaxHeight = maxDraftHeight
 
-	return Model{
-		repo:       repo,
-		st:         newStyles(true),
-		keys:       newKeyMap(),
+	theme := opts.Theme.filled()
+	poll := opts.Poll
+	switch {
+	case poll == 0:
+		poll = reloadInterval
+	case poll < 0:
+		poll = 0
+	}
+
+	m := Model{
+		src:        src,
+		embedded:   opts.Embedded,
+		poll:       poll,
+		theme:      theme,
+		st:         newStyles(theme, true),
 		history:    newCommitList(),
 		view:       newReviewView(),
 		editor:     ta,
 		focus:      focusReview,
-		baseRef:    base,
-		basePinned: base != "",
+		baseRef:    opts.Base,
+		basePinned: opts.Base != "",
 		context:    defaultContext,
 		workBy:     map[string]*reviewFile{},
 		state:      map[string]git.State{},
@@ -211,19 +288,81 @@ func New(repo *git.Repo, base, author string) Model {
 		hunks:      map[hunkKey]bool{},
 		gapsOpen:   map[hunkKey]bool{},
 		rv:         review.New(""),
-		author:     author,
+		author:     opts.Author,
+		rescanning: true, // Init's
 		mouse:      newMouseState(),
 	}
+	m.carrier, _ = src.(source.Carrier)
+	m.store, _ = src.(source.Store)
+	m.wt, _ = src.(source.Worktree)
+	m.keys = newKeyMap().without(m.missing(), opts.Reserved)
+	m.view.readOnly = m.store == nil
+	return m
+}
+
+// errNoStore is what a write fails with when the source keeps no review. The
+// window offers no command that writes one, so it is never seen but by
+// something that reached past the keys.
+var errNoStore = errors.New("nothing here keeps a review")
+
+// offerer is [Model.offer] for a reader's hint line, which is one run of
+// hints separated the way the status bar's are.
+func (m Model) offerer() func(string) string {
+	return func(hints string) string { return m.offer(hints, " · ") }
+}
+
+// missing is what the source cannot do, as the commands that would do it.
+func (m Model) missing() lacks {
+	return lacks{review: m.store == nil, worktree: m.wt == nil}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.rescanCmd(), textarea.Blink, reloadTick())
+	return tea.Batch(m.rescanCmd(), textarea.Blink, m.reloadTick())
 }
 
 type reloadTickMsg struct{}
 
-func reloadTick() tea.Cmd {
-	return tea.Tick(reloadInterval, func(time.Time) tea.Msg { return reloadTickMsg{} })
+// reloadTick waits for the next look at the review. There is nothing to look
+// at without a store, and nothing is asked for when polling is off.
+func (m Model) reloadTick() tea.Cmd {
+	if m.store == nil || m.poll <= 0 {
+		return nil
+	}
+	return tea.Tick(m.poll, func(time.Time) tea.Msg { return reloadTickMsg{} })
+}
+
+// ClosedMsg is what an embedded window sends when it is closed — q, Ctrl-C —
+// in place of ending the program. Whatever is drawing it takes it away.
+type ClosedMsg struct{}
+
+// RescanMsg has the window read its source again, as R does. A program
+// embedding the window sends it when it knows the source has moved — a pull
+// request's head has — since the window polls only its review, and never the
+// source.
+type RescanMsg struct{}
+
+// SetSize gives the window the room it has to draw in. It is the same as
+// sending it a [tea.WindowSizeMsg], for a program that lays the window out
+// inside its own.
+func (m Model) SetSize(width, height int) Model {
+	next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	return next.(Model)
+}
+
+// SetOrigin says where on the terminal the window's top left corner is drawn,
+// for a program that lays it out anywhere but there. The mouse reports where
+// it is on the terminal, and the window takes this off before it looks: a
+// press outside the window is not its to answer.
+func (m Model) SetOrigin(x, y int) Model {
+	m.originX, m.originY = x, y
+	return m
+}
+
+// Typing reports whether keys are going into a text field — a comment being
+// written, a dialog's input — where every letter is text. A program holding
+// keys of its own can let them through to the window while it is.
+func (m Model) Typing() bool {
+	return m.focus == focusCompose || (m.dialog != nil && m.dialog.typing())
 }
 
 // ---------------------------------------------------------------------------
@@ -273,13 +412,29 @@ type fileMsg struct {
 	err     error
 }
 
+// scan reads the source again, unless a reading is already out. Two readings
+// out at once could come back in either order, and the one asked for first —
+// of a pull request's old head, say — would be the one left on screen. So a
+// scan asked for while one is out waits, and one goes once that is in,
+// however many were asked for meanwhile.
+//
+// Init's scan is the first one out: [New] starts with rescanning set for it.
+func (m *Model) scan() tea.Cmd {
+	if m.rescanning {
+		m.rescanAgain = true
+		return nil
+	}
+	m.rescanning = true
+	return m.rescanCmd()
+}
+
 // rescanCmd asks git everything, and builds the stack, off the render path.
 // Parsing and lexing a whole review is the one expensive thing discobox-review does,
 // and doing it here means a big change never makes the window stutter.
 func (m Model) rescanCmd() tea.Cmd {
-	repo, baseRef, context := m.repo, m.baseRef, m.context
+	src, baseRef, context := m.src, m.baseRef, m.context
 	return func() tea.Msg {
-		scan, err := repo.Rescan(baseRef, context)
+		scan, err := src.Scan(baseRef, context)
 		if err != nil {
 			return rescanMsg{scan: scan, err: err}
 		}
@@ -288,7 +443,7 @@ func (m Model) rescanCmd() tea.Cmd {
 			states[f.Path] = f.State
 		}
 		files := buildFiles(scan.Diff, scan.Pending, states)
-		addGaps(repo, "", files)
+		addGaps(src, "", files)
 		return rescanMsg{scan: scan, files: files}
 	}
 }
@@ -296,7 +451,7 @@ func (m Model) rescanCmd() tea.Cmd {
 // commitCmd loads one commit's own diff, and the diffs that carry comments in
 // and out of it.
 func (m Model) commitCmd(hash string) tea.Cmd {
-	repo, gen, context := m.repo, m.gen, m.context
+	src, carrier, gen, context := m.src, m.carrier, m.gen, m.context
 	// Every path this commit touched needs carrying, because a comment can be
 	// written against any line of it, and so does every path already carrying
 	// one, because those have to be found again in here.
@@ -305,12 +460,15 @@ func (m Model) commitCmd(hash string) tea.Cmd {
 		commented[t.Path] = true
 	}
 	return func() tea.Msg {
-		text, err := repo.CommitDiff(hash, context)
+		text, err := src.CommitDiff(hash, context)
 		if err != nil {
 			return commitFilesMsg{hash: hash, gen: gen, err: err}
 		}
 		files := buildFiles(text, "", nil)
-		addGaps(repo, hash, files)
+		addGaps(src, hash, files)
+		if carrier == nil {
+			return commitFilesMsg{hash: hash, gen: gen, files: files}
+		}
 
 		want := make(map[string]bool, len(files)+len(commented))
 		for _, f := range files {
@@ -321,7 +479,7 @@ func (m Model) commitCmd(hash string) tea.Cmd {
 		}
 		carry := make(map[string]*git.Patch, len(want))
 		for p := range want {
-			out, err := repo.CarryDiff(hash, p)
+			out, err := carrier.CarryDiff(hash, p)
 			if err != nil {
 				continue
 			}
@@ -395,7 +553,7 @@ const maxGapBytes = 4 << 20
 // addGaps reads each file as the diff's new side has it — the working tree, or
 // a commit — and marks the stretches of it the diff leaves out. A file that
 // cannot be read has none marked, and is drawn the way it always was.
-func addGaps(repo *git.Repo, commit string, files []*reviewFile) {
+func addGaps(src source.Source, commit string, files []*reviewFile) {
 	for _, f := range files {
 		// Nothing is read for a file with no hunks — a binary, a change of
 		// mode — since it has no gaps to count and may be very large.
@@ -404,7 +562,7 @@ func addGaps(repo *git.Repo, commit string, files []*reviewFile) {
 		}
 		// The text is kept, to open a gap from without reading again, so a
 		// file too big to be worth keeping goes without its gaps.
-		if text, err := repo.FileContent(commit, f.path); err == nil && len(text) <= maxGapBytes {
+		if text, err := src.FileContent(commit, f.path); err == nil && len(text) <= maxGapBytes {
 			f.addGaps(text)
 		}
 	}
@@ -481,6 +639,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
+		msg, inside := m.local(msg)
+		if !inside {
+			return m, nil
+		}
 		return m.onMouse(msg)
 
 	case tea.BackgroundColorMsg:
@@ -488,7 +650,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// but they are most of what the pane draws, so the palette is built
 		// again rather than patched.
 		if dark := msg.IsDark(); dark != m.dark {
-			m.dark, m.st = dark, newStyles(dark)
+			m.dark, m.st = dark, newStyles(m.theme, dark)
 		}
 		return m, nil
 
@@ -511,7 +673,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case reloadTickMsg:
-		return m, tea.Batch(m.pickUpChanges(), reloadTick())
+		return m, tea.Batch(m.pickUpChanges(), m.reloadTick())
+
+	case RescanMsg:
+		cmd := m.scan()
+		return m, cmd
 
 	case approveAllMsg:
 		// As with one file: deciding about it hands its fold back to the rule,
@@ -559,11 +725,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.setError(msg.text + ": " + firstLine(msg.err.Error()))
 			m.dialog = messageDialog(msg.text+" failed", msg.err.Error(), true)
-			return m, m.rescanCmd()
+			cmd := m.scan()
+			return m, cmd
 		}
 		m.setOK(msg.text)
 		if msg.rescan {
-			return m, m.rescanCmd()
+			cmd := m.scan()
+			return m, cmd
 		}
 		return m, nil
 
@@ -573,7 +741,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// doQuit closes the window: the program with it when the window is the
+// program, and otherwise just the window, by telling whatever it is drawn in.
 func (m Model) doQuit() (tea.Model, tea.Cmd) {
+	if m.embedded {
+		return m, func() tea.Msg { return ClosedMsg{} }
+	}
 	m.quit = true
 	return m, tea.Quit
 }
@@ -587,14 +760,20 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 			m.clearStatus()
 		}
 	}
+	var again tea.Cmd
+	if m.rescanAgain {
+		m.rescanAgain = false
+		again = m.scan()
+	}
 	if msg.err != nil {
 		m.setError(firstLine(msg.err.Error()))
-		return m, nil
+		return m, again
 	}
 
 	m.branch = msg.scan.Branch
 	m.merging = msg.scan.Merging
 	m.base = msg.scan.Base
+	m.incomplete = msg.scan.Incomplete
 	if msg.scan.Base.Err != "" {
 		m.setError(msg.scan.Base.Err)
 	}
@@ -632,7 +811,7 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 		m.editor.Blur()
 	}
 	m.layout()
-	return m, m.selectedCommitCmd()
+	return m, tea.Batch(m.selectedCommitCmd(), again)
 }
 
 // onCommitFiles takes delivery of a commit's diff, and shows it only if the
@@ -670,7 +849,12 @@ func (m Model) onCommitFiles(msg commitFilesMsg) (tea.Model, tea.Cmd) {
 // is always at one path, holding one review, in the flattest shape an agent
 // could ask for — which is the whole reason the state is a file at all.
 func (m *Model) adoptReview() {
-	if err := review.Adopt(m.repo, m.branch, lockWait); err != nil {
+	if m.store == nil {
+		// Nowhere a review is kept: the change is read with none over it.
+		m.rv, m.rvErr = review.New(m.branch), ""
+		return
+	}
+	if err := review.Adopt(m.store, m.branch, lockWait); err != nil {
 		// What is at the path may be another branch's review still, so it is
 		// left unread; the next scan asks again.
 		m.setError("Reading the review: " + firstLine(err.Error()))
@@ -693,7 +877,7 @@ func (m *Model) adoptReview() {
 // so: an agent caught halfway through writing one is a moment, not a reason to
 // lose a review.
 func (m *Model) readReview() (base string) {
-	data, ok := m.repo.ReadStateFile(review.FileName)
+	data, ok := m.store.ReadStateFile(review.FileName)
 	if !ok {
 		m.rv, m.rvErr = review.New(m.branch), ""
 		m.stamp = git.Stamp{}
@@ -712,7 +896,7 @@ func (m *Model) readReview() (base string) {
 		return m.baseRef
 	}
 	m.rv, m.rvErr = st, ""
-	m.stamp = m.repo.StateFileStamp(review.FileName)
+	m.stamp = m.store.StateFileStamp(review.FileName)
 	return m.rv.Base
 }
 
@@ -748,8 +932,11 @@ func (m *Model) keepOwnReview() {
 // read and this write, or a comment somebody added a moment ago is quietly
 // dropped.
 func (m *Model) update(wait time.Duration, change func(*review.State)) error {
+	if m.store == nil {
+		return errNoStore
+	}
 	var now *review.State
-	err := review.Update(m.repo, m.branch, wait, func(st *review.State) error {
+	err := review.Update(m.store, m.branch, wait, func(st *review.State) error {
 		change(st)
 		// A base chosen here, in this session, is the window's to say. Any
 		// other is the file's: one set by a command a moment ago, which the
@@ -764,7 +951,7 @@ func (m *Model) update(wait time.Duration, change func(*review.State)) error {
 		return err
 	}
 	m.rv, m.rvErr = now, ""
-	m.stamp = m.repo.StateFileStamp(review.FileName)
+	m.stamp = m.store.StateFileStamp(review.FileName)
 	if !m.basePinned && now.Base != m.baseRef {
 		// The base moved under the window. Every diff on screen is measured
 		// from the old one, which is the poll's business to put right: with
@@ -789,10 +976,10 @@ func (m *Model) mutate(fn func(*review.State)) bool {
 // pickUpChanges is the poll: it notices the review file being written by
 // something that is not discobox-review and takes the change straight onto the screen.
 func (m *Model) pickUpChanges() tea.Cmd {
-	if !m.ready {
+	if !m.ready || m.store == nil {
 		return nil
 	}
-	if stamp := m.repo.StateFileStamp(review.FileName); stamp == m.stamp {
+	if stamp := m.store.StateFileStamp(review.FileName); stamp == m.stamp {
 		return nil
 	}
 	base := m.readReview()
@@ -814,8 +1001,7 @@ func (m *Model) pickUpChanges() tea.Cmd {
 		// The base is what every diff on screen was taken against, so a
 		// review that names a different one has to be read again from git
 		// too.
-		m.rescanning = true
-		return m.rescanCmd()
+		return m.scan()
 	}
 	return nil
 }
@@ -827,7 +1013,7 @@ func (m *Model) pickUpChanges() tea.Cmd {
 // git. When they have not, nothing is decided: it reports whether there is
 // anything to decide, and the caller reads git again before coming back.
 func (m *Model) reconcile(fresh bool) (undecided bool) {
-	if len(m.work) == 0 {
+	if len(m.work) == 0 || m.store == nil {
 		return false
 	}
 	digests := make(map[string]string, len(m.work))
@@ -1306,7 +1492,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Quit):
 		return m.doQuit()
 	case key.Matches(msg, m.keys.Help):
-		m.dialog = textDialog("Discobox Review — keys", helpText())
+		m.dialog = textDialog("Discobox Review — keys", m.helpText())
 		return m, nil
 	case key.Matches(msg, m.keys.Post):
 		return m.doPost()
@@ -1357,7 +1543,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.QuitKey):
 		return m.doQuit()
 	case key.Matches(msg, m.keys.HelpKey):
-		m.dialog = textDialog("Discobox Review — keys", helpText())
+		m.dialog = textDialog("Discobox Review — keys", m.helpText())
 		return m, nil
 	case key.Matches(msg, m.keys.RescanKey):
 		return m.doRescan()
@@ -1412,8 +1598,8 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) doRescan() (tea.Model, tea.Cmd) {
 	m.setOK("Rescanning…")
-	m.rescanning = true
-	return m, m.rescanCmd()
+	cmd := m.scan()
+	return m, cmd
 }
 
 // historyKey drives the commits. Moving the cursor changes what the review
@@ -2116,7 +2302,8 @@ func (m Model) changeContext(delta int) (tea.Model, tea.Cmd) {
 	}
 	m.context = want
 	m.setOK("Diff context: " + itoa(m.context) + " lines")
-	return m, m.rescanCmd()
+	cmd := m.scan()
+	return m, cmd
 }
 
 // target is the file a file-level command acts on: the one the review cursor
@@ -2566,8 +2753,11 @@ type deleteMsg struct {
 
 // doChooseBase picks what the review is measured from.
 func (m Model) doChooseBase() (tea.Model, tea.Cmd) {
+	if m.wt == nil {
+		return m, nil
+	}
 	items := []string{autoBase}
-	items = append(items, m.repo.Refs()...)
+	items = append(items, m.wt.Refs()...)
 	items = append(items, commitBase, otherBase)
 	m.dialog = listDialog("Review base",
 		"Measure this branch from which ref?\n"+
@@ -2590,7 +2780,7 @@ const recentCommits = 60
 // measure from is often somewhere in your own commits — "review what I did
 // after this" — and that point has no name but its hash.
 func (m Model) doChooseCommitBase() (tea.Model, tea.Cmd) {
-	commits, err := m.repo.Recent(recentCommits)
+	commits, err := m.wt.Recent(recentCommits)
 	if err != nil || len(commits) == 0 {
 		m.setError("No commits to measure from")
 		return m, nil
@@ -2661,21 +2851,24 @@ func (m Model) onBaseChosen(ref string) (tea.Model, tea.Cmd) {
 			m.setOK("Base: " + m.baseRef)
 		}
 	}
-	m.rescanning = true
-	return m, m.rescanCmd()
+	cmd := m.scan()
+	return m, cmd
 }
 
 func (m Model) doCheckout() (tea.Model, tea.Cmd) {
-	branches, err := m.repo.Branches()
+	if m.wt == nil {
+		return m, nil
+	}
+	branches, err := m.wt.Branches()
 	if err != nil || len(branches) == 0 {
 		m.setError("No branches available")
 		return m, nil
 	}
-	repo := m.repo
+	wt := m.wt
 	m.dialog = listDialog("Check out a branch",
 		"Review which branch instead?", branches,
 		func(b string) tea.Cmd {
-			return op("Checked out "+b, true, func() error { _, err := repo.Checkout(b); return err })
+			return op("Checked out "+b, true, func() error { _, err := wt.Checkout(b); return err })
 		})
 	return m, nil
 }
@@ -2726,16 +2919,19 @@ func (m *Model) fileInView() (string, string, *reviewFile) {
 // cannot be written there.
 func (m Model) doEdit() (tea.Model, tea.Cmd) {
 	path, commit, _ := m.fileInView()
+	if m.wt == nil {
+		return m, nil
+	}
 	if path == "" {
 		m.setError("No file to edit")
 		return m, nil
 	}
-	editor, tmp, err := m.repo.EditAt(commit, path)
+	editor, tmp, err := m.wt.EditAt(commit, path)
 	if err != nil {
 		m.setError(err.Error())
 		return m, nil
 	}
-	return m, tea.Exec(editor, editorClosed(m.repo, path, tmp))
+	return m, tea.Exec(editor, editorClosed(m.wt, path, tmp))
 }
 
 // editorClosed is what happens once the editor exits. For a working tree file
@@ -2746,9 +2942,9 @@ func (m Model) doEdit() (tea.Model, tea.Cmd) {
 // It is a function of its own rather than a closure inside doEdit because
 // bubbletea runs it in the runtime rather than through Update, which puts it
 // out of reach of a test driving the model directly.
-func editorClosed(repo *git.Repo, path, tmp string) func(error) tea.Msg {
+func editorClosed(wt source.Worktree, path, tmp string) func(error) tea.Msg {
 	return func(err error) tea.Msg {
-		repo.RemoveTempCopy(tmp)
+		wt.RemoveTempCopy(tmp)
 		if err != nil {
 			return opMsg{text: "Edit " + path, err: err}
 		}
@@ -2791,9 +2987,9 @@ func (m Model) doMarkdown() (tea.Model, tea.Cmd) {
 	if f != nil && f.patch != nil {
 		changed = f.patch.ChangedNewLines()
 	}
-	repo, gen := m.repo, m.gen
+	src, gen := m.src, m.gen
 	return m, func() tea.Msg {
-		text, err := repo.FileContent(commit, path)
+		text, err := src.FileContent(commit, path)
 		if err != nil {
 			return markdownMsg{title: title, gen: gen, err: err}
 		}
@@ -2832,9 +3028,9 @@ func (m Model) doViewFile(side fileSide) (tea.Model, tea.Cmd) {
 	// both counted on the side being read.
 	line, changed := m.viewAnchor(f, side)
 
-	repo, gen, want := m.repo, m.gen, path
+	src, gen, want := m.src, m.gen, path
 	return m, func() tea.Msg {
-		text, err := repo.FileContent(at, want)
+		text, err := src.FileContent(at, want)
 		if err != nil {
 			return fileMsg{path: want, side: side, gen: gen, err: err}
 		}
@@ -2889,6 +3085,11 @@ func (m Model) onFile(msg fileMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.file = newFileView(msg.path, msg.base, msg.side, msg.text, msg.changed, m.width, m.height)
+	m.file.offer = m.offerer()
+	if m.wt == nil {
+		// No disk: what the change leads to is its head.
+		m.file.now = "at the head"
+	}
 	m.file.goToLine(msg.at)
 	return m, nil
 }
@@ -3049,6 +3250,7 @@ func (m Model) onMarkdown(msg markdownMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.md = newMdView(msg.title, msg.text, msg.changed, m.width, m.height)
+	m.md.offer = m.offerer()
 	return m, nil
 }
 

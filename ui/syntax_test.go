@@ -361,7 +361,7 @@ func TestChangedCharactersGetAStrongerBand(t *testing.T) {
 +const prefix = "greetings, "
 `
 	lines, spans := parseAndHighlight(t, "x.go", raw)
-	st := newStyles(true)
+	st := newStyles(DefaultTheme(), true)
 
 	for _, c := range []struct {
 		kind           byte
@@ -436,7 +436,7 @@ func TestChangedCharactersGetAStrongerBand(t *testing.T) {
 // A context line has no band at all, so unchanged code reads as plain text.
 func TestContextLinesHaveNoBand(t *testing.T) {
 	lines, spans := parseAndHighlight(t, "x.go", goDiff)
-	st := newStyles(true)
+	st := newStyles(DefaultTheme(), true)
 	for i, l := range lines {
 		if l.Kind != ' ' {
 			continue
@@ -467,7 +467,7 @@ func TestScrolledRowKeepsItsGutterAndBands(t *testing.T) {
 `
 	lines, spans := parseAndHighlight(t, "x.go", raw)
 	emph := pairEmphasis(lines, textsOf(lines))
-	st := newStyles(true)
+	st := newStyles(DefaultTheme(), true)
 	render := func(hscroll int) string {
 		for i, l := range lines {
 			if l.Kind != '+' {

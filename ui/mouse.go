@@ -612,3 +612,38 @@ func copyToClipboard(text string) tea.Cmd {
 func osc52(text string) string {
 	return "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\a"
 }
+
+// local is a mouse event moved from the terminal's corner to the window's —
+// see [Model.SetOrigin] — and whether the window is to answer it.
+//
+// A press or a turn of the wheel outside the window is not the window's. A
+// drag that began inside it is, wherever it goes: its motion and its release
+// are kept to the window's edges and still arrive, or a selection dragged off
+// the top would never be let go of, and a scrollbar would stay held.
+func (m Model) local(msg tea.MouseMsg) (tea.MouseMsg, bool) {
+	if m.originX == 0 && m.originY == 0 {
+		return msg, true
+	}
+	mouse := msg.Mouse()
+	mouse.X -= m.originX
+	mouse.Y -= m.originY
+	outside := mouse.X < 0 || mouse.Y < 0 || (m.ready && (mouse.X >= m.width || mouse.Y >= m.height))
+	clamp := func(mouse tea.Mouse) tea.Mouse {
+		mouse.X, mouse.Y = max(mouse.X, 0), max(mouse.Y, 0)
+		if m.ready {
+			mouse.X, mouse.Y = min(mouse.X, max(m.width-1, 0)), min(mouse.Y, max(m.height-1, 0))
+		}
+		return mouse
+	}
+	switch msg.(type) {
+	case tea.MouseClickMsg:
+		return tea.MouseClickMsg(mouse), !outside
+	case tea.MouseWheelMsg:
+		return tea.MouseWheelMsg(mouse), !outside
+	case tea.MouseReleaseMsg:
+		return tea.MouseReleaseMsg(clamp(mouse)), true
+	case tea.MouseMotionMsg:
+		return tea.MouseMotionMsg(clamp(mouse)), true
+	}
+	return msg, !outside
+}

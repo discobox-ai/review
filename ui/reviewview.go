@@ -614,6 +614,10 @@ type reviewView struct {
 	// forty characters is worse than one of eighty.
 	split bool
 
+	// readOnly is a review with nowhere to be kept, which nobody approves or
+	// comments in.
+	readOnly bool
+
 	// builtAt is the pane width the current rows were laid out for. A comment
 	// is wrapped to the pane and whether the diff is split at all is decided
 	// by it, so rows built at one width cannot be drawn at another: see
@@ -1704,7 +1708,8 @@ func (v *reviewView) view(st *styles, focused bool, rv *review.State) string {
 // forgot it would report a review shrinking as it was completed.
 func (v *reviewView) tally(rv *review.State) string {
 	total := len(v.files) + v.hidden
-	if total == 0 {
+	if total == 0 || v.readOnly {
+		// A reading with no review over it has nothing done or to do.
 		return ""
 	}
 	approved := v.hidden // everything hidden is approved: that is why it went
@@ -1851,6 +1856,11 @@ func (v *reviewView) fileHeader(f *reviewFile, st *styles, band lipgloss.Style, 
 	// reader has to act on, does the name give way instead — elided from the
 	// middle, so both which file it is and where it sits survive the cut.
 	verdict, theirs := f.verdict(), f.theirVerdict()
+	if v.readOnly {
+		// Nobody's verdict can be given, so none is drawn — but its columns
+		// are kept, so the names line up the way they always do.
+		verdict, theirs = " ", " "
+	}
 	lead := verdict + " " + theirs + "  " + fold
 
 	tail := f.headerTail(max(avail-width(lead+name)-2, 0))

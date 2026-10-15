@@ -67,7 +67,7 @@ func TestMdViewMarksAndJumps(t *testing.T) {
 	if v.cur != -1 || v.offset != 0 {
 		t.Fatalf("reader starts at cur %d offset %d", v.cur, v.offset)
 	}
-	if strings.Contains(v.view(newStyles(true)), "▌") {
+	if strings.Contains(v.view(newStyles(DefaultTheme(), true)), "▌") {
 		t.Error("a block is picked out before n or p was pressed")
 	}
 
@@ -77,7 +77,7 @@ func TestMdViewMarksAndJumps(t *testing.T) {
 	if v.cur != 0 || v.offset != max(v.jumps[0]-mdLead, 0) {
 		t.Errorf("n: cur %d offset %d, want block 0 at %d", v.cur, v.offset, max(v.jumps[0]-mdLead, 0))
 	}
-	view := v.view(newStyles(true))
+	view := v.view(newStyles(DefaultTheme(), true))
 	if !strings.Contains(view, "▌") || !strings.Contains(view, "change 1 of 3") {
 		t.Errorf("the current block is not picked out:\n%s", ansi.Strip(view))
 	}
@@ -86,7 +86,7 @@ func TestMdViewMarksAndJumps(t *testing.T) {
 		t.Errorf("second n: cur %d offset %d, want block 1 at %d", v.cur, v.offset, v.jumps[1]-mdLead)
 	}
 	// The current block's marker differs from the others' on the same screen.
-	for _, line := range strings.Split(v.view(newStyles(true)), "\n") {
+	for _, line := range strings.Split(v.view(newStyles(DefaultTheme(), true)), "\n") {
 		plain := ansi.Strip(line)
 		switch {
 		case strings.Contains(plain, "fourth paragraph") && !strings.HasPrefix(plain, "▌"):
@@ -105,12 +105,12 @@ func TestMdViewMarksAndJumps(t *testing.T) {
 		t.Errorf("p: cur %d offset %d, want block 1 at %d", v.cur, v.offset, v.jumps[1]-mdLead)
 	}
 
-	if !strings.Contains(v.view(newStyles(true)), "n/p changed block") {
+	if !strings.Contains(v.view(newStyles(DefaultTheme(), true)), "n/p changed block") {
 		t.Error("the hint does not offer n/p")
 	}
 
 	clean := newMdView("x.md", raw, nil, 80, 6)
-	if len(clean.jumps) != 0 || strings.ContainsAny(clean.view(newStyles(true)), "▍▌") {
+	if len(clean.jumps) != 0 || strings.ContainsAny(clean.view(newStyles(DefaultTheme(), true)), "▍▌") {
 		t.Error("an untouched file grew a gutter")
 	}
 }

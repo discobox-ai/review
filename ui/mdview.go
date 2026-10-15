@@ -31,6 +31,10 @@ type mdView struct {
 	cur    int   // the block n/p last landed on, an index into jumps, or -1
 	offset int
 
+	// offer filters the hint the way the window filters its own: see
+	// [Model.offer]. Nil offers everything.
+	offer func(string) string
+
 	width, height int
 }
 
@@ -309,6 +313,9 @@ func (v *mdView) view(st *styles) string {
 	hint := "↑/↓ scroll · PgUp/PgDn · g/G top/bottom · Esc or q close"
 	if marks {
 		hint = "n/p changed block · " + hint
+	}
+	if v.offer != nil {
+		hint = v.offer(hint)
 	}
 	b.WriteString(st.dimText.Render(hint))
 	return b.String()

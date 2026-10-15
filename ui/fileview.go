@@ -44,6 +44,14 @@ type fileView struct {
 	hoffset int
 
 	width, height int
+
+	// now is what the new side of the change is called in the hint: "on
+	// disk" for a working tree, which is where it is.
+	now string
+
+	// offer filters the hint the way the window filters its own: see
+	// [Model.offer].
+	offer func(string) string
 }
 
 // fileSide is which version of a file is being read.
@@ -65,7 +73,7 @@ const fileLead = 3
 // newFileView lays a file out for reading. changed is the set of lines the
 // review touches, in this side's own numbering.
 func newFileView(path, base string, side fileSide, text string, changed map[int]bool, width, height int) *fileView {
-	v := &fileView{path: path, base: base, side: side, changed: changed, cur: -1}
+	v := &fileView{path: path, base: base, side: side, changed: changed, cur: -1, now: "on disk"}
 
 	body := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
 	v.lines = make([]git.DiffLine, len(body))
@@ -219,6 +227,15 @@ func (v *fileView) view(st *styles) string {
 	return b.String()
 }
 
+// offer is the window's: it drops the hints for keys the window is not
+// answering. Nil offers everything.
+func (v *fileView) offered(hints string) string {
+	if v.offer == nil {
+		return hints
+	}
+	return v.offer(hints)
+}
+
 func (v *fileView) hint() string {
 	parts := []string{"↑/↓ scroll", "g/G top/bottom"}
 	if len(v.jumps) > 0 {
@@ -228,11 +245,11 @@ func (v *fileView) hint() string {
 		if v.side == sideNow {
 			parts = append(parts, "o the version "+v.base+" has")
 		} else {
-			parts = append(parts, "v the version on disk")
+			parts = append(parts, "v the version "+v.now)
 		}
 	}
 	parts = append(parts, "e edit", "Esc or q close")
-	return strings.Join(parts, " · ")
+	return v.offered(strings.Join(parts, " · "))
 }
 
 // rowFor draws one line of the file. The margin marks the lines the review

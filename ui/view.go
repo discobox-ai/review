@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -247,7 +248,14 @@ func (m Model) branchBar() (string, []barSpan) {
 		left += "  " + m.st.statusWA.Render(merging)
 		at += 2 + width(merging)
 	}
-	right := m.st.dimText.Render("F1 help  ·  Ctrl-Q quit")
+	if m.incomplete != "" {
+		// Said up here, where it stays: a review missing some of its change
+		// is not a moment in the status bar.
+		cut := "[incomplete: " + m.incomplete + "]"
+		left += "  " + m.st.statusWA.Render(cut)
+		at += 2 + width(cut)
+	}
+	right := m.st.dimText.Render(m.offer("F1 help  ·  Ctrl-Q "+m.quitWord(), "  ·  "))
 
 	// The base is the first thing dropped when the bar will not hold all
 	// three: the branch is where you are and the right hand side is the way
@@ -337,7 +345,7 @@ func (m Model) viewStatusBar() string {
 	case m.rvErr != "":
 		left = m.st.statusWA.Render("! " + m.rvErr)
 	default:
-		left = m.st.dimText.Render(m.hints())
+		left = m.st.dimText.Render(m.offer(m.hints(), " · "))
 	}
 	right := m.st.dimText.Render(m.scoreboard())
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
@@ -351,6 +359,11 @@ func (m Model) viewStatusBar() string {
 // files still to commit, and conversations still open. It says "clean" only
 // when all three are nothing, which is the state the whole window is aimed at.
 func (m Model) scoreboard() string {
+	if m.store == nil {
+		// Nothing is being kept, so nothing is left to do: it is only a
+		// reading, and the count is how much there is to read.
+		return plural(len(m.work), "file", "files") + " · ctx:" + itoa(m.context)
+	}
 	unapproved, uncommitted := 0, 0
 	for _, f := range m.work {
 		if !m.rv.Approved(f.path, m.author) {
@@ -376,6 +389,30 @@ func (m Model) scoreboard() string {
 	}
 	parts = append(parts, "ctx:"+itoa(m.context))
 	return strings.Join(parts, " · ")
+}
+
+// quitWord is what closing the window does: ends the program, or — drawn
+// inside another one — only closes the window.
+func (m Model) quitWord() string {
+	if m.embedded {
+		return "close"
+	}
+	return "quit"
+}
+
+// offer drops the parts of a run of hints, separated by sep, that begin with a
+// key the window is not answering — "c comment" from a window with no review
+// to comment in — so that the bars never offer what the help does not.
+func (m Model) offer(hints, sep string) string {
+	parts := strings.Split(hints, sep)
+	kept := parts[:0]
+	for _, p := range parts {
+		first, _, _ := strings.Cut(p, " ")
+		if !m.allOff(first) {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, sep)
 }
 
 func (m Model) hints() string {
@@ -453,14 +490,30 @@ func (m Model) splitHint() string {
 	return "s split"
 }
 
-func helpText() string {
-	return strings.Join([]string{
+// helpText is the help, less whatever the window is not offering: the
+// commands its source cannot do, and the keys the program it is drawn in has
+// kept for itself.
+func (m Model) helpText() string {
+	intro := []string{
 		"Discobox Review reviews a branch. It reads a repository and never writes one:",
 		"nothing here stages, commits, or rewrites anything.",
 		"",
 		"The review is every change between the merge base and the working",
 		"tree — staged, unstaged and untracked alike — so what you are reading",
 		"is the whole of what this branch is proposing.",
+	}
+	if m.wt == nil {
+		intro = []string{
+			"Discobox Review reviews a change: every file it touches, from its base",
+			"to its head, in one scroll, over the commits it was made in.",
+		}
+	}
+	if m.store == nil {
+		intro = append(intro, "",
+			"Nothing here keeps a review of it, so there is nothing to approve",
+			"and nowhere to comment: this is a reading of the change.")
+	}
+	lines := slices.Concat(intro, []string{
 		"",
 		"───────────────────────────────────────────────────────────────",
 		"Commands",
@@ -473,17 +526,17 @@ func helpText() string {
 		"    s  unify the diff, or split it into its two sides again",
 		"       (it opens split; clicking the word in the title does the same)",
 		"    S  cross a split row, to the line the change took away",
-		"    c  comment on this line   r  reply to this comment",
-		"    x  resolve / reopen it    X  delete a comment",
+		"    c  comment on this line" + pair + "   r  reply to this comment",
+		"    x  resolve / reopen it" + pair + "    X  delete a comment",
 		"",
 		"    b  choose the base — a ref, or a commit out of your own",
 		"       history, or anything git can name",
 		"    K  check out another branch",
 		"    V  select a run of lines, then c to comment on the block",
-		"    v  read the whole file      o  read it as the base has it",
+		"    v  read the whole file" + pair + "      o  read it as the base has it",
 		"    e  edit the file in $EDITOR",
 		"    m  read a markdown file, rendered, full screen",
-		"    R  rescan (also F5)       -  /  =   less / more context",
+		"    R  rescan (also F5)" + pair + "       -  /  =   less / more context",
 		"    z  zoom the pane to the whole window (Alt-Z anywhere)",
 		"",
 		"    Space  fold the hunk you are in, from anywhere in it, and open it",
@@ -494,7 +547,7 @@ func helpText() string {
 		"    Enter  the same as Space. A comment begins with c, and only c.",
 		"",
 		"    Ctrl-S       post the comment being written",
-		"    Ctrl-C or q  quit         F1 or ?  these keys",
+		"    Ctrl-C or q  " + m.quitWord() + pair + "         F1 or ?  these keys",
 		"",
 		"───────────────────────────────────────────────────────────────",
 		"Getting about",
@@ -656,5 +709,153 @@ func helpText() string {
 		"  On the top bar, click the branch name to check out another",
 		"  branch, and the \"from …\" beside it to choose the base — the",
 		"  same choices K and b offer.",
-	}, "\n")
+	})
+	if m.store == nil {
+		lines = replaceParagraph(lines, "  The window opens as the list of what changed", []string{
+			"  The window opens as the list of what changed: every file folded",
+			"  to its heading, which says how much it changed. Space opens the",
+			"  one the cursor is on, and F opens them all.",
+		})
+		lines = dropParagraph(lines, "  There are two of those marks.")
+		lines = dropSection(lines, "Approving")
+		lines = dropSection(lines, "Comments")
+		lines = dropSection(lines, "The review file")
+	}
+	if m.wt == nil {
+		lines = replaceParagraph(lines, "  o opens the other side", []string{
+			"  o opens the other side: the file as the base has it. Inside",
+			"  the reader v and o swap between them and keep the line, so",
+			"  \"what did this used to say\" is one keystroke. n/p hop between",
+			"  the changed runs, and Esc or q closes.",
+		})
+		lines = dropSection(lines, "What is not committed yet")
+		lines = dropParagraph(lines, "  On the top bar, click the branch name")
+	}
+	return strings.Join(m.offered(lines), "\n")
+}
+
+// pair joins two entries of the help that share a line. Where both are
+// offered it is nothing, and the line reads as it always has; where one is
+// not, the other is left on the line by itself.
+const pair = "\x00"
+
+// offered drops the help's entries for keys the window is not answering.
+//
+// An entry is a line indented four spaces, naming its keys up to the first
+// double space — "c", "Ctrl-C or q", "n / p" — and the lines indented further
+// under it are its own. It goes when every key it names that the window has
+// is off, so "Ctrl-C or q" stays for as long as either of them works.
+func (m Model) offered(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	dropping := false
+	for _, l := range lines {
+		body, entry := strings.CutPrefix(l, "    ")
+		switch {
+		case entry && strings.HasPrefix(body, " ") && strings.TrimSpace(body) != "":
+			// A continuation of the entry above it.
+		case entry && strings.Contains(body, pair):
+			out = append(out, m.offeredPair(strings.Split(l, pair))...)
+			dropping = false
+			continue
+		case entry && body != "":
+			dropping = m.allOff(entryKeys(body))
+		default:
+			dropping = false
+		}
+		if !dropping {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// offeredPair is the line two entries share, less whichever of them is off.
+func (m Model) offeredPair(parts []string) []string {
+	var kept []string
+	for _, p := range parts {
+		if !m.allOff(entryKeys(strings.TrimLeft(p, " "))) {
+			kept = append(kept, p)
+		}
+	}
+	switch {
+	case len(kept) == len(parts):
+		return []string{strings.Join(parts, "")}
+	case len(kept) == 0:
+		return nil
+	}
+	return []string{"    " + strings.TrimLeft(kept[0], " ")}
+}
+
+// entryKeys is the keys an entry names: everything up to its first double
+// space.
+func entryKeys(entry string) string {
+	names, _, _ := strings.Cut(entry, "  ")
+	return names
+}
+
+// allOff reports whether every key named in a run like "Ctrl-C or q" or
+// "n / p" is off, of those that are keys at all, and at least one is.
+func (m Model) allOff(names string) bool {
+	off := false
+	for _, f := range strings.FieldsFunc(names, func(r rune) bool { return r == ' ' || r == '/' }) {
+		switch known, on := m.keys.state(f); {
+		case on:
+			return false
+		case known:
+			off = true
+		}
+	}
+	return off
+}
+
+// dropSection takes out the section of the help with the given title, from
+// the rule above it to the rule above the next.
+func dropSection(lines []string, title string) []string {
+	at := slices.Index(lines, title)
+	if at < 1 || !strings.HasPrefix(lines[at-1], "───") {
+		return lines
+	}
+	end := len(lines)
+	for j := at + 1; j < len(lines); j++ {
+		if strings.HasPrefix(lines[j], "───") {
+			end = j
+			break
+		}
+	}
+	return slices.Delete(slices.Clone(lines), at-1, end)
+}
+
+// replaceParagraph puts with in place of the paragraph that begins with the
+// line starting first.
+func replaceParagraph(lines []string, first string, with []string) []string {
+	for i, l := range lines {
+		if !strings.HasPrefix(l, first) {
+			continue
+		}
+		j := i
+		for j < len(lines) && lines[j] != "" {
+			j++
+		}
+		return slices.Concat(lines[:i], with, lines[j:])
+	}
+	return lines
+}
+
+// dropParagraph takes out the paragraph that begins with the line starting
+// first, through the blank line after it.
+func dropParagraph(lines []string, first string) []string {
+	for i, l := range lines {
+		if !strings.HasPrefix(l, first) {
+			continue
+		}
+		j := i
+		for j < len(lines) && lines[j] != "" {
+			j++
+		}
+		if j < len(lines) {
+			j++
+		}
+		return slices.Delete(slices.Clone(lines), i, j)
+	}
+	return lines
 }

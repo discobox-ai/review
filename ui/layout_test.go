@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"github.com/discobox-ai/review/internal/git"
 	"strings"
 	"testing"
 
@@ -14,7 +15,7 @@ import (
 // is the same window with the files opened, which is where reading starts.
 func freshTestModel(t *testing.T) Model {
 	t.Helper()
-	m := New(testRepo(t), "main", "Test")
+	m := New(testRepo(t), Options{Base: "main", Author: "Test"})
 	return drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40}, m.rescanCmd()())
 }
 
@@ -166,7 +167,7 @@ func TestTheNextOpenCommentIsFoundInAFoldedFile(t *testing.T) {
 	m = comment(t, m, "why shout?")
 
 	// A window opened afresh on that review, with everything shut.
-	m = modelFor(t, m.repo)
+	m = modelFor(t, m.src.(*git.Repo))
 	for _, f := range m.view.files {
 		delete(m.folds, f.path)
 	}
@@ -333,7 +334,7 @@ func TestTheHistoryTakesAThirdAtMost(t *testing.T) {
 // its foot.
 func TestFoldedFilesAskForNoHorizontalBar(t *testing.T) {
 	m := newTestModel(t)
-	writeFile(t, m.repo.Dir, "wide.txt", strings.Repeat("a very long line ", 40)+"\n")
+	writeFile(t, m.src.(*git.Repo).Dir, "wide.txt", strings.Repeat("a very long line ", 40)+"\n")
 	m = drive(t, m, m.rescanCmd()())
 	if !fileIn(t, m, "wide.txt").folded {
 		t.Fatal("the new file did not arrive folded")
@@ -361,7 +362,7 @@ func TestAnApprovalThatIsNotSavedMovesNoFold(t *testing.T) {
 		t.Fatal("beta.go is folded before anything was decided about it")
 	}
 	// A review caught halfway through being written cannot be saved over.
-	if err := m.repo.WriteStateFile(review.FileName, `{"version":1,`); err != nil {
+	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, `{"version":1,`); err != nil {
 		t.Fatal(err)
 	}
 	m = drive(t, m, letterKey("a"))
