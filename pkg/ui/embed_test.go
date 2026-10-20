@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -12,7 +13,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/discobox-ai/review/internal/review"
 	"github.com/discobox-ai/review/pkg/source"
+	"github.com/discobox-ai/review/pkg/store"
 	"github.com/discobox-ai/review/pkg/ui"
 )
 
@@ -21,7 +24,8 @@ import (
 
 // prSource is a pull request as a source sees one: a fixed diff between two
 // commits, the commits themselves, and a file's text at either end. No working
-// tree and nowhere to keep a review, so it is neither a Worktree nor a Store.
+// tree, so it is not a Worktree, and no review but in a Store the window is
+// given.
 type prSource struct {
 	incomplete string
 }
@@ -230,6 +234,86 @@ func TestASourceWithoutAWorkingTreeOffersNoneOfIt(t *testing.T) {
 			t.Errorf("%s did something on a source without the means to:\n%s", k, after)
 		}
 	}
+}
+
+// A pull request keeps no review of its own, but the window can be given
+// somewhere to keep one: approving a file there writes the approval down, and
+// a window opened later over a new head has it still for every file the push
+// left alone.
+func TestASourceWithoutAStoreIsReviewedInOneGiven(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "pulls", "42")
+	kept, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := ui.Options{Author: "reader", Embedded: true, Store: kept}
+	m := press(opened(t, prSource{}, opts), letter("a"))
+
+	body, ok := kept.ReadStateFile(review.FileName)
+	if !ok {
+		t.Fatalf("approving wrote nothing into %s:\n%s", dir, m.View().Content)
+	}
+	st, err := review.Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Approved("hello.go", "reader") || st.Branch != "pr/42" {
+		t.Errorf("the review kept is not the approval given:\n%s", body)
+	}
+
+	again := opened(t, pushedSource{}, opts)
+	if view := again.View().Content; !strings.Contains(view, "1/2 approved") {
+		t.Errorf("a window over the new head has lost the approval of what the push left alone:\n%s", view)
+	}
+}
+
+// A store with nobody to file under is no store: the window reads, and writes
+// no approval signed by nobody.
+func TestAStoreWithNoAuthorIsOnlyRead(t *testing.T) {
+	kept, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := press(opened(t, prSource{}, ui.Options{Embedded: true, Store: kept}), letter("a"))
+	if body, ok := kept.ReadStateFile(review.FileName); ok {
+		t.Errorf("an approval was written with no author:\n%s", body)
+	}
+	if view := m.View().Content; strings.Contains(view, "approved") {
+		t.Errorf("a window with nobody to approve as counts approvals:\n%s", view)
+	}
+}
+
+// pushedSource is prSource after a push that left hello.go alone and added a
+// file of its own.
+type pushedSource struct{ prSource }
+
+const pushedDiff = prDiff + `diff --git a/bye.go b/bye.go
+new file mode 100644
+--- /dev/null
++++ b/bye.go
+@@ -0,0 +1,3 @@
++package hello
++
++func Bye() string { return "bye" }
+`
+
+func (s pushedSource) Scan(base string, context int) (source.Scan, error) {
+	scan, err := s.prSource.Scan(base, context)
+	scan.Commits = append([]source.Commit{{
+		Hash: "3333333ccccccc", Short: "3333333",
+		Subject: "Say goodbye", Author: "someone", When: "a minute ago",
+	}}, scan.Commits...)
+	scan.Diff = pushedDiff
+	return scan, err
+}
+
+func (pushedSource) CommitDiff(_ string, _ int) (string, error) { return pushedDiff, nil }
+
+func (s pushedSource) FileContent(commit, path string) (string, error) {
+	if path == "bye.go" {
+		return "package hello\n\nfunc Bye() string { return \"bye\" }\n", nil
+	}
+	return s.prSource.FileContent(commit, path)
 }
 
 // With no review there is nothing approved or open to count, and neither the

@@ -5,9 +5,10 @@
 // be: a pull request has a base, a head and a diff between them, and nothing
 // on disk at all. Everything the window needs of a change is said here, as a
 // small interface every source implements and a few that only some do — a
-// working tree to check out and edit in, a place to keep the review — so that
-// a source with no working tree is one that does not have those, rather than
-// one that has to pretend.
+// working tree to check out and edit in, a commit to carry a comment through —
+// so that a source with no working tree is one that does not have those,
+// rather than one that has to pretend. Where the review is kept is said here
+// too, as a Store, but the window is given that apart from the source.
 //
 // The types are plain data. A source fills them in however it likes; the
 // window never asks where they came from.
@@ -62,9 +63,12 @@ type Carrier interface {
 // keeps it, in files in the git directory, and it is shaped as files because
 // that is what the commands and anything else reading the review share.
 //
-// A source that is also a Store has a review that can be written. One that is
-// not shows the change with no review over it — nothing to approve, and
-// nowhere to put a comment — and the window offers neither.
+// It is not part of the source: the window is handed one beside it
+// (ui.Options.Store), because the change and the review of it need not live
+// in the same place. A Git working tree is both; a pull request is read from
+// its host and reviewed in a directory of its own (pkg/store). A window given
+// none shows the change with no review over it — nothing to approve, and
+// nowhere to put a comment — and offers neither.
 type Store interface {
 	// ReadStateFile reads the named document, reporting whether there is one.
 	ReadStateFile(name string) (string, bool)

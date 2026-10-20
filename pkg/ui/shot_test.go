@@ -350,7 +350,7 @@ func shotRepo(t *testing.T) *git.Repo {
 // terminal gets — which is the one the images are rendered against.
 func shotModel(t *testing.T, repo *git.Repo, w, h int) Model {
 	t.Helper()
-	m := New(repo, Options{Base: "main", Author: "darren"})
+	m := New(repo, Options{Base: "main", Author: "darren", Store: repo})
 	m.dark, m.st = true, newStyles(DefaultTheme(), true)
 	return drive(t, m, tea.WindowSizeMsg{Width: w, Height: h}, m.rescanCmd()())
 }

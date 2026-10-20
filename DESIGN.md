@@ -10,6 +10,7 @@ flowchart LR
     main --> ui[pkg/ui]
     ui --> source[pkg/source]
     ui --> review[internal/review]
+    store[pkg/store] --> git
     cli --> git[internal/git]
     cli --> review
     git -. implements .-> source
@@ -22,17 +23,23 @@ flowchart LR
 
 - `pkg/source` is everything the window needs of a change: one required
   interface, `Source` (the diff, its commits, a file's text at a commit), and
-  three a source may add — `Store` (somewhere to keep the review), `Worktree`
-  (branches, checkout, `$EDITOR`) and `Carrier` (carrying a comment between a
-  commit and the whole review). The window asks once, when it is made, and
-  offers only what the source has.
+  two a source may add — `Worktree` (branches, checkout, `$EDITOR`) and
+  `Carrier` (carrying a comment between a commit and the whole review). The
+  window asks once, when it is made, and offers only what the source has.
+  `Store`, somewhere to keep the review, is handed to the window beside the
+  source (`ui.Options.Store`), since a change read from GitHub is reviewed on
+  local disk; with none the window only reads.
+- `pkg/store` is a `Store` in a directory of its own, for a host whose source
+  has no git directory: the discobox console keeps a pull request's review in
+  one. It is `internal/git`'s state files, over `git.Local`.
 - `pkg/ui` is the window, a Bubble Tea model. `cmd/discobox-review` runs it
   over a Git working tree; another program embeds it over its own source (the
   discobox console's pull request page). It draws every control character a
   source hands it as its Unicode symbol: nothing a source says reaches the
   terminal as an instruction.
-- `internal/git` is `*git.Repo`, the source the command uses, and it is all
-  four interfaces. Every command it runs and every file it touches goes
+- `internal/git` is `*git.Repo`, the source the command uses: all three
+  interfaces, and a `Store` too, in its git directory (`git.StateDir`, which
+  `pkg/store` reuses). Every command it runs and every file it touches goes
   through `git.System`; `Local` is the real one. A test fails if anything
   outside `system.go` runs a command or touches a file.
 - `internal/review` is the review document — approvals by reviewer and by
@@ -43,10 +50,13 @@ flowchart LR
 
 ## The review file
 
-The review is `.git/discobox-review.json`, one file per branch: checking out
-another branch moves it to `.git/discobox-review.<branch>.json` and moves that
-branch's into place. The file is the interface for agents, so its format is
-kept flat and readable; `internal/review` owns it.
+The review is `discobox-review.json` in whatever store the window is given:
+the git directory for the command, a directory of its own for a pull request
+(`pkg/store`). It is one file per branch: a scan naming another branch moves
+it to `discobox-review.<branch>.json` beside it and moves that branch's into
+place. The file is the interface for agents, so its format is kept flat and
+readable; `internal/review` owns it. The commands read only the git
+directory's.
 
 ## Reading and drawing
 

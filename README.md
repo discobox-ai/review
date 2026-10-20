@@ -1248,11 +1248,13 @@ discobox console's pull request page is the case it was built for: the diff
 comes from GitHub, with no box, no fetch and no working tree.
 
 ```go
+kept, err := store.Open(filepath.Join(stateDir, "pulls", "42")) // pkg/store
+// ...
 m := ui.New(src, ui.Options{
-	Author:   "who is reading",
+	Author:   "who is reading",   // whose approvals and comments these are
+	Store:    kept,               // where the review is kept; nil to only read
 	Embedded: true,               // closing sends ui.ClosedMsg, not tea.Quit
 	Reserved: []string{"ctrl+a"}, // the host's leader key; the window lets it be
-	Poll:     -1,                 // no review file to watch
 	Theme:    theme,              // the host's palette; nil colours are the default's
 })
 m = m.SetSize(width, height)  // the room the host gives it
@@ -1272,13 +1274,28 @@ cleared screen. Every control character is drawn as the symbol Unicode keeps
 for it, one column for one, so `ESC` shows as `␛` and nothing moves. A Windows
 line's closing carriage return is dropped rather than shown.
 
-**What the window offers follows from what the source is.** Three more
+**The review is kept wherever the window is told to keep it.** The change and
+the review of it need not live together: the command reads a working tree and
+keeps its review in the git directory, and a pull request is read from GitHub
+and reviewed on the reader's own disk. `ui.Options.Store` is where it goes —
+anything that is a `source.Store`, and `store.Open(dir)` makes one of any
+directory: the same `discobox-review.json`, written whole by rename under the
+same lock as the command's, so windows open on the same directory at once
+never lose each other's writes. The commands read only a git directory, so a
+review kept this way is the window's: an agent reaching it edits the JSON
+under that lock, as above.
+Give each change its own directory, and the same one every time it is opened:
+approvals are of hunks, by digest, so those a push leaves alone are still
+approved at the new head. With no store, or no `Author` to file what is
+written under, the change is read with no review over it — nothing to approve,
+nowhere to comment, and no a, A, c, r, x, X, V, t, T or f.
+
+**What the window offers follows from what the source is.** Two more
 interfaces in `source` say what a source can do besides being read, and the
 window asks once, when it is made:
 
 | Interface | What it adds | Without it |
 | --- | --- | --- |
-| `source.Store` | somewhere to keep the review: approvals, comments, the base | the change is read with no review over it — nothing to approve, nowhere to comment, and no a, A, c, r, x, X, V, t, T or f |
 | `source.Worktree` | branches, checkout, `$EDITOR`, any ref or commit as the base | K, e and b are not there |
 | `source.Carrier` | carrying a comment through a commit to the review and back | reading one commit still works; comments stay on the whole review |
 
@@ -1303,8 +1320,8 @@ A scan reads the text of every changed file, for the unchanged lines between
 its hunks, and it reads up to eight at once: from a source across a network,
 one after another is a round trip each.
 
-`*git.Repo`, in `internal/git`, is the source the command uses, and it is all
-four.
+`*git.Repo`, in `internal/git`, is the source the command uses: it is all
+three interfaces, and its own store.
 
 ## Cost
 

@@ -100,7 +100,7 @@ func main() {
 	// The alternate screen, the mouse and the keyboard enhancements are part
 	// of what the model's view asks the screen to be, rather than options
 	// settled here — see ui.Model.View.
-	p := tea.NewProgram(ui.New(repo, ui.Options{Base: *base, Author: author}))
+	p := tea.NewProgram(ui.New(repo, ui.Options{Base: *base, Author: author, Store: repo}))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "discobox-review:", err)
 		os.Exit(1)

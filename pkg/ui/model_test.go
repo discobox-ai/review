@@ -141,13 +141,13 @@ func newTestModel(t *testing.T) Model {
 // where scrolling — and so where a pane's idea of the reader's place — matters.
 func shortTestModel(t *testing.T) Model {
 	t.Helper()
-	m := New(testRepo(t), Options{Base: "main", Author: "Test"})
+	m := newOver(testRepo(t), Options{Base: "main", Author: "Test"})
 	return opened(drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()()))
 }
 
 func modelFor(t *testing.T, repo *git.Repo) Model {
 	t.Helper()
-	m := New(repo, Options{Base: "main", Author: "Test"})
+	m := New(repo, Options{Base: "main", Author: "Test", Store: repo})
 	return opened(drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40}, m.rescanCmd()()))
 }
 
@@ -1430,7 +1430,7 @@ func TestNoCtrlCommandsOutsideTheComposer(t *testing.T) {
 // The help lists every command letter, so the window can be learned from
 // inside it.
 func TestHelpNamesEveryCommand(t *testing.T) {
-	help := New(testRepo(t), Options{Author: "Test"}).helpText()
+	help := newOver(testRepo(t), Options{Author: "Test"}).helpText()
 	for _, b := range commandBindings(newKeyMap()) {
 		if len(b.Keys()) == 0 {
 			t.Errorf("%q has no key at all", b.name)
@@ -1449,7 +1449,7 @@ func TestHelpNamesEveryCommand(t *testing.T) {
 // Over a source that can do everything, the help reads as it always has: two
 // entries that share a line still share it.
 func TestTheFullHelpKeepsItsLines(t *testing.T) {
-	help := New(testRepo(t), Options{Author: "Test"}).helpText()
+	help := newOver(testRepo(t), Options{Author: "Test"}).helpText()
 	for _, line := range []string{
 		"    c  comment on this line   r  reply to this comment\n",
 		"    v  read the whole file      o  read it as the base has it\n",
@@ -1534,7 +1534,7 @@ func TestACleanBranchSaysSo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(repo, Options{Base: "", Author: "Test"})
+	m := New(repo, Options{Base: "", Author: "Test", Store: repo})
 	m = drive(t, m, tea.WindowSizeMsg{Width: 120, Height: 30}, m.rescanCmd()())
 	if len(m.view.files) != 0 {
 		t.Fatalf("a clean tree has %v to review", pathsOf(m))
@@ -4470,4 +4470,11 @@ func TestOnlyWhatFHidIsBlamedOnF(t *testing.T) {
 	if m.view.hiddenOpen != 1 {
 		t.Errorf("hiddenOpen = %d, want the one comment on the file f hid", m.view.hiddenOpen)
 	}
+}
+
+// newOver is the window over a repository that keeps its own review, as the
+// command opens it.
+func newOver(repo *git.Repo, opts Options) Model {
+	opts.Store = repo
+	return New(repo, opts)
 }
