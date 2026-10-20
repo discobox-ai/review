@@ -232,8 +232,9 @@ columns every heading opens with.
 **The window goes by yours** — the name it was opened with, `-by`. A file only
 somebody else has approved is still one you have not read, so it does not fold
 away, it is still counted in `3 to read` and left out of `1/4 approved`, `f`
-does not hide it, and `a` on it adds your approval beside theirs. `a` again
-takes yours back and leaves theirs alone. So a review an agent has already
+does not hide it, and `a` on it adds your approval beside theirs. `a` on it
+again — once you have come back to it, since `a` moves on — takes yours back
+and leaves theirs alone. So a review an agent has already
 driven to sign-off opens as a list of files with `○ ✓` in front of them, and
 going down it with `a` is you reading what it read.
 
@@ -289,6 +290,15 @@ file's heading the file. An approved hunk folds away as an approved file does,
 its header says `✓ approved`, and the file's heading counts them — `✓ 2/5
 hunks`. Approving the last hunk approves the file; `a` on a hunk of an approved
 file takes that one hunk back and leaves the others standing.
+
+**`a` then moves on** to the next thing of the same size still waiting for
+your approval, so pressing it again and again reads the review through: after
+a hunk, the next unapproved hunk, in this file or the next; after a file, the
+heading of the next unapproved file. Past the last file it comes round to the
+top. Whatever it lands on is opened if it was folded. Arriving in another file
+puts its heading at the top of the pane; a hunk in the same file is only
+scrolled to when it is off the screen, so the rest of the file stays in view.
+Taking an approval back stays put.
 
 What is recorded is not the hunk but the **runs of changed lines** inside it,
 for the reason the file's digest leaves context out: where a hunk starts and

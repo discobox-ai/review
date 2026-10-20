@@ -441,7 +441,10 @@ func TestApproveWritesTheReviewFile(t *testing.T) {
 		t.Errorf("review says branch %q base %q", st.Branch, st.Base)
 	}
 
-	// And pressing it again takes the approval back.
+	// And pressing it again on the file takes the approval back.
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowFile && m.view.files[r.file].path == "beta.go"
+	})
 	m = drive(t, m, letterKey("a"))
 	st = reviewJSON(t, m.src.(*git.Repo))
 	if st.Approved("beta.go", "Test") {
@@ -1655,7 +1658,9 @@ func TestFoldingLeavesTheHeadingWhereItIs(t *testing.T) {
 
 // Approving a file folds it away, which is the same shape of change and wants
 // the same stability: the heading stays where it was drawn and the diff under
-// it goes, rather than the pane hauling the heading up to its top.
+// it goes, rather than the pane hauling the heading up to its top. The cursor
+// goes on to the next file, which is put at the top; this is the heading
+// coming back once it has.
 func TestApprovingLeavesTheHeadingWhereItIs(t *testing.T) {
 	m := shortTestModel(t)
 	m = cursorTo(t, m, func(r reviewRow) bool {
@@ -1666,12 +1671,18 @@ func TestApprovingLeavesTheHeadingWhereItIs(t *testing.T) {
 		t.Fatalf("foo.txt starts at screen row %d; the test wants it partway down a scrolling pane", before)
 	}
 
+	offset := m.view.offset
 	m = drive(t, m, letterKey("a"))
 	if !fileIn(t, m, "foo.txt").folded {
 		t.Fatal("approving the file did not fold it away")
 	}
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowFile && m.view.files[r.file].path == "foo.txt"
+	})
+	m.view.offset = offset
+	m.view.clamp()
 	if got, _ := fileScreen(m, "foo.txt"); got != before {
-		t.Errorf("approving moved the heading to screen row %d, want %d", got, before)
+		t.Fatalf("the heading came back at screen row %d, want %d", got, before)
 	}
 
 	// And withdrawing the approval opens it again in place.
@@ -3929,6 +3940,9 @@ func TestAOnTheHeadingApprovesTheFile(t *testing.T) {
 	if !m.rv.Approved("foo.txt", "Test") {
 		t.Fatalf("a on the heading did not approve the file (status %q)", m.status)
 	}
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowFile && m.view.files[r.file].path == "foo.txt"
+	})
 	m = drive(t, m, letterKey("a"))
 	if m.rv.Approved("foo.txt", "Test") {
 		t.Error("a on the heading did not take the approval back")
@@ -3936,6 +3950,247 @@ func TestAOnTheHeadingApprovesTheFile(t *testing.T) {
 	if n, _ := fileIn(t, m, "foo.txt").hunksApproved(); n != 0 {
 		t.Errorf("withdrawing the file's approval left %d hunks approved", n)
 	}
+}
+
+// a goes on to the next thing waiting to be approved, so that pressing it
+// again and again reads the review through. Inside a file that is its next
+// hunk, and the pane stays where it is while that hunk is on the screen: the
+// hunks above it are what it is read with.
+func TestAMovesOnToTheNextHunk(t *testing.T) {
+	m := modelFor(t, twoHunkRepo(t))
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	offset := m.view.offset
+	m = drive(t, m, letterKey("a"))
+	if l, ok := cursorDiffLine(m, "foo.txt"); !ok || l.Kind != '@' || l.Hunk != 1 {
+		t.Fatalf("after approving the first hunk the cursor is on %+v (%v), want the second hunk's header", l, ok)
+	}
+	if m.view.offset != offset {
+		t.Errorf("the pane scrolled from %d to %d to reach a hunk already on screen", offset, m.view.offset)
+	}
+}
+
+// Approving a hunk keeps the pane where it is even when the file's heading has
+// scrolled off the top: the hunk folds in place and the next one comes up
+// under it, rather than the heading being hauled back into view.
+func TestApprovingAHunkLeavesThePaneWhereItIs(t *testing.T) {
+	m := New(twoHunkRepo(t), Options{Base: "main", Author: "Test"})
+	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()())
+	m = opened(m)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	heading, _ := m.view.fileRow("foo.txt")
+	m.view.offset = heading + 1
+	m.view.clamp()
+	if m.view.offset != heading+1 {
+		t.Fatalf("the pane will not scroll foo.txt's heading off the top (offset %d)", m.view.offset)
+	}
+	m = drive(t, m, letterKey("a"))
+	if l, ok := cursorDiffLine(m, "foo.txt"); !ok || l.Kind != '@' || l.Hunk != 1 {
+		t.Fatalf("the cursor is on %+v (%v), want the second hunk's header", l, ok)
+	}
+	if m.view.offset != heading+1 {
+		t.Errorf("approving a hunk moved the pane from %d to %d", heading+1, m.view.offset)
+	}
+}
+
+// Opening the next hunk because it was folded by hand lays the rows out again
+// too, and must not haul the heading back either.
+func TestOpeningTheNextHunkLeavesThePaneWhereItIs(t *testing.T) {
+	// A long file under foo.txt keeps the stack long enough below for the
+	// pane to stay where it is with both of foo.txt's hunks folded.
+	repo := twoHunkRepo(t)
+	writeFile(t, repo.Dir, "zed.txt", strings.Repeat("zed\n", 40))
+	m := New(repo, Options{Base: "main", Author: "Test"})
+	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()())
+	m = opened(m)
+	m.setHunkFold(fileIn(t, m, "foo.txt"), 1, true)
+	m.rebuild()
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	heading, _ := m.view.fileRow("foo.txt")
+	m.view.offset = heading + 1
+	m.view.clamp()
+	if m.view.offset != heading+1 {
+		t.Fatalf("the pane will not scroll foo.txt's heading off the top (offset %d)", m.view.offset)
+	}
+	m = drive(t, m, letterKey("a"))
+	if fileIn(t, m, "foo.txt").shut[1] {
+		t.Fatal("the hunk a went on to is still folded")
+	}
+	if m.view.offset != heading+1 {
+		t.Errorf("opening the next hunk moved the pane from %d to %d", heading+1, m.view.offset)
+	}
+}
+
+// A hunk the reader folded by hand is opened on the way to it, since it is
+// what is about to be read.
+func TestAOpensTheNextHunkIfFolded(t *testing.T) {
+	m := modelFor(t, twoHunkRepo(t))
+	f := fileIn(t, m, "foo.txt")
+	m.setHunkFold(f, 1, true)
+	m.rebuild()
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	m = drive(t, m, letterKey("a"))
+	if fileIn(t, m, "foo.txt").shut[1] {
+		t.Error("the hunk a went on to is still folded")
+	}
+	if l, ok := cursorDiffLine(m, "foo.txt"); !ok || l.Kind != '@' || l.Hunk != 1 {
+		t.Errorf("the cursor is on %+v (%v), want the second hunk's header", l, ok)
+	}
+}
+
+// a on the last hunk of a file goes on to the first hunk of the next file
+// waiting for approval: it opens that file and puts its heading at the top of
+// the pane, where reading it starts.
+func TestALastHunkMovesOnToTheNextFilesHunk(t *testing.T) {
+	m := New(twoHunkRepo(t), Options{Base: "main", Author: "Test"})
+	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()())
+	m = onLine(t, m, "bar.txt", '+', "")
+	m = drive(t, m, letterKey("a"))
+	if !m.rv.Approved("bar.txt", "Test") {
+		t.Fatalf("approving bar.txt's one hunk did not approve it (status %q)", m.status)
+	}
+	if l, ok := cursorDiffLine(m, "foo.txt"); !ok || l.Kind != '@' || l.Hunk != 0 {
+		t.Fatalf("the cursor is on %+v (%v), want foo.txt's first hunk header", l, ok)
+	}
+	if fileIn(t, m, "foo.txt").folded {
+		t.Error("the file a went on to is still folded")
+	}
+	if got, _ := fileScreen(m, "foo.txt"); got != 0 {
+		t.Errorf("foo.txt's heading is at screen row %d, want the top", got)
+	}
+}
+
+// a on a file's heading goes on to the heading of the next file nobody has
+// approved, opens it, and puts it at the top of the pane.
+func TestAMovesOnToTheNextFile(t *testing.T) {
+	m := New(twoHunkRepo(t), Options{Base: "main", Author: "Test"})
+	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()())
+	m = cursorTo(t, m, func(r reviewRow) bool {
+		return r.kind == rowFile && m.view.files[r.file].path == "bar.txt"
+	})
+	m = drive(t, m, letterKey("a"))
+	if f, ok := m.view.file(); !ok || f.path != "foo.txt" || m.view.rows[m.view.cursor].kind != rowFile {
+		t.Fatalf("after approving bar.txt the cursor is not on foo.txt's heading (status %q)", m.status)
+	}
+	if fileIn(t, m, "foo.txt").folded {
+		t.Error("the file a went on to is still folded")
+	}
+	if got, _ := fileScreen(m, "foo.txt"); got != 0 {
+		t.Errorf("foo.txt's heading is at screen row %d, want the top", got)
+	}
+}
+
+// Past the last file a comes round to the top again, to the hunks left behind.
+func TestAComesRoundToWhatIsLeft(t *testing.T) {
+	m := modelFor(t, twoHunkRepo(t))
+	m = onLine(t, m, "bar.txt", '+', "")
+	m = drive(t, m, letterKey("a"))
+	m = onLine(t, m, "foo.txt", '+', "THIRTY-SIX")
+	m = drive(t, m, letterKey("a"))
+	if l, ok := cursorDiffLine(m, "foo.txt"); !ok || l.Kind != '@' || l.Hunk != 0 {
+		t.Errorf("the cursor is on %+v (%v), want the header of the hunk left unapproved", l, ok)
+	}
+
+	// With nothing left, the cursor stays on what was approved last, and the
+	// heading where it was drawn.
+	before, _ := fileScreen(m, "foo.txt")
+	m = drive(t, m, letterKey("a"))
+	if !m.rv.Approved("foo.txt", "Test") {
+		t.Fatalf("foo.txt is not approved (status %q)", m.status)
+	}
+	if f, ok := m.view.file(); !ok || f.path != "foo.txt" {
+		t.Errorf("with nothing left to approve the cursor left foo.txt")
+	}
+	if got, _ := fileScreen(m, "foo.txt"); got != before {
+		t.Errorf("with nothing left to approve the heading moved from screen row %d to %d", before, got)
+	}
+}
+
+// Coming round to a hunk higher up the file just worked in is not arriving in
+// a file: the pane stays where it is while the hunk is on the screen, rather
+// than hauling the file's heading to the top.
+func TestAComingRoundStaysPut(t *testing.T) {
+	for h := 12; h <= 40; h++ {
+		// A long file under foo.txt, approved and open, keeps the stack long
+		// enough below for the pane to stay where it is.
+		repo := twoHunkRepo(t)
+		writeFile(t, repo.Dir, "zed.txt", strings.Repeat("zed\n", 40))
+		m := New(repo, Options{Base: "main", Author: "Test"})
+		m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: h}, m.rescanCmd()())
+		m = onLine(t, m, "zed.txt", '+', "")
+		m = drive(t, m, letterKey("a"))
+		m.folds["zed.txt"] = false
+		m = onLine(t, m, "bar.txt", '+', "")
+		m = drive(t, m, letterKey("a"))
+		// bar.txt is open again by hand, and foo.txt's heading scrolled just
+		// off the top, so putting the heading at the top would move the pane.
+		m.folds["bar.txt"] = false
+		m.rebuild()
+		m = onLine(t, m, "foo.txt", '+', "THIRTY-SIX")
+		heading, _ := m.view.fileRow("foo.txt")
+		m.view.offset = heading + 1
+		m.view.clamp()
+		if m.view.offset != heading+1 {
+			continue // the window is too tall, or too short to show both hunks
+		}
+		m = drive(t, m, letterKey("a"))
+		// Folding the hunk just approved shortens the stack, which can pull
+		// the pane up from the bottom; nothing else should move it.
+		want := min(heading+1, m.view.maxOffset())
+		if min(heading, m.view.maxOffset()) == want {
+			continue // this height cannot tell the two apart
+		}
+		if l, ok := cursorDiffLine(m, "foo.txt"); !ok || l.Kind != '@' || l.Hunk != 0 {
+			t.Fatalf("the cursor is on %+v (%v), want the header of the hunk left unapproved", l, ok)
+		}
+		if m.view.offset != want {
+			t.Errorf("coming round moved the pane from %d to %d with the hunk on screen", want, m.view.offset)
+		}
+		return
+	}
+	t.Fatal("no window height shows both of foo.txt's hunks with its heading just off the top")
+}
+
+// With approved files hidden, the one just approved leaves the screen, and a
+// still goes on from where it was rather than losing its place.
+func TestAMovesOnWithApprovedFilesHidden(t *testing.T) {
+	m := modelFor(t, twoHunkRepo(t))
+	m = drive(t, m, letterKey("f"))
+	m = onLine(t, m, "bar.txt", '+', "")
+	m = drive(t, m, letterKey("a"))
+	if _, ok := m.view.byPath["bar.txt"]; ok {
+		t.Fatal("the approved file is still on the screen with f on")
+	}
+	if l, ok := cursorDiffLine(m, "foo.txt"); !ok || l.Kind != '@' || l.Hunk != 0 {
+		t.Errorf("the cursor is on %+v (%v), want foo.txt's first hunk header", l, ok)
+	}
+}
+
+// A file with no hunks to sign off is still waiting, so a going hunk by hunk
+// stops at its heading rather than stepping over it unread.
+func TestAStopsAtAFileWithNoHunks(t *testing.T) {
+	repo := twoHunkRepo(t)
+	writeFile(t, repo.Dir, "baz.bin", "\x00\x01\x02binary\x00")
+	m := modelFor(t, repo)
+	if got := pathsOf(m); !slices.Equal(got, []string{"bar.txt", "baz.bin", "foo.txt"}) {
+		t.Fatalf("the review holds %v, want baz.bin between the two", got)
+	}
+	if n := len(fileIn(t, m, "baz.bin").blocks); n != 0 {
+		t.Fatalf("baz.bin has %d hunks; the test wants a file with none", n)
+	}
+	m = onLine(t, m, "bar.txt", '+', "")
+	m = drive(t, m, letterKey("a"))
+	if f, ok := m.view.file(); !ok || f.path != "baz.bin" || m.view.rows[m.view.cursor].kind != rowFile {
+		t.Errorf("after bar.txt's last hunk the cursor is not on baz.bin's heading (status %q)", m.status)
+	}
+}
+
+// cursorDiffLine is the diff line the review cursor is on, in a given file.
+func cursorDiffLine(m Model, path string) (git.DiffLine, bool) {
+	r, ok := m.view.row()
+	if !ok || r.kind != rowDiff || r.file < 0 || m.view.files[r.file].path != path {
+		return git.DiffLine{}, false
+	}
+	return m.view.files[r.file].rowLine(r.line)
 }
 
 // gapLines counts the lines of a file that an opened gap has let out.
