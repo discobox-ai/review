@@ -41,6 +41,10 @@ type System interface {
 	Rename(oldPath, newPath string) error
 	Stat(path string) (FileInfo, error)
 
+	// MkdirAll makes a directory and any above it that are missing: the one
+	// a review kept outside any repository lives in (see pkg/store).
+	MkdirAll(path string) error
+
 	// Lock takes the exclusive lock the file at path stands for, creating the
 	// file if need be, and returns what lets go of it. It is what makes a
 	// read of a file followed by a write of it one step when several
@@ -142,6 +146,10 @@ func (Local) RemoveAll(path string) error { return os.RemoveAll(path) }
 
 // Rename moves a file over another.
 func (Local) Rename(oldPath, newPath string) error { return os.Rename(oldPath, newPath) }
+
+// MkdirAll makes a directory, and any above it, readable only by its owner: a
+// review is somebody's own until they hand it over.
+func (Local) MkdirAll(path string) error { return os.MkdirAll(path, 0o700) }
 
 // ErrLocked is what taking a lock fails with when somebody else held it for
 // longer than the caller was willing to wait.

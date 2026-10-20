@@ -192,6 +192,15 @@ func (f *fakeSystem) RemoveAll(path string) error {
 	return nil
 }
 
+func (f *fakeSystem) MkdirAll(path string) error {
+	f.fileCalls = append(f.fileCalls, "mkdir "+path)
+	if f.dirs == nil {
+		f.dirs = map[string]bool{}
+	}
+	f.dirs[path] = true
+	return nil
+}
+
 func (f *fakeSystem) Lock(path string, _ time.Duration) (func(), error) {
 	f.fileCalls = append(f.fileCalls, "lock "+path)
 	return func() { f.fileCalls = append(f.fileCalls, "unlock "+path) }, nil
