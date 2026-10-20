@@ -58,9 +58,10 @@ const maxLexLines = 10000
 
 // Model is the review window.
 type Model struct {
-	// src is the change under review, and the rest are what it can do
-	// besides: carry a comment through a commit, keep the review, and change
-	// the working tree. Each is nil when the source cannot.
+	// src is the change under review, and carrier and wt what it can do
+	// besides: carry a comment through a commit, and change the working
+	// tree. Each is nil when the source cannot. store is where the review is
+	// kept, nil when it is kept nowhere.
 	src     source.Source
 	carrier source.Carrier
 	store   source.Store
@@ -208,9 +209,19 @@ type Options struct {
 	// out.
 	Base string
 
-	// Author is the name the comments written here are filed under, which the
-	// caller has already resolved — the window never guesses it.
+	// Author is the name the comments and approvals written here are filed
+	// under, which the caller has already resolved — the window never
+	// guesses it.
 	Author string
+
+	// Store is where the review is kept: its comments, its approvals, the
+	// base. The window over a Git working tree is given the repository; a
+	// window over a pull request, a directory of its own (see pkg/store).
+	// With none, the change is read with no review over it — nothing to
+	// approve, nowhere to comment — and the window offers neither. Nor does
+	// it with no Author: an approval or a remark is somebody's, and the
+	// window will not file one under nobody.
+	Store source.Store
 
 	// Embedded is the window drawn inside another program. Closing it sends
 	// [ClosedMsg] for that program to act on, rather than ending it.
@@ -233,12 +244,12 @@ type Options struct {
 
 // New builds the window over a source.
 //
-// What it offers follows from what src is. A source that is also a
-// [source.Store] keeps a review, and one that is not is read with no review
-// over it: nothing to approve and nowhere to comment, and the window offers
-// neither. A source that is also a [source.Worktree] can change branch, open a
-// file in the editor and be measured from any base; one that is not has those
-// keys left out, of the help as well.
+// What it offers follows from what it is given. With [Options.Store] and an
+// [Options.Author] the review is kept there; missing either, the change is
+// read with no review over it: nothing to approve and nowhere to comment, and
+// the window offers neither. A source that is also a [source.Worktree] can
+// change branch, open a file in the editor and be measured from any base; one
+// that is not has those keys left out, of the help as well.
 //
 // The window reads its source first from [Model.Init], and every later
 // reading waits for that one: a program embedding the window runs Init's
@@ -289,18 +300,21 @@ func New(src source.Source, opts Options) Model {
 		gapsOpen:   map[hunkKey]bool{},
 		rv:         review.New(""),
 		author:     opts.Author,
+		store:      opts.Store,
 		rescanning: true, // Init's
 		mouse:      newMouseState(),
 	}
+	if m.author == "" {
+		m.store = nil
+	}
 	m.carrier, _ = src.(source.Carrier)
-	m.store, _ = src.(source.Store)
 	m.wt, _ = src.(source.Worktree)
 	m.keys = newKeyMap().without(m.missing(), opts.Reserved)
 	m.view.readOnly = m.store == nil
 	return m
 }
 
-// errNoStore is what a write fails with when the source keeps no review. The
+// errNoStore is what a write fails with when the window keeps no review. The
 // window offers no command that writes one, so it is never seen but by
 // something that reached past the keys.
 var errNoStore = errors.New("nothing here keeps a review")

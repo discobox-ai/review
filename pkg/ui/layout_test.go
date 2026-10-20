@@ -16,7 +16,7 @@ import (
 // is the same window with the files opened, which is where reading starts.
 func freshTestModel(t *testing.T) Model {
 	t.Helper()
-	m := New(testRepo(t), Options{Base: "main", Author: "Test"})
+	m := newOver(testRepo(t), Options{Base: "main", Author: "Test"})
 	return drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40}, m.rescanCmd()())
 }
 

@@ -12,6 +12,8 @@
   discobox console shows a pull request in it).
 - `pkg/source`: what the window reads a change from; a Git working tree is one
   source, a pull request another.
+- `pkg/store`: a review kept in a directory of its own, for a source with no
+  git directory (a pull request).
 - `internal/git`: every git invocation and all file access, behind `git.System`.
 - `internal/review`: the review document — approvals, threads — and its store.
 - `internal/cli`: the subcommands, discobox-review without the window.
