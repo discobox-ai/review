@@ -2034,6 +2034,9 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	undo := func() { maps.Copy(m.hunks, was) }
 	path, digest, author := f.path, f.digest, m.author
 	withdraw := f.approved || f.hunkApproved(hunk)
+	order := m.view.paths()
+	row, _ := m.view.diffRowAt(path, head)
+	screen := row - m.view.offset
 
 	// The decision is made against the review as it is read back inside
 	// mutate, not as it was last drawn: something else — an agent, another
@@ -2092,8 +2095,111 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	default:
 		m.setOK("Approved a hunk of " + path + " · " + plural(left, "hunk", "hunks") + " to go")
 	}
-	m.view.goToDiffLine(path, head)
+	// The rows were laid out again around the file's heading, which may be
+	// far above the pane. It is the hunk that changed shape, so it is the
+	// hunk's header that keeps its place on the screen.
+	m.view.hold(path, head, screen)
+	if withdraw || !m.advance(order, path, hunk) {
+		m.view.goToDiffLine(path, head)
+	}
 	return m, nil
+}
+
+// advance takes the cursor on from what was just approved to the next thing
+// of the same size still waiting for the reader's verdict, so that a pressed
+// again and again reads the review from top to bottom. After a hunk that is
+// the next hunk nobody has signed off, in this file or a later one; after a
+// file, the heading of the next file. Whatever it lands on is opened if it was
+// folded, since it is about to be read.
+//
+// Arriving in another file puts its heading at the top of the pane, which is
+// where reading a file starts. A hunk in the same file is scrolled to only
+// when it is off the screen: the hunks before it were just read, and hauling
+// them out of sight every time one folds throws away the file they make sense
+// of.
+//
+// order is the files as they were drawn before the approval, since hiding
+// what is approved may have taken the one just approved off the screen. Past
+// the last file it goes on from the top, and reports false when there is
+// nothing left to go to.
+func (m *Model) advance(order []string, path string, hunk int) bool {
+	at := slices.Index(order, path)
+	if at < 0 {
+		return false
+	}
+	// A commit's hunks are not the review's, so there only files are next.
+	byHunk := hunk >= 0 && m.commit == ""
+	if f := m.shown(path); f != nil && byHunk && !f.approved {
+		if h, ok := f.nextHunk(hunk + 1); ok {
+			return m.toHunk(f, h)
+		}
+	}
+	for i := 1; i <= len(order); i++ {
+		p := order[(at+i)%len(order)]
+		f := m.shown(p)
+		if f == nil || f.approved || f.gone {
+			continue
+		}
+		h, ok := f.nextHunk(0)
+		// Coming round to the file just worked in is not arriving in it: the
+		// hunks above stay where they are, as they would going down.
+		if p == path {
+			return byHunk && ok && m.toHunk(f, h)
+		}
+		if f.folded {
+			m.folds[p] = false
+			m.rebuild()
+		}
+		if !m.view.jumpToFile(p) {
+			return false
+		}
+		// A file with no hunk to sign off — a binary one, say — is still
+		// waiting, and its heading is where a approves it. Having got this
+		// far the cursor has moved whether or not the hunk is found.
+		if byHunk && ok {
+			m.toHunk(f, h)
+		}
+		return true
+	}
+	return false
+}
+
+// shown is the file of that name on the screen, or nil when it is not there.
+func (m *Model) shown(path string) *reviewFile {
+	if i, ok := m.view.byPath[path]; ok {
+		return m.view.files[i]
+	}
+	return nil
+}
+
+// nextHunk is the first of a file's hunks from one on that is still waiting
+// to be approved.
+func (f *reviewFile) nextHunk(from int) (int, bool) {
+	for h := max(from, 0); h < len(f.blocks); h++ {
+		if len(f.blocks[h]) > 0 && !f.hunkApproved(h) {
+			return h, true
+		}
+	}
+	return 0, false
+}
+
+// toHunk puts the cursor on a hunk's header, opening the hunk if it was folded
+// by hand. A header already on the screen is not scrolled to.
+func (m *Model) toHunk(f *reviewFile, h int) bool {
+	head := slices.IndexFunc(f.lines, func(l git.DiffLine) bool { return l.Kind == '@' && l.Hunk == h })
+	if head < 0 {
+		return false
+	}
+	if f.shut[h] {
+		// Opening it lays the rows out again around the file's heading, so
+		// the header is held where it was drawn.
+		row, _ := m.view.diffRowAt(f.path, head)
+		screen := row - m.view.offset
+		m.setHunkFold(f, h, false)
+		m.rebuild()
+		m.view.hold(f.path, head, screen)
+	}
+	return m.view.goToDiffLine(f.path, head)
 }
 
 // foldFile discloses one file by name, for the mouse: the cursor is on the
@@ -2384,6 +2490,7 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	author := m.author
+	order := m.view.paths()
 	if m.rv.Approved(path, author) {
 		// Withdrawing an approval is having more to say about the file, so it
 		// opens rather than going back to how the window started.
@@ -2415,6 +2522,7 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 		st.SetHunks(path, author, all)
 	}) {
 		m.setOK("Approved " + path)
+		m.advance(order, path, -1)
 	} else {
 		undo()
 	}

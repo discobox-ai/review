@@ -1382,6 +1382,24 @@ func (v *reviewView) jumpToFile(path string) bool {
 	return true
 }
 
+// hold scrolls the pane so that one line of a file is drawn the given number
+// of rows down it, or at the top when it was above the pane, and leaves the
+// cursor alone. It does nothing when the line is not drawn.
+func (v *reviewView) hold(path string, at, screen int) {
+	if i, ok := v.diffRowAt(path, at); ok {
+		v.offset = min(max(i-max(screen, 0), 0), v.maxOffset())
+	}
+}
+
+// paths is the files on the screen, in the order they are drawn.
+func (v *reviewView) paths() []string {
+	out := make([]string, len(v.files))
+	for i, f := range v.files {
+		out[i] = f.path
+	}
+	return out
+}
+
 // fileRow is the row a file's heading is drawn on.
 func (v *reviewView) fileRow(path string) (int, bool) {
 	fi, ok := v.byPath[path]
