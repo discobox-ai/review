@@ -17,8 +17,11 @@ import (
 	"github.com/discobox-ai/review/pkg/source"
 )
 
-// Repo is a handle on a working tree, reached through a System.
+// Repo is a handle on a working tree, reached through a System. Its state
+// files are the ones in its git directory.
 type Repo struct {
+	StateDir
+
 	Dir    string // path to the top level of the working tree
 	GitDir string // path to the .git directory
 
@@ -52,6 +55,7 @@ func OpenWith(sys System, dir string) (*Repo, error) {
 	if !filepath.IsAbs(r.GitDir) {
 		r.GitDir = filepath.Join(r.Dir, r.GitDir)
 	}
+	r.StateDir = NewStateDir(sys, r.GitDir)
 	return r, nil
 }
 
@@ -692,59 +696,72 @@ func (r *Repo) UserName() string {
 // Files in the git directory
 // ---------------------------------------------------------------------------
 
-// ReadStateFile reads a file from the git directory.
-func (r *Repo) ReadStateFile(name string) (string, bool) {
-	b, err := r.sys.ReadFile(filepath.Join(r.GitDir, name))
+// StateDir is a directory of state files reached through a System: the git
+// directory, for a Repo, or a directory of its own for a review kept away from
+// any repository (see pkg/store). It is a [source.Store].
+type StateDir struct {
+	sys System
+	dir string
+}
+
+// NewStateDir is the state files in dir, reached through sys. It creates
+// nothing: dir has to be there before anything is written into it.
+func NewStateDir(sys System, dir string) StateDir { return StateDir{sys: sys, dir: dir} }
+
+var _ source.Store = StateDir{}
+
+// ReadStateFile reads a state file.
+func (d StateDir) ReadStateFile(name string) (string, bool) {
+	b, err := d.sys.ReadFile(filepath.Join(d.dir, name))
 	if err != nil {
 		return "", false
 	}
 	return string(b), true
 }
 
-// WriteStateFile writes a file into the git directory, through a temporary
-// file of its own so that a reader never catches a half written one. Reading
-// takes no lock, so the write has to be the thing that is indivisible.
+// WriteStateFile writes a state file, through a temporary file of its own so
+// that a reader never catches a half written one. Reading takes no lock, so
+// the write has to be the thing that is indivisible.
 //
 // The temporary file has one name, so two writers of the same file must not
 // be at it together: see LockStateFile.
-func (r *Repo) WriteStateFile(name, content string) error {
-	tmp := filepath.Join(r.GitDir, name+".tmp")
-	if err := r.sys.WriteFile(tmp, []byte(content)); err != nil {
+func (d StateDir) WriteStateFile(name, content string) error {
+	tmp := filepath.Join(d.dir, name+".tmp")
+	if err := d.sys.WriteFile(tmp, []byte(content)); err != nil {
 		return err
 	}
-	return r.sys.Rename(tmp, filepath.Join(r.GitDir, name))
+	return d.sys.Rename(tmp, filepath.Join(d.dir, name))
 }
 
-// LockStateFile takes the lock that a git directory file stands for, waiting
-// up to wait for whoever holds it — see [System.Lock] — and returns what lets
-// go of it. Whoever reads a state file in order to write it back holds one
-// from the read to the write.
-func (r *Repo) LockStateFile(name string, wait time.Duration) (func(), error) {
-	return r.sys.Lock(filepath.Join(r.GitDir, name), wait)
+// LockStateFile takes the lock that a state file stands for, waiting up to
+// wait for whoever holds it — see [System.Lock] — and returns what lets go of
+// it. Whoever reads a state file in order to write it back holds one from the
+// read to the write.
+func (d StateDir) LockStateFile(name string, wait time.Duration) (func(), error) {
+	return d.sys.Lock(filepath.Join(d.dir, name), wait)
 }
 
-// RemoveStateFile deletes a file from the git directory, ignoring a missing
-// file.
-func (r *Repo) RemoveStateFile(name string) error {
-	return r.sys.Remove(filepath.Join(r.GitDir, name))
+// RemoveStateFile deletes a state file, ignoring a missing file.
+func (d StateDir) RemoveStateFile(name string) error {
+	return d.sys.Remove(filepath.Join(d.dir, name))
 }
 
-// RenameStateFile moves one git directory file over another.
-func (r *Repo) RenameStateFile(from, to string) error {
-	return r.sys.Rename(filepath.Join(r.GitDir, from), filepath.Join(r.GitDir, to))
+// RenameStateFile moves one state file over another.
+func (d StateDir) RenameStateFile(from, to string) error {
+	return d.sys.Rename(filepath.Join(d.dir, from), filepath.Join(d.dir, to))
 }
 
-// StateFileExists reports whether a git directory file is present.
-func (r *Repo) StateFileExists(name string) bool {
-	_, err := r.sys.Stat(filepath.Join(r.GitDir, name))
+// StateFileExists reports whether a state file is present.
+func (d StateDir) StateFileExists(name string) bool {
+	_, err := d.sys.Stat(filepath.Join(d.dir, name))
 	return err == nil
 }
 
-// StateFileStamp reports a git directory file's stamp. A missing file has the
-// zero stamp, which is a state like any other: it is how "the review has been
+// StateFileStamp reports a state file's stamp. A missing file has the zero
+// stamp, which is a state like any other: it is how "the review has been
 // deleted" arrives.
-func (r *Repo) StateFileStamp(name string) Stamp {
-	info, err := r.sys.Stat(filepath.Join(r.GitDir, name))
+func (d StateDir) StateFileStamp(name string) Stamp {
+	info, err := d.sys.Stat(filepath.Join(d.dir, name))
 	if err != nil {
 		return Stamp{}
 	}
