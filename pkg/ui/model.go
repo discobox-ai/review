@@ -394,6 +394,10 @@ type rescanMsg struct {
 	scan  git.Scan
 	files []*reviewFile
 	err   error
+
+	// base is the ref the scan was asked to measure from, empty for the
+	// source's own choice.
+	base string
 }
 
 // commitFilesMsg is one commit's diff, together with the diffs that carry a
@@ -458,7 +462,7 @@ func (m Model) rescanCmd() tea.Cmd {
 		scan, err := src.Scan(baseRef, context)
 		scan = drawable(scan)
 		if err != nil {
-			return rescanMsg{scan: scan, err: err}
+			return rescanMsg{scan: scan, err: err, base: baseRef}
 		}
 		states := map[string]git.State{}
 		for _, f := range scan.Files {
@@ -466,7 +470,7 @@ func (m Model) rescanCmd() tea.Cmd {
 		}
 		files := buildFiles(scan.Diff, scan.Pending, states)
 		addGaps(src, "", files)
-		return rescanMsg{scan: scan, files: files}
+		return rescanMsg{scan: scan, files: files, base: baseRef}
 	}
 }
 
@@ -861,6 +865,13 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.adoptReview()
+	if !m.basePinned && m.baseRef != msg.base {
+		// The review names a base this scan was not measured from — the
+		// first scan of a session goes out before the review is read, and
+		// a command may have moved it since — so it is read again from
+		// there. It does not loop: the next one is measured from it.
+		again = tea.Batch(again, m.scan())
+	}
 	m.rebuild()
 
 	if !m.paneVisible(m.focus) {

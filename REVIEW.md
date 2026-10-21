@@ -11,3 +11,9 @@
   or the pane jumps back to the heading. Missed twice in one change:
   `TestApprovingAHunkLeavesThePaneWhereItIs`,
   `TestOpeningTheNextHunkLeavesThePaneWhereItIs`.
+- In `pkg/ui`, the first scan goes out before the review file is read, so a
+  base the file names arrives after it. `onRescan` scans again when the scan
+  it took was measured from somewhere other than `m.baseRef`; anything that
+  reads the review for the first time elsewhere has to do the same, or a
+  window opens measured from the source's own guess —
+  `TestTheWindowMeasuresFromTheSavedBase`.
