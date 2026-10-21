@@ -33,6 +33,7 @@ func commandBindings(m keyMap) []struct {
 		{"read the whole file", m.ViewKey},
 		{"read the version before", m.ViewOldKey},
 		{"read markdown", m.MarkdownKey},
+		{"read the review card", m.CardKey},
 		{"checkout", m.CheckoutKey},
 		{"rescan", m.RescanKey},
 		{"help", m.HelpKey},

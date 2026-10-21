@@ -536,6 +536,110 @@ clean · reviewed · ctx:5
 comment resolved, and nothing left in the margin. discobox-review will not get you
 there — it does not commit — but it is unambiguous about how far off you are.
 
+## The review card
+
+**A card is the meat of a change, picked out by whoever read it whole.** Of
+everything a diff touches — tests, comments, documentation, call sites that
+only follow a signature — it names the few places that need a reviewer's
+judgement, with a handful of bullets saying what changed. It is written for
+an agent to fill in, one that has been through the branch and is handing it
+to the person about to review it, and it is kept in the review beside the
+comments.
+
+With a card, the stack opens with the bullets, and the files fall into two
+groups:
+
+```
+   WHAT CHANGED
+    • Harness manifests come from bundles, not runnable images
+    • A bundle is refused for a platform layer or a whiteout
+
+   CORE · 1/6 hunks approved
+ ✓ ·  ▾ harness/imagelayer.go
+       @@ -118,9 +118,31 @@ func ComposeBundleLabels(…)
+       …
+       ▸ 48 changed, 856 unchanged lines
+       @@ -240,6 +262,8 @@ …
+   THE REST · 0/19 files approved
+ ○ ·  ▸ README.md
+ ○ ·  ▸ harness/imagelayer.go
+ …
+```
+
+**The core** is every file the card names a place in, in the order it names
+them, showing only the hunks those places fall in. What lies between two of
+them — the hunks the card did not name, and the unchanged lines around them —
+is one row, saying how much of it changed. `Space` opens it, to the hunks and
+their own rows of unchanged lines, which open as they always do. A core
+file's heading goes green once every core hunk in it is approved, whatever is
+left of the file.
+
+**The rest** is every file, whole — the core's included, since those hunks
+are part of the file too. A file in both groups is two entries in the stack:
+folding, opening and the cursor are each entry's own, and approving a hunk
+in either approves it, since it is one file.
+
+**`a` reads the core first.** After a hunk it moves to the next core hunk
+still waiting, from file to file, and only once the core is done does it go
+on to the rest the usual way. **`i`** puts the bullets away and brings them
+back.
+
+**The card's base is a recommendation.** When the review is measured from
+somewhere else the card says so, and `b` offers the card's commit first.
+Nothing else moves the base.
+
+### Writing one
+
+```sh
+discobox-review card --help          # the format, in full
+discobox-review card schema          # the JSON Schema it is held to
+discobox-review card set card.json   # check it, and keep it (- for stdin)
+discobox-review card                 # print it
+discobox-review card clear
+```
+
+```json
+{
+  "base": "5e23e87",
+  "summary": [
+    "Harness manifests come from bundles, not runnable images",
+    "A bundle is refused for a platform layer or a whiteout"
+  ],
+  "core": [
+    "harness/imagelayer.go#L118-L148",
+    "server/internal/resources/harnessconfigs/service.go#L664-L695"
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `base` | The commit to review the change from, as a hash: usually `git merge-base HEAD origin/main` |
+| `summary` | What changed, a short bullet each, at most six |
+| `core` | The places that are the core of the change, most important first |
+| `commit` | The commit the line numbers were taken at; `card set` fills in `HEAD` |
+| `by`, `at` | Who wrote it, and when; `card set` fills in `at` |
+
+**The base is a commit, never a ref.** A ref moves, and a card's line numbers
+and its idea of where the change begins do not; `card set` refuses a base
+that is not a commit in the repository, and keeps the full hash.
+
+A place is written the way GitHub writes one, so the same text still works
+pasted into a pull request:
+
+| Place | |
+| --- | --- |
+| `path#L12-L20` | lines 12 to 20, as the working tree has them |
+| `path#L12` | one line |
+| `path` | the whole file |
+| `path?side=old#L4-L9` | lines the change removed, as the base has them |
+
+A hunk is core when a line it changed is inside a place. **`card set` refuses
+a card that does not hold**, and says everything wrong with it at once, each
+where in the card it is: a field the schema does not have, a base that is not
+a commit, a path that is not in the change measured from the card's base, a
+line past the end of its file.
+
 ## The review file
 
 Everything above is kept in **`.git/discobox-review.json`**.
@@ -588,7 +692,7 @@ This is the review the pictures above were taken of, as it stands on disk:
 
 | Field | Meaning |
 | --- | --- |
-| `version` | The schema version, so a reader can tell whether it understands what it is looking at |
+| `version` | The schema version, so a reader can tell whether it understands what it is looking at: 3 for a review with a card, 2 for one without |
 | `branch`, `base` | What this review is of, and what it is measured from |
 | `files[].verdicts[]` | What each reviewer has made of the file, one to a name; see [Whose approval](#whose-approval) |
 | `…verdicts[].by` | Whose verdict it is |
@@ -602,6 +706,7 @@ This is the review the pictures above were taken of, as it stands on disk:
 | `threads[].text` | The line as it read when the comment was written — nothing depends on it, which is the point: it is there so the file can be read on its own |
 | `threads[].origin` | The commit the remark was written against, when it was not the working tree |
 | `threads[].resolved` | Whether anybody still needs to do something about it |
+| `card` | The review card, when somebody has written one; see [The review card](#the-review-card) |
 
 ### Driving it from a command line
 
@@ -702,6 +807,7 @@ none of that, which `git apply` will take.
 | `delete <id> [n]` | a conversation, or one remark of it |
 | `approve <path>…` | sign off a file, as `--by`; anybody else's approval of it stands |
 | `unapprove --by <who> <path>…` | take that reviewer's approval back; `--all` in place of `--by` for everybody's |
+| `card [set <file>\|- \| clear \| schema] [--json]` | the review card; see [Writing one](#writing-one) |
 | `status [--by <who>]` | what is left to do, one fact to a line |
 | `help [<command>]` | the list, or one command in full |
 
@@ -771,6 +877,10 @@ it — written by hand, without a `by` — stays nobody's: it counts for `status
 shows in the second column as `✓ by nobody named`, and is never taken for
 yours. One from a version newer than the program is refused rather than half
 understood.
+
+A review with a card is written as version 3, and one without as version 2, so
+a discobox-review from before cards goes on reading every review it can, and
+refuses one with a card rather than writing it back without.
 
 Where a name has two verdicts on a file — a reviewer whose approval fell adding
 a fresh one by hand under the one that is there — the later one stands.

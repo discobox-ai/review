@@ -17,3 +17,17 @@
   reads the review for the first time elsewhere has to do the same, or a
   window opens measured from the source's own guess —
   `TestTheWindowMeasuresFromTheSavedBase`.
+- In `pkg/ui`, a file in the review card's core is two entries in the stack.
+  Anything that finds an entry again after the rows are laid out — the
+  cursor (`cursorAnchor`, and `mark` across a resize), a fold, a hunk's or a
+  gap's open state, the comment box — goes by `reviewFile.id()`, not the
+  path; only what acts on the review uses the path, and what resets a fold
+  for a verdict resets both entries'. Going by the path lands on the rest's
+  entry. Missed in three places in one change:
+  `TestTheTwoEntriesOfAFileFoldApart`, `TestAResizeKeepsTheCursorInItsEntry`,
+  `TestApprovingAFileFoldsBothEntries`.
+- In `pkg/ui`, a new kind of row is checked against every key that reaches
+  the cursor's row — `a`, `c`, `r`, `x`, `X`, `Space` — and carries what it
+  needs in a field of its own, not one another kind means something by. A
+  stretch first approved the hunks it hides and passed for a conversation:
+  `TestAStretchIsNotApprovedUnseen`.

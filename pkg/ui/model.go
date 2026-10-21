@@ -171,8 +171,12 @@ type Model struct {
 
 	dialog *dialog
 	md     *mdView
-	file   *fileView
-	quit   bool
+
+	// cardHidden puts the review card's summary away, leaving the files in
+	// the groups it sorts them into.
+	cardHidden bool
+	file       *fileView
+	quit       bool
 
 	// rects is where each pane was last drawn, title row included, so a click
 	// can be resolved to the pane under it. layout fills it in, which keeps
@@ -1189,6 +1193,8 @@ func (m *Model) rebuild() {
 	// folding: most open comments are a reviewer and an author still talking,
 	// and a reader who has signed the file off has asked not to be shown it.
 	// The title goes on counting the open ones, hidden or not.
+	// The card's tallies are of the whole review, hidden files and all.
+	all := slices.Clone(files)
 	hidden, hiddenOpen := 0, 0
 	if m.hideDone {
 		kept := files[:0]
@@ -1203,6 +1209,7 @@ func (m *Model) rebuild() {
 		files = kept
 	}
 
+	files, m.view.card = m.groupByCard(files, all)
 	m.view.setFiles(files, m.commit, label)
 	m.view.hidden, m.view.hiddenOpen = hidden, hiddenOpen
 	m.view.note = m.emptyNote()
@@ -1307,6 +1314,7 @@ func (m *Model) place(files []*reviewFile) []*reviewFile {
 			f.threads[idx] = append(f.threads[idx], t)
 		}
 		// Last, because whether a hunk folds depends on what is said in it.
+		m.markCore(f)
 		f.shut = m.shutFor(f)
 	}
 
@@ -1366,7 +1374,7 @@ func hunkKeysIn(commit string, f *reviewFile) []hunkKey {
 	named := -1
 	for _, l := range f.lines {
 		if l.Hunk > named && l.Hunk < len(keys) && (l.Kind == '+' || l.Kind == '-') {
-			keys[l.Hunk] = hunkKey{commit: commit, path: f.path, old: l.Old, new: l.New}
+			keys[l.Hunk] = hunkKey{commit: commit, path: f.id(), old: l.Old, new: l.New}
 			named = l.Hunk
 		}
 	}
@@ -1392,7 +1400,7 @@ func (m *Model) runKeys(f *reviewFile) [][]hunkKey {
 		switch l.Kind {
 		case '+', '-':
 			if !in {
-				keys[l.Hunk] = append(keys[l.Hunk], hunkKey{commit: m.commit, path: f.path, old: l.Old, new: l.New})
+				keys[l.Hunk] = append(keys[l.Hunk], hunkKey{commit: m.commit, path: f.id(), old: l.Old, new: l.New})
 				in = true
 			}
 		case ' ', '@':
@@ -1417,7 +1425,7 @@ func (m *Model) setHunkFold(f *reviewFile, hunk int, shut bool) {
 // gapKeys names each of a file's gaps: one is known by the hunk that follows
 // it, and the one after the last hunk by there being none.
 func gapKeys(commit string, f *reviewFile) []hunkKey {
-	return append(hunkKeysIn(commit, f), hunkKey{commit: commit, path: f.path, old: -1, new: -1})
+	return append(hunkKeysIn(commit, f), hunkKey{commit: commit, path: f.id(), old: -1, new: -1})
 }
 
 // reopenGaps opens, in a diff that has just been read, the gaps the reader had
@@ -1645,6 +1653,8 @@ func (m Model) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.doViewFile(sideBefore)
 	case key.Matches(msg, m.keys.MarkdownKey):
 		return m.doMarkdown()
+	case key.Matches(msg, m.keys.CardKey):
+		return m.doCard()
 	case key.Matches(msg, m.keys.CheckoutKey):
 		return m.doCheckout()
 	case key.Matches(msg, m.keys.LessContextKey):
@@ -1840,7 +1850,7 @@ func (m *Model) unfoldOpenThreads() {
 			continue
 		}
 		if f.folded {
-			m.folds[f.path], changed = false, true
+			m.folds[f.id()], changed = false, true
 		}
 		for at, ts := range f.threads {
 			if at >= len(f.lines) || !f.shut[f.lines[at].Hunk] {
@@ -1884,23 +1894,8 @@ func (m Model) gotoLine(n int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	f := m.view.files[r.file]
-	if f.folded {
-		// A line of a folded file is not drawn anywhere to go to, and asking
-		// for one by number is asking to see it.
-		m.folds[f.path] = false
-		m.rebuild()
-		f = m.view.files[r.file]
-	}
-	// The same for a folded hunk the line is in.
-	for _, l := range f.lines {
-		if l.New == n && (l.Kind == '+' || l.Kind == ' ') && l.Hunk >= 0 && f.shut[l.Hunk] {
-			m.setHunkFold(f, l.Hunk, false)
-			m.rebuild()
-			f = m.view.files[r.file]
-			break
-		}
-	}
-	row, exact, found := m.view.lineRow(r.file, n)
+	row, exact, found := m.showLine(f.id(), n, false)
+	f = m.view.files[r.file]
 	if !found {
 		m.setError(f.path + " has no line " + itoa(n) + " in this diff")
 		return m, nil
@@ -1924,6 +1919,62 @@ func (m Model) gotoLine(n int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// showLine opens whatever is keeping a numbered line of a file off the
+// screen — the file's fold, the fold of the hunk it is in, and with gaps the
+// unchanged stretch it is in between two hunks — and says which row draws it,
+// or the nearest that does: see [reviewView.lineRow].
+//
+// The line is counted in the file as it now stands.
+func (m *Model) showLine(path string, n int, gaps bool) (row int, exact, ok bool) {
+	file := func() (int, *reviewFile) {
+		fi, ok := m.view.byPath[path]
+		if !ok {
+			return -1, nil
+		}
+		return fi, m.view.files[fi]
+	}
+	fi, f := file()
+	if f == nil {
+		return 0, false, false
+	}
+	if f.folded {
+		// A line of a folded file is not drawn anywhere to go to, and asking
+		// for one by number is asking to see it.
+		m.folds[f.id()] = false
+		m.rebuild()
+		if fi, f = file(); f == nil {
+			return 0, false, false
+		}
+	}
+	// The same for a folded hunk the line is in.
+	for _, l := range f.lines {
+		if l.New == n && (l.Kind == '+' || l.Kind == ' ') && l.Hunk >= 0 && f.shut[l.Hunk] {
+			m.setHunkFold(f, l.Hunk, false)
+			m.rebuild()
+			if fi, f = file(); f == nil {
+				return 0, false, false
+			}
+			break
+		}
+	}
+	if gaps {
+		keys := gapKeys(m.commit, f)
+		for g, gp := range f.gaps {
+			if gp.open || gp.n == 0 || n < gp.new || n >= gp.new+gp.n || g >= len(keys) {
+				continue
+			}
+			m.gapsOpen[keys[g]] = true
+			f.setGap(g, true)
+			m.rebuild()
+			if fi, f = file(); f == nil {
+				return 0, false, false
+			}
+			break
+		}
+	}
+	return m.view.lineRow(fi, n)
+}
+
 // doDisclose is Space, and Enter: it opens and shuts what the cursor is on, and
 // makes nothing new. A key for looking at things should not start writing
 // them, which is why a comment begins with c and with nothing else.
@@ -1936,6 +1987,15 @@ func (m Model) gotoLine(n int) (tea.Model, tea.Cmd) {
 func (m Model) doDisclose() (tea.Model, tea.Cmd) {
 	r, ok := m.view.row()
 	if !ok {
+		return m, nil
+	}
+	if r.kind == rowStretch {
+		// What lies between two core hunks opens, and shuts again, in place.
+		m.view.stretchOpen[r.stretch] = !m.view.stretchOpen[r.stretch]
+		i := m.view.cursor
+		m.view.build()
+		m.view.cursor = min(i, max(len(m.view.rows)-1, 0))
+		m.view.clamp()
 		return m, nil
 	}
 	if r.kind == rowThread {
@@ -1988,8 +2048,9 @@ func (m Model) doGap(f *reviewFile, g int) (tea.Model, tea.Cmd) {
 	} else {
 		delete(m.gapsOpen, keys[g])
 	}
+	// The core's view of a file keeps gaps of its own: see Model.coreEntry.
 	f.setGap(g, open)
-	path := f.path
+	path := f.id()
 	m.rebuild()
 	m.view.goToDiffLine(path, f.gapRow(g))
 	return m, nil
@@ -2004,7 +2065,7 @@ func (m Model) doFold() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	m.folds[f.path] = !f.folded
+	m.folds[f.id()] = !f.folded
 	m.rebuild()
 	return m, nil
 }
@@ -2028,7 +2089,7 @@ func (m *Model) cursorHunk() (*reviewFile, int, bool) {
 func (m Model) doFoldHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	hunk := f.lines[head].Hunk
 	m.setHunkFold(f, hunk, !f.shut[hunk])
-	path := f.path
+	path := f.id()
 	m.rebuild()
 	m.view.goToDiffLine(path, head)
 	return m, nil
@@ -2058,9 +2119,10 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	}
 	undo := func() { maps.Copy(m.hunks, was) }
 	path, digest, author := f.path, f.digest, m.author
+	key := f.id()
 	withdraw := f.approved || f.hunkApproved(hunk)
 	order := m.view.paths()
-	row, _ := m.view.diffRowAt(path, head)
+	row, _ := m.view.diffRowAt(key, head)
 	screen := row - m.view.offset
 
 	// The decision is made against the review as it is read back inside
@@ -2113,8 +2175,10 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	case withdraw:
 		m.setOK("Approval withdrawn from this hunk of " + path)
 	case promoted:
-		// Deciding about a file hands its fold back to the rule too.
+		// Deciding about a file hands its fold back to the rule too, in
+		// both of its entries when the card's core has it.
 		delete(m.folds, path)
+		delete(m.folds, coreKey(path))
 		m.rebuild()
 		m.setOK("Approved " + path)
 	default:
@@ -2123,9 +2187,9 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	// The rows were laid out again around the file's heading, which may be
 	// far above the pane. It is the hunk that changed shape, so it is the
 	// hunk's header that keeps its place on the screen.
-	m.view.hold(path, head, screen)
-	if withdraw || !m.advance(order, path, hunk) {
-		m.view.goToDiffLine(path, head)
+	m.view.hold(key, head, screen)
+	if withdraw || !m.advance(order, key, hunk) {
+		m.view.goToDiffLine(key, head)
 	}
 	return m, nil
 }
@@ -2152,9 +2216,15 @@ func (m *Model) advance(order []string, path string, hunk int) bool {
 	if at < 0 {
 		return false
 	}
+	// The core of the change is read before the rest of it.
+	if m.commit == "" && m.nextCore(order, at, hunk) {
+		return true
+	}
 	// A commit's hunks are not the review's, so there only files are next.
 	byHunk := hunk >= 0 && m.commit == ""
-	if f := m.shown(path); f != nil && byHunk && !f.approved {
+	// The core's view of a file draws only its core hunks, so the rest of
+	// them are reached in the file's own entry, under the rest.
+	if f := m.shown(path); f != nil && byHunk && !f.approved && !f.coreView {
 		if h, ok := f.nextHunk(hunk + 1); ok {
 			return m.toHunk(f, h)
 		}
@@ -2162,7 +2232,7 @@ func (m *Model) advance(order []string, path string, hunk int) bool {
 	for i := 1; i <= len(order); i++ {
 		p := order[(at+i)%len(order)]
 		f := m.shown(p)
-		if f == nil || f.approved || f.gone {
+		if f == nil || f.approved || f.gone || f.coreView {
 			continue
 		}
 		h, ok := f.nextHunk(0)
@@ -2218,13 +2288,13 @@ func (m *Model) toHunk(f *reviewFile, h int) bool {
 	if f.shut[h] {
 		// Opening it lays the rows out again around the file's heading, so
 		// the header is held where it was drawn.
-		row, _ := m.view.diffRowAt(f.path, head)
+		row, _ := m.view.diffRowAt(f.id(), head)
 		screen := row - m.view.offset
 		m.setHunkFold(f, h, false)
 		m.rebuild()
-		m.view.hold(f.path, head, screen)
+		m.view.hold(f.id(), head, screen)
 	}
-	return m.view.goToDiffLine(f.path, head)
+	return m.view.goToDiffLine(f.id(), head)
 }
 
 // foldFile discloses one file by name, for the mouse: the cursor is on the
@@ -2235,7 +2305,7 @@ func (m Model) foldFile(path string) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	m.folds[path] = !m.view.files[i].folded
+	m.folds[m.view.files[i].id()] = !m.view.files[i].folded
 	m.rebuild()
 	return m, nil
 }
@@ -2267,7 +2337,7 @@ func (m *Model) hiddenOpenNote() string {
 // files still to read, and everything else is noise between them.
 func (m Model) doHideDone() (tea.Model, tea.Cmd) {
 	m.hideDone = !m.hideDone
-	path := m.view.pathAt()
+	path := m.view.keyAt()
 	m.rebuild()
 	if m.hideDone {
 		// The file being read may have been one of the ones that went.
@@ -2370,18 +2440,18 @@ func (m Model) doFoldAll() (tea.Model, tea.Cmd) {
 			break
 		}
 	}
-	path := m.view.pathAt()
+	path := m.view.keyAt()
 
 	kept := 0
 	for _, f := range m.view.files {
 		switch {
 		case fold:
-			m.folds[f.path] = true
+			m.folds[f.id()] = true
 		case f.done():
-			delete(m.folds, f.path)
+			delete(m.folds, f.id())
 			kept++
 		default:
-			m.folds[f.path] = false
+			m.folds[f.id()] = false
 		}
 	}
 	// Unless there is nothing else left, in which case the second press has to
@@ -2389,7 +2459,7 @@ func (m Model) doFoldAll() (tea.Model, tea.Cmd) {
 	// have a key that looks broken.
 	if !fold && kept == len(m.view.files) {
 		for _, f := range m.view.files {
-			m.folds[f.path] = false
+			m.folds[f.id()] = false
 		}
 		kept = 0
 	}
@@ -2509,18 +2579,27 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 		m.setWarn("Nothing changed on these lines — a on the file's heading approves the file")
 		return m, nil
 	}
+	// The hunks a stretch stands for are not on the screen, and approving
+	// them unseen is not reading them.
+	if r, ok := m.view.row(); ok && r.kind == rowStretch && m.focus == focusReview {
+		m.setWarn("These hunks are not core · Space shows them, and a approves them one at a time")
+		return m, nil
+	}
 	path, ok := m.target()
 	if !ok {
 		m.setError("No file to approve")
 		return m, nil
 	}
 	author := m.author
-	order := m.view.paths()
+	order, key := m.view.paths(), m.view.keyAt()
 	if m.rv.Approved(path, author) {
 		// Withdrawing an approval is having more to say about the file, so it
 		// opens rather than going back to how the window started.
-		undo := m.keepFolds(path)
+		undo := m.keepFolds(path, coreKey(path))
 		m.folds[path] = false
+		if _, core := m.view.byPath[coreKey(path)]; core {
+			m.folds[coreKey(path)] = false
+		}
 		if m.mutate(func(st *review.State) { st.Unapprove(path, author) }) {
 			m.setOK("Approval withdrawn from " + path)
 		} else {
@@ -2535,8 +2614,10 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 	}
 	// Approving a file hands its fold back to the rule every file starts
 	// with, so one approved after F opened everything still goes away.
-	undo := m.keepFolds(path)
+	// Both of its entries, when the card's core has it.
+	undo := m.keepFolds(path, coreKey(path))
 	delete(m.folds, path)
+	delete(m.folds, coreKey(path))
 	digest := f.digest
 	// The hunks go in with the file, so that if the file is edited and the
 	// approval falls, the hunks the edit did not touch are still signed off.
@@ -2547,7 +2628,7 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 		st.SetHunks(path, author, all)
 	}) {
 		m.setOK("Approved " + path)
-		m.advance(order, path, -1)
+		m.advance(order, key, -1)
 	} else {
 		undo()
 	}
@@ -2695,7 +2776,13 @@ func (m Model) openCompose(c *compose) (tea.Model, tea.Cmd) {
 	if c.thread == "" {
 		line = c.at
 	}
-	m.view.draft = &draft{path: c.path, line: line, thread: c.thread}
+	// The box goes into the entry the cursor is in: a file in the card's
+	// core is in the stack twice, and the box is drawn once.
+	key := m.view.keyAt()
+	if key == "" {
+		key = c.path
+	}
+	m.view.draft = &draft{path: c.path, key: key, line: line, thread: c.thread}
 	m.refreshDraft()
 	if first, last, ok := m.view.draftSpan(); ok {
 		m.view.cursor = first
@@ -2799,7 +2886,7 @@ func (m *Model) closeDraft(thread string) {
 			return
 		}
 	case d != nil && d.line >= 0:
-		if i, ok := m.view.diffRowAt(d.path, d.line); ok {
+		if i, ok := m.view.diffRowAt(d.key, d.line); ok {
 			m.view.reveal(i)
 			return
 		}
@@ -2933,6 +3020,14 @@ func (m Model) doChooseBase() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	items := []string{autoBase}
+	// The commit the review card says to review from comes first, when the
+	// review is not measured from it already: it is the one somebody who
+	// read the change whole chose.
+	card := ""
+	if c := m.rv.Card; c != nil && c.Base != "" && !m.sameBase(c.Base) {
+		card = cardBase + abbrevHash(c.Base)
+		items = []string{card, autoBase}
+	}
 	items = append(items, m.wt.Refs()...)
 	items = append(items, commitBase, otherBase)
 	m.dialog = listDialog("Review base",
@@ -2940,6 +3035,11 @@ func (m Model) doChooseBase() (tea.Model, tea.Cmd) {
 			"The review is everything between its merge base with that ref\n"+
 			"and the working tree.",
 		items, func(choice string) tea.Cmd {
+			if card != "" && choice == card {
+				// Short, as the commit picker names a commit: the base is
+				// what the bar shows.
+				choice = abbrevHash(m.rv.Card.Base)
+			}
 			return func() tea.Msg { return baseChosenMsg{ref: choice} }
 		})
 	return m, nil
@@ -2986,6 +3086,7 @@ func commitItem(c git.Commit) string {
 const (
 	autoBase   = "(let Discobox Review choose)"
 	commitBase = "Pick a commit…"
+	cardBase   = "The review card's base  "
 	otherBase  = "Other ref…"
 )
 
