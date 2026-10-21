@@ -537,6 +537,8 @@ func (m Model) helpText() string {
 		"    v  read the whole file" + pair + "      o  read it as the base has it",
 		"    e  edit the file in $EDITOR",
 		"    m  read a markdown file, rendered, full screen",
+		"    i  hide or show the review card's summary; with a card, a",
+		"       works through the core's hunks before the rest",
 		"    R  rescan (also F5)" + pair + "       -  /  =   less / more context",
 		"    z  zoom the pane to the whole window (Alt-Z anywhere)",
 		"",

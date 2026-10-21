@@ -43,8 +43,10 @@ flowchart LR
   through `git.System`; `Local` is the real one. A test fails if anything
   outside `system.go` runs a command or touches a file.
 - `internal/review` is the review document — approvals by reviewer and by
-  hunk, digests, threads — and the store that reads and writes it under a
-  lock. It does no I/O of its own; the caller's `System` does.
+  hunk, digests, threads, the review card — and the store that reads and
+  writes it under a lock. It does no I/O of its own; the caller's `System`
+  does. The card's format is `card.schema.json`, embedded, which `ParseCard`
+  holds a card to.
 - `internal/cli` is the subcommands: the same review, driven without the
   window, for scripts and agents.
 
@@ -59,6 +61,12 @@ readable; `internal/review` owns it. The commands read only the git
 directory's.
 
 ## Reading and drawing
+
+With a review card the stack is two groups, the core and the rest
+(`pkg/ui/card.go`). A file in both is two entries: the core's is a copy of
+the file's own, made on every rebuild with lines and gaps of its own and
+keyed apart (`reviewFile.id`), so the stack finds, folds and keeps the cursor
+in each entry by its id and acts on the review by its path.
 
 A rescan is a fixed dozen or so git commands whatever the size of the change,
 and parsing and lexing happen off the render path. The window polls its review

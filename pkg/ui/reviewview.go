@@ -27,12 +27,14 @@ import (
 type rowKind uint8
 
 const (
-	rowFile   rowKind = iota // the band naming a file, and its verdict
-	rowDiff                  // one line of that file's diff
-	rowThread                // one line of a comment thread
-	rowDraft                 // one line of the comment being written
-	rowGap                   // the blank line between two files
-	rowEmpty                 // "nothing to review", when there is nothing
+	rowFile    rowKind = iota // the band naming a file, and its verdict
+	rowDiff                   // one line of that file's diff
+	rowThread                 // one line of a comment thread
+	rowDraft                  // one line of the comment being written
+	rowGap                    // the blank line between two files
+	rowEmpty                  // "nothing to review", when there is nothing
+	rowBanner                 // a line of the review card above the files, or a group's heading
+	rowStretch                // what lies between two core hunks, in the core's view of a file
 )
 
 // threadStyle picks the ink for a thread row: the rule down its left edge is
@@ -59,6 +61,7 @@ type reviewRow struct {
 	// remark be deleted out of a conversation rather than all of them.
 	comment int
 	first   bool   // the first row of a thread, which is what t and T land on
+	stretch string // for a rowStretch, which stretch it stands for: see reviewFile.stretches
 	text    string // the text of a thread or note row
 	style   threadStyle
 	marked  bool // the line's change has not been committed yet
@@ -129,12 +132,26 @@ type reviewFile struct {
 	others     []string
 	othersFell []string
 	folded     bool
-	shut       map[int]bool             // the hunks folded away, by index into the patch
-	signed     map[string]bool          // the runs of changed lines approved one hunk at a time
-	threads    map[int][]*review.Thread // by index into lines
-	loose      []*review.Thread         // in this file, but on no line of it
-	open       int
-	total      int
+	shut       map[int]bool // the hunks folded away, by index into the patch
+
+	// core is set for a file the review card names a core place in, and
+	// coreHunks holds the hunks those places fall in. The rest of such a
+	// file's hunks fold away until they are asked for.
+	core      bool
+	coreHunks map[int]bool
+
+	// key names this entry in the stack, which a file has two of when it is
+	// in the card's core: the core's view of it, keyed apart, and the whole
+	// of it under the rest. Empty for the file's own entry, keyed by its path.
+	// coreView is set for the core's: only the core hunks are drawn, and what
+	// lies between them is one row until it is opened.
+	key      string
+	coreView bool
+	signed   map[string]bool          // the runs of changed lines approved one hunk at a time
+	threads  map[int][]*review.Thread // by index into lines
+	loose    []*review.Thread         // in this file, but on no line of it
+	open     int
+	total    int
 }
 
 // rowRef names the diff lines one drawn row shows.
@@ -462,6 +479,34 @@ func (f *reviewFile) gapText(i int) string {
 	return mark + plural(f.gaps[g].n, "unchanged line", "unchanged lines")
 }
 
+// coreDone reports whether, in the core's view of a file, every core hunk has
+// been approved: what that view is for has been read, whatever is left of
+// the file under the rest.
+func (f *reviewFile) coreDone() bool {
+	if !f.coreView || f.open > 0 {
+		return false
+	}
+	n := 0
+	for h := range f.blocks {
+		if !f.coreHunks[h] || len(f.blocks[h]) == 0 {
+			continue
+		}
+		if !f.hunkApproved(h) {
+			return false
+		}
+		n++
+	}
+	return n > 0
+}
+
+// id is what the stack knows this entry by: see key.
+func (f *reviewFile) id() string {
+	if f.key != "" {
+		return f.key
+	}
+	return f.path
+}
+
 // hidden reports whether a line is inside a folded hunk. The hunk's own header
 // is not: it is the row the fold leaves behind, and what opens it again.
 func (f *reviewFile) hidden(i int) bool {
@@ -562,6 +607,7 @@ func (f *reviewFile) done() bool { return f.approved && f.open == 0 }
 // write it is what you will be looking at when you read it back.
 type draft struct {
 	path   string // the file it belongs to
+	key    string // the entry of the stack it is drawn in: see reviewFile.key
 	line   int    // index into that file's diff lines, -1 when it follows a thread
 	thread string // the thread being replied to, empty for a new comment
 
@@ -641,6 +687,15 @@ type reviewView struct {
 	// then the other does not quietly move the cursor across.
 	onOld bool
 
+	// stretchOpen holds the stretches between core hunks the reader has
+	// opened, by the key reviewFile.stretches gives each.
+	stretchOpen map[string]bool
+
+	// card is what the review card puts in the stack: its summary above the
+	// files, and the headings of the two groups they fall into — the core
+	// first, then the rest. nil without a card.
+	card *cardBanner
+
 	// hidden counts the files left out because the reader has approved them. They are
 	// still part of the review, so the tally still counts them; they are just
 	// not on the screen.
@@ -667,7 +722,7 @@ func newReviewView() *reviewView {
 	// preference rather than a demand — see splitting.
 	return &reviewView{
 		split: true, anchor: -1,
-		expanded: map[string]bool{}, byPath: map[string]int{},
+		expanded: map[string]bool{}, byPath: map[string]int{}, stretchOpen: map[string]bool{},
 	}
 }
 
@@ -679,7 +734,7 @@ func (v *reviewView) setFiles(files []*reviewFile, commit, label string) {
 	v.files, v.commit, v.label = files, commit, label
 	v.byPath = make(map[string]int, len(files))
 	for i, f := range files {
-		v.byPath[f.path] = i
+		v.byPath[f.id()] = i
 	}
 	v.anchor = -1
 	v.restore(a)
@@ -707,10 +762,10 @@ func (v *reviewView) cursorAnchor() place {
 	f := v.files[r.file]
 	for i := v.cursor; i >= 0; i-- {
 		if v.rows[i].kind == rowFile && v.rows[i].file == r.file {
-			return place{path: f.path, within: v.cursor - i, screen: max(i-v.offset, -1)}
+			return place{path: f.id(), within: v.cursor - i, screen: max(i-v.offset, -1)}
 		}
 	}
-	return place{path: f.path, screen: -1}
+	return place{path: f.id(), screen: -1}
 }
 
 // restore puts the cursor back where cursorAnchor found it, as nearly as the
@@ -834,21 +889,37 @@ func (v *reviewView) build() {
 
 	rows := make([]reviewRow, 0, 256)
 	if len(v.files) == 0 {
+		// The card goes on saying what it says with nothing to review, which
+		// is when its word on the base matters most.
+		if v.card != nil {
+			rows = append(rows, v.card.rows(v.contentWidth())...)
+		}
 		v.rows = append(rows, reviewRow{kind: rowEmpty, file: -1, line: -1})
 		v.builtAt = v.width
 		return
 	}
 	wrapAt := max(v.contentWidth()-threadIndent-2, 16)
 	split := v.splitting()
+	if v.card != nil {
+		rows = append(rows, v.card.rows(v.contentWidth())...)
+	}
 	for fi, f := range v.files {
 		f.buildRows(split)
+		if v.card != nil {
+			switch {
+			case fi == 0 && v.card.core > 0:
+				rows = append(rows, reviewRow{kind: rowBanner, file: -1, line: -1, first: true, text: v.card.coreHead})
+			case fi == v.card.core:
+				rows = append(rows, reviewRow{kind: rowBanner, file: -1, line: -1, first: true, text: v.card.restHead})
+			}
+		}
 		rows = append(rows, reviewRow{kind: rowFile, file: fi, line: -1})
 		if f.folded {
 			// No gap under a folded file: the gap is what ends a diff, and a
 			// run of folded files with nothing between them reads as a list.
 			continue
 		}
-		mine, placed := v.draft != nil && v.draft.path == f.path, false
+		mine, placed := v.draft != nil && v.draft.key == f.id(), false
 		for _, t := range f.loose {
 			rows = append(rows, v.threadRows(t, fi, -1, wrapAt, true)...)
 			if mine && v.draft.thread == t.ID {
@@ -861,7 +932,19 @@ func (v *reviewView) build() {
 		if mine && v.draft.thread == "" && v.draft.line >= 0 && v.draft.line < len(f.rowAt) {
 			draftRow = f.rowAt[v.draft.line]
 		}
+		stretch := f.stretches()
 		for i := range f.rows {
+			// In the core's view of a file, what lies between two core hunks
+			// is one row until it is opened.
+			if st, in := stretch[i]; in {
+				if st.first == i {
+					rows = append(rows, reviewRow{kind: rowStretch, file: fi, line: i, stretch: st.key,
+						text: st.label(v.stretchOpen[st.key])})
+				}
+				if !v.stretchOpen[st.key] {
+					continue
+				}
+			}
 			// A folded hunk is its header and nothing else: the lines under it
 			// go, and the conversations hung off them go with them.
 			if f.hidden(f.primary(i)) {
@@ -936,7 +1019,7 @@ func (v *reviewView) mark() spot {
 		return s
 	}
 	f := v.files[r.file]
-	s.path = f.path
+	s.path = f.id()
 	s.head = r.kind == rowFile
 	s.thread = r.thread
 	if r.kind == rowDiff {
@@ -1395,7 +1478,7 @@ func (v *reviewView) hold(path string, at, screen int) {
 func (v *reviewView) paths() []string {
 	out := make([]string, len(v.files))
 	for i, f := range v.files {
-		out[i] = f.path
+		out[i] = f.id()
 	}
 	return out
 }
@@ -1422,7 +1505,7 @@ func (v *reviewView) fileRow(path string) (int, bool) {
 // The index is -1 when the cursor is not on a line at all — a heading, a
 // comment — which is a place the pane keeps by other means.
 func (v *reviewView) cursorLine() (path string, at int, old bool) {
-	path = v.pathAt()
+	path = v.keyAt()
 	r, ok := v.row()
 	if !ok || r.kind != rowDiff || r.file < 0 {
 		return path, -1, false
@@ -1449,6 +1532,15 @@ func (v *reviewView) goToDiffLine(path string, at int) bool {
 	}
 	v.reveal(i)
 	return true
+}
+
+// keyAt is the stack's entry the cursor is in, by its id: what to find it by
+// again once the rows are laid out anew.
+func (v *reviewView) keyAt() string {
+	if f, ok := v.file(); ok {
+		return f.id()
+	}
+	return ""
 }
 
 // pathAt is the file the cursor is in.
@@ -1729,17 +1821,23 @@ func (v *reviewView) view(st *styles, focused bool, rv *review.State) string {
 // A file hidden by the filter is still part of the review and still counted
 // here. It went off the screen because it was approved, and a tally that
 // forgot it would report a review shrinking as it was completed.
+//
+// A file in the review card's core is counted once: its core entry is a
+// second view of it, not a second file.
 func (v *reviewView) tally(rv *review.State) string {
-	total := len(v.files) + v.hidden
-	if total == 0 || v.readOnly {
-		// A reading with no review over it has nothing done or to do.
-		return ""
-	}
-	approved := v.hidden // everything hidden is approved: that is why it went
+	total, approved := v.hidden, v.hidden // everything hidden is approved: that is why it went
 	for _, f := range v.files {
+		if f.coreView {
+			continue
+		}
+		total++
 		if f.approved {
 			approved++
 		}
+	}
+	if total == 0 || v.readOnly {
+		// A reading with no review over it has nothing done or to do.
+		return ""
 	}
 	s := itoa(approved) + "/" + itoa(total) + " approved"
 	if rv != nil {
@@ -1851,6 +1949,13 @@ func (v *reviewView) content(i int, st *styles, avail int) string {
 		return fitANSI(v.draft.lines[r.line], avail)
 	case rowEmpty:
 		return st.dimText.Render(pad(v.note, avail))
+	case rowStretch:
+		return st.diffHunk.Render(pad(truncate(r.text, avail), avail))
+	case rowBanner:
+		if r.first {
+			return st.titleDim.Render(pad(truncate(r.text, avail), avail))
+		}
+		return st.dimText.Render(pad(truncate(r.text, avail), avail))
 	}
 	return strings.Repeat(" ", avail)
 }
@@ -1941,7 +2046,7 @@ func statInk(st *styles, band lipgloss.Style, tail string) string {
 // file somebody else has approved still reads here as one to be read.
 func (f *reviewFile) verdict() string {
 	switch {
-	case f.approved:
+	case f.approved, f.coreDone():
 		return "✓"
 	case f.nullified:
 		return "◈"
@@ -1954,7 +2059,7 @@ func (f *reviewFile) verdict() string {
 // verdictStyle is the ink the verdict is drawn in.
 func (f *reviewFile) verdictStyle(st *styles) lipgloss.Style {
 	switch {
-	case f.approved:
+	case f.approved, f.coreDone():
 		return st.verdictOK
 	case f.nullified:
 		return st.verdictStale
@@ -2254,4 +2359,87 @@ func emphAt(e []emphasis, i int) emphasis {
 		return emphasis{}
 	}
 	return e[i]
+}
+
+// stretch is a run of a file's rows in the core's view that holds no core
+// hunk: the hunks the card did not name, and the unchanged lines around them.
+type stretch struct {
+	key              string
+	first            int // the row it starts at
+	changed, unmoved int
+}
+
+func (s *stretch) label(open bool) string {
+	mark := "▸ "
+	if open {
+		mark = "▾ "
+	}
+	if s.changed == 0 {
+		return mark + plural(s.unmoved, "unchanged line", "unchanged lines")
+	}
+	return mark + itoa(s.changed) + " changed, " + plural(s.unmoved, "unchanged line", "unchanged lines")
+}
+
+// stretches maps each row of the core's view of a file that lies outside the
+// core hunks to the stretch it is in. A stretch with nothing changed in it is
+// left out: it is only a gap, and draws as one.
+func (f *reviewFile) stretches() map[int]*stretch {
+	if !f.coreView {
+		return nil
+	}
+	out := map[int]*stretch{}
+	var cur *stretch
+	var rows []int
+	flush := func() {
+		if cur != nil && cur.changed > 0 {
+			for _, r := range rows {
+				out[r] = cur
+			}
+		}
+		cur, rows = nil, nil
+	}
+	for i := range f.rows {
+		l := f.lines[f.primary(i)]
+		if l.Hunk >= 0 && f.coreHunks[l.Hunk] {
+			flush()
+			continue
+		}
+		if cur == nil {
+			cur = &stretch{key: f.path + "\x00" + itoa(i), first: i}
+		}
+		rows = append(rows, i)
+		for _, side := range [2]int{f.rows[i].old, f.rows[i].new} {
+			if side < 0 {
+				continue
+			}
+			switch f.lines[side].Kind {
+			case 'g':
+				if g, ok := f.gapAt(side); ok && !f.gaps[g].open {
+					cur.unmoved += f.gaps[g].n
+				}
+			case '+', '-':
+				cur.changed++
+			case ' ':
+				cur.unmoved++
+			}
+			// A row drawing one line in both halves counts it once.
+			if f.rows[i].old == f.rows[i].new {
+				break
+			}
+		}
+	}
+	flush()
+	// Keyed by the hunk that follows, so that opening one survives more
+	// context: the row it starts at does not.
+	for _, st := range out {
+		next := -1
+		for i := st.first; i < len(f.rows); i++ {
+			if h := f.lines[f.primary(i)].Hunk; h >= 0 && f.coreHunks[h] {
+				next = h
+				break
+			}
+		}
+		st.key = f.path + "\x00" + itoa(next)
+	}
+	return out
 }

@@ -26,5 +26,15 @@ pass `-base main` to the window, or `discobox-review base main` for the CLI.
   Space opens a file, `s` toggles split/unified, `a` approves, Ctrl-Q quits.
   The CLI sees what the window wrote (`status --by me`).
 
-Gotcha: a window opened without `-base` after `discobox-review base main`
-still says "from HEAD" (as of 2026-10-15).
+A window opened without `-base` measures from the base the review saved
+(`discobox-review base main`).
+
+- **Review card:** `card set --by claude card.json` (or `-` for stdin) with
+  `{"base": "<7+ hex of git merge-base HEAD main>", "summary": ["…"], "core":
+  ["f.go#L4"]}`; `card`, `card --json`, `card schema`, `card clear`. A file
+  of 60 numbered lines with three edits far apart gives core hunks with a
+  `▸ N changed, M unchanged lines` stretch between them. Keep `card.json`
+  outside the repo, or it shows up in the review as untracked.
+- The installed `/usr/local/bin/discobox-review` may predate a change to the
+  review file's version and refuse it ("wants upgrading"): drive
+  `build/discobox-review`.

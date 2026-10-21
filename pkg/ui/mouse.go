@@ -459,7 +459,7 @@ func (m Model) mousePress(x, y int, block bool) (tea.Model, tea.Cmd) {
 	// up without a selection having been made.
 	if f == focusReview {
 		if row, is := m.view.row(); is && row.kind == rowFile {
-			m.mouse.foldPath, m.mouse.foldAt = m.view.pathAt(), [2]int{line, col}
+			m.mouse.foldPath, m.mouse.foldAt = m.view.keyAt(), [2]int{line, col}
 		}
 	}
 	return m, cmd

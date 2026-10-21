@@ -66,6 +66,7 @@ type keyMap struct {
 	ViewKey     key.Binding
 	ViewOldKey  key.Binding
 	MarkdownKey key.Binding
+	CardKey     key.Binding
 	CheckoutKey key.Binding
 	RescanKey   key.Binding
 	HelpKey     key.Binding
@@ -159,6 +160,9 @@ func newKeyMap() keyMap {
 		ViewKey:     key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "read the whole file")),
 		ViewOldKey:  key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "read it as the base has it")),
 		MarkdownKey: key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "read markdown")),
+		// i for what the change is about: the review card's summary above
+		// the stack, put away and brought back.
+		CardKey:     key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "hide or show the review card's summary")),
 		CheckoutKey: key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "check out a branch")),
 		RescanKey:   key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rescan")),
 
