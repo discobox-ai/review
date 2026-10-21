@@ -58,3 +58,14 @@ card and as version 2 when it has none.
   cannot parse makes the whole review unreadable, so changing its shape is a
   version change like any other, with old cards read the way version 1
   reviews still are.
+
+## Deferred
+
+Carrying a card's places when the tree moves after it was written. A card is
+checked against the change as it stands when it is set, and its places are
+line numbers in that tree — as a comment's are, which are not carried either.
+Edit or commit on top of it and the window's core can land on the wrong
+hunks without saying so. Revisit when cards outlive one round of review: when
+an agent writes a card and somebody keeps working on the branch before it is
+read, `card set` would record a snapshot to carry the places from, through
+the same diff a comment written against a commit is carried by.

@@ -36,7 +36,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "discobox-review:", err)
 			os.Exit(1)
 		}
-		if err := cli.Run(repo, os.Args[1:], os.Stdout); err != nil {
+		if err := cli.Run(repo, os.Args[1:], os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "discobox-review:", err)
 			os.Exit(1)
 		}

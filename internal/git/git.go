@@ -342,6 +342,25 @@ func (r *Repo) HasHEAD() bool {
 	return err == nil
 }
 
+// CommitOf is the full hash of the commit rev names, and false when it names
+// none.
+func (r *Repo) CommitOf(rev string) (string, bool) {
+	out, err := r.run("rev-parse", "--verify", "--quiet", rev+"^{commit}")
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(out), true
+}
+
+// Head is the commit checked out, in full, or empty when there is none yet.
+func (r *Repo) Head() string {
+	out, err := r.run("rev-parse", "--verify", "--quiet", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
 // IsMerging reports whether a merge is in progress.
 func (r *Repo) IsMerging() bool { return r.StateFileExists("MERGE_HEAD") }
 
@@ -608,6 +627,12 @@ func (r *Repo) FileContent(commit, path string) (string, error) {
 		return string(b), nil
 	}
 	return r.run("show", commit+":"+path)
+}
+
+// ReadInput reads a file somebody named on a command line — a path of their
+// own, relative to where the command was run, not to the repository.
+func (r *Repo) ReadInput(path string) ([]byte, error) {
+	return r.sys.ReadFile(path)
 }
 
 // EditAt opens a file as it stands in a commit, or in the working tree when

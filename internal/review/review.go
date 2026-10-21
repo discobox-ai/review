@@ -46,10 +46,18 @@ func safeBranch(branch string) string {
 // Version is the schema version written into every file. It exists so that a
 // reader can tell whether it understands what it is looking at.
 //
-// 2 is the version in which a file carries a verdict for each reviewer. 1 kept
-// a single approval on the file itself, signed by whoever gave it last; a
-// review written that way is still read — see [File.UnmarshalJSON].
-const Version = 2
+// 3 is the version in which a review can carry a [Card]. 2 is the one in which
+// a file carries a verdict for each reviewer; 1 kept a single approval on the
+// file itself, signed by whoever gave it last, and a review written that way
+// is still read — see [File.UnmarshalJSON].
+//
+// A review is written as 3 only when it has a card, and as 2 otherwise: a
+// discobox-review from before cards reads every review that has none, and
+// refuses one that has, rather than reading it and writing it back without.
+const Version = 3
+
+// versionWithout is the version a review with no card is written as.
+const versionWithout = 2
 
 // Sides a comment can be anchored to. "new" numbers lines in the working tree
 // as it stands now, "old" numbers them in the file as the base has it. Those
@@ -75,6 +83,10 @@ type State struct {
 
 	// Threads are the comments, in the order they were started.
 	Threads []*Thread `json:"threads"`
+
+	// Card is what the change is and where to look in it, as whoever read it
+	// whole wrote it down; nil when nobody has.
+	Card *Card `json:"card,omitempty"`
 }
 
 // Of reports whether this can be the review of branch. One that names no
@@ -308,7 +320,10 @@ func (s *State) normalise() {
 // order, so that two saves of the same state produce the same bytes and a
 // human diffing the file sees only what really changed.
 func (s *State) Bytes() []byte {
-	s.Version = Version
+	s.Version = versionWithout
+	if s.Card != nil {
+		s.Version = Version
+	}
 	s.normalise()
 	if s.Files == nil {
 		s.Files = []*File{}
