@@ -3973,7 +3973,8 @@ func TestAMovesOnToTheNextHunk(t *testing.T) {
 // scrolled off the top: the hunk folds in place and the next one comes up
 // under it, rather than the heading being hauled back into view.
 func TestApprovingAHunkLeavesThePaneWhereItIs(t *testing.T) {
-	m := New(twoHunkRepo(t), Options{Base: "main", Author: "Test"})
+	repo := twoHunkRepo(t)
+	m := New(repo, Options{Base: "main", Author: "Test", Store: repo})
 	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()())
 	m = opened(m)
 	m = onLine(t, m, "foo.txt", '+', "FOUR")
@@ -3999,7 +4000,7 @@ func TestOpeningTheNextHunkLeavesThePaneWhereItIs(t *testing.T) {
 	// pane to stay where it is with both of foo.txt's hunks folded.
 	repo := twoHunkRepo(t)
 	writeFile(t, repo.Dir, "zed.txt", strings.Repeat("zed\n", 40))
-	m := New(repo, Options{Base: "main", Author: "Test"})
+	m := New(repo, Options{Base: "main", Author: "Test", Store: repo})
 	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()())
 	m = opened(m)
 	m.setHunkFold(fileIn(t, m, "foo.txt"), 1, true)
@@ -4041,7 +4042,8 @@ func TestAOpensTheNextHunkIfFolded(t *testing.T) {
 // waiting for approval: it opens that file and puts its heading at the top of
 // the pane, where reading it starts.
 func TestALastHunkMovesOnToTheNextFilesHunk(t *testing.T) {
-	m := New(twoHunkRepo(t), Options{Base: "main", Author: "Test"})
+	repo := twoHunkRepo(t)
+	m := New(repo, Options{Base: "main", Author: "Test", Store: repo})
 	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()())
 	m = onLine(t, m, "bar.txt", '+', "")
 	m = drive(t, m, letterKey("a"))
@@ -4062,7 +4064,8 @@ func TestALastHunkMovesOnToTheNextFilesHunk(t *testing.T) {
 // a on a file's heading goes on to the heading of the next file nobody has
 // approved, opens it, and puts it at the top of the pane.
 func TestAMovesOnToTheNextFile(t *testing.T) {
-	m := New(twoHunkRepo(t), Options{Base: "main", Author: "Test"})
+	repo := twoHunkRepo(t)
+	m := New(repo, Options{Base: "main", Author: "Test", Store: repo})
 	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 16}, m.rescanCmd()())
 	m = cursorTo(t, m, func(r reviewRow) bool {
 		return r.kind == rowFile && m.view.files[r.file].path == "bar.txt"
@@ -4114,7 +4117,7 @@ func TestAComingRoundStaysPut(t *testing.T) {
 		// enough below for the pane to stay where it is.
 		repo := twoHunkRepo(t)
 		writeFile(t, repo.Dir, "zed.txt", strings.Repeat("zed\n", 40))
-		m := New(repo, Options{Base: "main", Author: "Test"})
+		m := New(repo, Options{Base: "main", Author: "Test", Store: repo})
 		m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: h}, m.rescanCmd()())
 		m = onLine(t, m, "zed.txt", '+', "")
 		m = drive(t, m, letterKey("a"))
