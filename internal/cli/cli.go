@@ -142,6 +142,16 @@ var Commands = []Command{
 		Example: "discobox-review unapprove --by reviewer internal/git/git.go",
 	},
 	{
+		Name: "card", Args: "[set <file>|- | clear | schema] [--json]", What: "what the change is, and where to look",
+		Flags: []string{"by", "json"}, ByOptional: true,
+		FlagHelp: map[string]string{
+			"by":   "who wrote the card, for set — the card's own by when left out",
+			"json": "the card as it is stored, rather than as it reads",
+		},
+		Long:    cardHelp,
+		Example: "discobox-review card set card.json",
+	},
+	{
 		Name: "status", Args: "[--by <who>]", What: "what is left to do, one fact to a line",
 		Flags: []string{"base", "by"}, ByOptional: true,
 		FlagHelp: map[string]string{"by": "whose approvals to count — git-user for git's own user.name; anybody's when left out"},
@@ -171,6 +181,7 @@ var flagHelp = map[string]string{
 	"side":     "old, to anchor to a line the change removed",
 	"open":     "only what is still open",
 	"resolved": "only what is not",
+	"json":     "as JSON",
 }
 
 // find is the command a word names.
@@ -208,8 +219,9 @@ func Is(word string) bool {
 // comes back.
 const lockWait = time.Minute
 
-// Run carries out one subcommand. args is the command and its arguments.
-func Run(repo *git.Repo, args []string, out io.Writer) error {
+// Run carries out one subcommand. args is the command and its arguments, and
+// in is what a command reading "-" reads.
+func Run(repo *git.Repo, args []string, in io.Reader, out io.Writer) error {
 	if len(args) == 0 || (args[0] == "help" && len(args) == 1) {
 		Usage(out)
 		return nil
@@ -253,6 +265,9 @@ func Run(repo *git.Repo, args []string, out io.Writer) error {
 	// write, rather than this copy going back over whatever landed since.
 	// base with nothing after it is one of them: it says what the base is.
 	reads := cmd == "base" && len(rest) == 0 && !opts.auto
+	if cmd == "card" {
+		return card(out, in, repo, branch, rest, opts)
+	}
 	switch cmd {
 	case "diff", "list", "status", "show":
 		reads = true
@@ -385,6 +400,7 @@ type options struct {
 	raw      bool
 	open     bool
 	resolved bool
+	json     bool
 }
 
 func parseFlags(c Command, args []string) (options, []string, error) {
@@ -436,6 +452,8 @@ func parseFlags(c Command, args []string) (options, []string, error) {
 			o.open = true
 		case "resolved":
 			o.resolved = true
+		case "json":
+			o.json = true
 		default:
 			err = fmt.Errorf("no such flag: --%s", name)
 		}

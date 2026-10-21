@@ -1572,7 +1572,9 @@ func TestTheReviewFileIsPlainJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &doc); err != nil {
 		t.Fatalf("not JSON: %v\n%s", err, body)
 	}
-	if doc.Version != review.Version || doc.Branch != "feature" {
+	// A review with no card is written as version 2, which a discobox-review
+	// from before cards still reads.
+	if doc.Version != 2 || doc.Branch != "feature" {
 		t.Errorf("version %d branch %q", doc.Version, doc.Branch)
 	}
 	if len(doc.Threads) != 1 || doc.Threads[0].Comments[0].Body != "hello" {

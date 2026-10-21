@@ -39,7 +39,7 @@ func testRepo(t *testing.T) *git.Repo {
 	// A base, the way choosing one in the window records it: without one and
 	// with no remote to guess from, the review is only what is uncommitted.
 	var out strings.Builder
-	if err := Run(r, []string{"base", "main"}, &out); err != nil {
+	if err := Run(r, []string{"base", "main"}, strings.NewReader(""), &out); err != nil {
 		t.Fatal(err)
 	}
 	return r
@@ -65,7 +65,7 @@ func write(t *testing.T, dir, name, body string) {
 func run(t *testing.T, repo *git.Repo, args ...string) string {
 	t.Helper()
 	var out strings.Builder
-	if err := Run(repo, args, &out); err != nil {
+	if err := Run(repo, args, strings.NewReader(""), &out); err != nil {
 		t.Fatalf("discobox-review %s: %v", strings.Join(args, " "), err)
 	}
 	return out.String()
@@ -75,7 +75,7 @@ func run(t *testing.T, repo *git.Repo, args ...string) string {
 func fails(t *testing.T, repo *git.Repo, args ...string) {
 	t.Helper()
 	var out strings.Builder
-	if err := Run(repo, args, &out); err == nil {
+	if err := Run(repo, args, strings.NewReader(""), &out); err == nil {
 		t.Errorf("discobox-review %s succeeded, printing %q", strings.Join(args, " "), out.String())
 	}
 }
@@ -435,7 +435,7 @@ func TestShowingTheBaseTakesNoLock(t *testing.T) {
 	answered := make(chan string, 1)
 	go func() {
 		var out strings.Builder
-		if err := Run(repo, []string{"base"}, &out); err != nil {
+		if err := Run(repo, []string{"base"}, strings.NewReader(""), &out); err != nil {
 			out.WriteString(err.Error())
 		}
 		answered <- out.String()
@@ -467,7 +467,7 @@ func TestCommandsRunTogetherAllLand(t *testing.T) {
 				return
 			}
 			var out strings.Builder
-			errs <- Run(r, []string{"comment", "--by", "a" + strconv.Itoa(i%3), "server.go:4", "c" + strconv.Itoa(i)}, &out)
+			errs <- Run(r, []string{"comment", "--by", "a" + strconv.Itoa(i%3), "server.go:4", "c" + strconv.Itoa(i)}, strings.NewReader(""), &out)
 		}()
 		// And readers among them, each with a digest to stamp or find stamped.
 		go func() {
@@ -477,7 +477,7 @@ func TestCommandsRunTogetherAllLand(t *testing.T) {
 				return
 			}
 			var out strings.Builder
-			errs <- Run(r, []string{"status"}, &out)
+			errs <- Run(r, []string{"status"}, strings.NewReader(""), &out)
 		}()
 	}
 	for range 2 * n {
@@ -612,7 +612,7 @@ func TestRefusals(t *testing.T) {
 // help is a command, and names every other one.
 func TestHelpNamesEveryCommand(t *testing.T) {
 	var out strings.Builder
-	if err := Run(testRepo(t), []string{"help"}, &out); err != nil {
+	if err := Run(testRepo(t), []string{"help"}, strings.NewReader(""), &out); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range Commands {
@@ -848,7 +848,7 @@ func TestEveryRemarkIsSigned(t *testing.T) {
 	} {
 		fails(t, repo, args...)
 		var out strings.Builder
-		err := Run(repo, args, &out)
+		err := Run(repo, args, strings.NewReader(""), &out)
 		if err == nil || !strings.Contains(err.Error(), GitUser) {
 			t.Errorf("%s refused with %v, want it to name --by %s", args[0], err, GitUser)
 		}
@@ -891,7 +891,7 @@ func TestFlagsBelongToTheirCommands(t *testing.T) {
 
 	// The refusal says where to look.
 	var out strings.Builder
-	err := Run(repo, []string{"list", "--stat"}, &out)
+	err := Run(repo, []string{"list", "--stat"}, strings.NewReader(""), &out)
 	if err == nil || !strings.Contains(err.Error(), "discobox-review list --help") {
 		t.Errorf("refusal = %v, want it to point at the command's own help", err)
 	}
