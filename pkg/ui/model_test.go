@@ -4736,3 +4736,24 @@ func newOver(repo *git.Repo, opts Options) Model {
 	opts.Store = repo
 	return New(repo, opts)
 }
+
+// A window opened on a review measured from somewhere is measured from
+// there, though the first scan goes out before the review has been read.
+func TestTheWindowMeasuresFromTheSavedBase(t *testing.T) {
+	repo := testRepo(t)
+	err := review.Update(repo, repo.CurrentBranch(), time.Second, func(st *review.State) error {
+		st.Base = "main"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(repo, Options{Author: "Test", Store: repo})
+	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40}, m.rescanCmd()())
+	if m.base.Ref != "main" {
+		t.Fatalf("the review is measured from %q, want main as the review file says", m.base.Ref)
+	}
+	if fileIn(t, m, "beta.go") == nil {
+		t.Error("beta.go, committed on the branch, is not in the review")
+	}
+}
