@@ -38,3 +38,10 @@ A window opened without `-base` measures from the base the review saved
 - The installed `/usr/local/bin/discobox-review` may predate a change to the
   review file's version and refuse it ("wants upgrading"): drive
   `build/discobox-review`.
+- **A pull request, as the discobox console runs it:** push the branch with
+  `-u` to a bare `origin` (its upstream is then itself), leave an edit
+  uncommitted, then
+  `discobox-review -by git-user -base <sha> -head <pushed sha> -fallback-base origin/main`.
+  A `-base` sha the repo lacks says `no such ref: …; measured from origin/main`.
+  `cmp` the review file before and after: opening a `-head` window writes
+  nothing; an approval made in it is saved under git's user.

@@ -25,6 +25,12 @@ type Repo struct {
 	Dir    string // path to the top level of the working tree
 	GitDir string // path to the .git directory
 
+	// FallbackBase is what a base named but not found here is measured from
+	// instead, when the caller knows better than the branch's own upstream:
+	// a pull request's base branch, for a base commit fetched after this
+	// repository last was. Empty falls back as though no base was named.
+	FallbackBase string
+
 	sys System
 }
 
@@ -376,45 +382,70 @@ func (r *Repo) ResolveBase(ref string, hasHEAD bool) Base {
 	if !hasHEAD {
 		return Base{Ref: "the empty tree", SHA: EmptyTree, Commit: abbrev(EmptyTree), Auto: true}
 	}
+	return r.resolveBase(ref, "HEAD")
+}
+
+// resolveBase is ResolveBase measured to tip, a revision that names a commit:
+// HEAD for the working tree, or the commit a [Snapshot] is of. Falling back,
+// it falls back to tip, under the name tip has.
+func (r *Repo) resolveBase(ref, tip string) Base {
 	auto := ref == ""
 	var failed string
-	if ref != "" {
-		if _, err := r.run("rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
-			failed, ref = "no such ref: "+ref, ""
+	if ref != "" && !r.isCommit(ref) {
+		failed, ref = "no such ref: "+ref, ""
+		switch {
+		case r.FallbackBase == "":
+		case r.isCommit(r.FallbackBase):
+			failed += "; measured from " + r.FallbackBase
+			ref = r.FallbackBase
+		default:
+			failed += ", nor " + r.FallbackBase
 		}
 	}
 	if ref == "" {
 		ref, _ = r.baseRef()
 	}
-	if ref == "" {
-		// Nothing to measure against: review what is not committed.
-		sha, _ := r.run("rev-parse", "HEAD")
+	fallback := func() Base {
+		// Nothing to measure against: review what tip has not committed,
+		// which for a commit is nothing.
+		sha, _ := r.run("rev-parse", tip)
 		sha = strings.TrimSpace(sha)
-		return Base{Ref: "HEAD", SHA: sha, Commit: abbrev(sha), Auto: true, Err: failed}
+		name := tip
+		if tip != "HEAD" {
+			name = abbrev(sha)
+		}
+		return Base{Ref: name, SHA: sha, Commit: abbrev(sha), Auto: true, Err: failed}
+	}
+	if ref == "" {
+		return fallback()
 	}
 
 	b := Base{Ref: ref, Auto: auto, Err: failed}
-	out, err := r.run("merge-base", "HEAD", ref)
+	out, err := r.run("merge-base", tip, ref)
 	if err != nil {
 		// Unrelated histories have no merge base; measure from the ref itself.
 		out, err = r.run("rev-parse", ref+"^{commit}")
 		if err != nil {
-			sha, _ := r.run("rev-parse", "HEAD")
-			sha = strings.TrimSpace(sha)
-			return Base{Ref: "HEAD", SHA: sha, Commit: abbrev(sha), Auto: true, Err: failed}
+			return fallback()
 		}
 	}
 	b.SHA = strings.TrimSpace(out)
 	b.Commit = abbrev(b.SHA)
 	// --left-right counts both sides of the fork in one pass: commits reachable
-	// only from HEAD, then only from ref.
-	if out, err := r.run("rev-list", "--left-right", "--count", "HEAD..."+ref); err == nil {
+	// only from tip, then only from ref.
+	if out, err := r.run("rev-list", "--left-right", "--count", tip+"..."+ref); err == nil {
 		if fields := strings.Fields(out); len(fields) == 2 {
 			b.Ahead, _ = strconv.Atoi(fields[0])
 			b.Behind, _ = strconv.Atoi(fields[1])
 		}
 	}
 	return b
+}
+
+// isCommit reports whether rev names a commit this repository has.
+func (r *Repo) isCommit(rev string) bool {
+	_, err := r.run("rev-parse", "--verify", "--quiet", rev+"^{commit}")
+	return err == nil
 }
 
 // abbrevLen is how much of a hash is shown, matching git's own default.

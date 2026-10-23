@@ -4759,3 +4759,155 @@ func TestTheWindowMeasuresFromTheSavedBase(t *testing.T) {
 		t.Error("beta.go, committed on the branch, is not in the review")
 	}
 }
+
+// A base the window was given and the source could not find is not written
+// into the review: the commands, and the next window, would be measured from
+// a commit nothing here has.
+func TestABaseNotFoundIsNotSaved(t *testing.T) {
+	repo := testRepo(t)
+	m := New(repo, Options{Base: "1234567890abcdef1234567890abcdef12345678", Author: "Test", Store: repo})
+	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40}, m.rescanCmd()())
+	if m.base.Err == "" {
+		t.Fatal("the missing base was not reported")
+	}
+	if !m.mutate(func(st *review.State) { st.Card = nil }) {
+		t.Fatal("the write was refused")
+	}
+	if got := savedBase(t, repo); got != "" {
+		t.Errorf("the review is measured from %q after a write, want nothing saved", got)
+	}
+
+	// A base chosen with b is saved once a scan has found it, whatever the
+	// last scan said of the one before it.
+	m = drive(t, m, baseChosenMsg{ref: "main"})
+	if got := savedBase(t, repo); got != "main" {
+		t.Errorf("a base chosen and found: saved %q, want main", got)
+	}
+	// And one chosen that names nothing is said, and not saved, though the
+	// scan before it was fine.
+	m = drive(t, m, baseChosenMsg{ref: "no/such/ref"})
+	if m.base.Err == "" {
+		t.Error("the missing base was not reported")
+	}
+	if got := savedBase(t, repo); got != "main" {
+		t.Errorf("a base chosen that names nothing: saved %q, want main still", got)
+	}
+}
+
+// savedBase is the base the review file names.
+func savedBase(t *testing.T, repo *git.Repo) string {
+	t.Helper()
+	data, ok := repo.ReadStateFile(review.FileName)
+	if !ok {
+		return ""
+	}
+	st, err := review.Parse([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Base
+}
+
+// A window over one commit of the branch (Options.Apart) judges the review's
+// approvals against that commit on screen and never saves the verdict: the
+// working tree is what they hold for, and the commands go by it. What the
+// person at it approves is saved as ever.
+func TestAWindowApartDoesNotStrikeTheTreesApprovals(t *testing.T) {
+	repo := testRepo(t)
+	tree := New(repo, Options{Base: "main", Author: "Test", Store: repo})
+	tree = drive(t, tree, tea.WindowSizeMsg{Width: 140, Height: 40}, tree.rescanCmd()())
+	digest := fileIn(t, tree, "foo.txt").digest
+	err := review.Update(repo, repo.CurrentBranch(), time.Second, func(st *review.State) error {
+		st.Approve("foo.txt", digest, "agent")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The commit leaves out the tree's uncommitted FOUR, so foo.txt is
+	// another change there.
+	snap, err := repo.Snapshot("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(snap, Options{Base: "main", Author: "Test", Store: repo, Apart: true})
+	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40}, m.rescanCmd()())
+	if m.rv.Approved("foo.txt", "agent") {
+		t.Error("the tree's approval is shown as holding for the commit")
+	}
+	m = onLine(t, m, "foo.txt", '+', "TWO")
+	drive(t, m, letterKey("a"))
+	data, _ := repo.ReadStateFile(review.FileName)
+	st, err := review.Parse([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := st.VerdictOf("foo.txt", "agent"); v == nil || !v.Approved || v.Digest != digest {
+		t.Errorf("the tree's approval on disk is %+v, want it as the agent left it", v)
+	}
+	if !st.Approved("foo.txt", "Test") {
+		t.Error("the approval made in the window was not saved")
+	}
+	if st.Base != "" {
+		t.Errorf("the window saved its base %q", st.Base)
+	}
+}
+
+// Approving one hunk in a window apart decides about the rest of the file as
+// the window shows it, not as the tree's approval on disk says: an approval
+// of the tree's version is no sign-off of this commit's other hunks.
+func TestAHunkApprovedApartLeavesTheRestOfTheFile(t *testing.T) {
+	repo := twoHunkRepo(t)
+	gitRun(t, repo.Dir, "commit", "-qam", "the change")
+	// The tree moves past the commit the window is of, and the file is
+	// approved as the tree has it.
+	writeFile(t, repo.Dir, "bar.txt", "gamma\n")
+	gitRun(t, repo.Dir, "commit", "-qam", "past the head")
+	tree := New(repo, Options{Base: "main", Author: "Test", Store: repo})
+	tree = drive(t, tree, tea.WindowSizeMsg{Width: 140, Height: 40}, tree.rescanCmd()())
+	writeFile(t, repo.Dir, "foo.txt", strings.Replace(readText(t, repo.Dir, "foo.txt"), "line 20\n", "TWENTY\n", 1))
+	tree = drive(t, tree, tree.rescanCmd()())
+	digest := fileIn(t, tree, "foo.txt").digest
+	err := review.Update(repo, repo.CurrentBranch(), time.Second, func(st *review.State) error {
+		st.Approve("foo.txt", digest, "Test")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := repo.Snapshot("HEAD~1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(snap, Options{Base: "main", Author: "Test", Store: repo, Apart: true})
+	m = drive(t, m, tea.WindowSizeMsg{Width: 140, Height: 40}, m.rescanCmd()())
+	if len(fileIn(t, m, "foo.txt").blocks) != 2 {
+		t.Fatal("foo.txt has not two hunks at the commit")
+	}
+	m = opened(m)
+	m = onLine(t, m, "foo.txt", '+', "FOUR")
+	drive(t, m, letterKey("a"))
+	data, _ := repo.ReadStateFile(review.FileName)
+	st, err := review.Parse([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := st.VerdictOf("foo.txt", "Test"); v == nil || v.Digest != digest {
+		t.Errorf("one hunk approved apart replaced the file's approval: %+v", v)
+	}
+	if n := len(st.ApprovedHunks("foo.txt", "Test")); n != 1 {
+		t.Errorf("%d runs signed off, want the one approved", n)
+	}
+}
+
+// readText is a file of the working tree.
+func readText(t *testing.T, dir, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
