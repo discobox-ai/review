@@ -31,3 +31,17 @@
   needs in a field of its own, not one another kind means something by. A
   stretch first approved the hunks it hides and passed for a conversation:
   `TestAStretchIsNotApprovedUnseen`.
+- In `pkg/ui`, a base is written into the review only once a scan measured
+  from it has found it (`baseFound`): the base `b` chooses is saved when its
+  scan lands, not before, and one given on the command line with its first
+  write after. Judging it by whatever the last scan said judges the base
+  before it — `TestABaseNotFoundIsNotSaved`.
+- In `pkg/ui`, a window over a source that is not the review's own tree
+  (`Options.Apart`, `-head`) judges approvals on screen and never saves the
+  verdict, nor its base: the tree is what the commands measure approvals
+  against, and a verdict saved from another tree strikes down what holds
+  there — `TestAWindowApartDoesNotStrikeTheTreesApprovals`. A write that
+  reads approvals back inside `mutate` has to judge them as the screen does
+  first: an approval of another digest counts for nothing here, and a run
+  the commit does not show is kept, or one approved hunk approves the file —
+  `TestAHunkApprovedApartLeavesTheRestOfTheFile`.

@@ -39,7 +39,9 @@ flowchart LR
   terminal as an instruction.
 - `internal/git` is `*git.Repo`, the source the command uses: all three
   interfaces, and a `Store` too, in its git directory (`git.StateDir`, which
-  `pkg/store` reuses). Every command it runs and every file it touches goes
+  `pkg/store` reuses). `*git.Snapshot` (`-head`) is the same repository up to
+  one commit instead of the working tree: a `Source` and a `Carrier`, never a
+  `Worktree`, reviewed in the repository's own store. Every command it runs and every file it touches goes
   through `git.System`; `Local` is the real one. A test fails if anything
   outside `system.go` runs a command or touches a file.
 - `internal/review` is the review document — approvals by reviewer and by

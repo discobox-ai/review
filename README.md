@@ -37,7 +37,25 @@ go tool task install   # $GOBIN/discobox-review
 discobox-review -by git-user                   # the repository containing the current directory
 discobox-review -by git-user ~/src/foo         # a specific working tree
 discobox-review -by git-user -base origin/main # measured from a ref of your choosing
+discobox-review -by git-user -base "$base" -fallback-base origin/main -head "$head" # a pull request: up to its head commit
 ```
+
+**With `-head` the change ends at that commit instead of the working tree** —
+what a pull request is, read where its commits are, which is how the discobox
+console shows one's files changed. The review is still the branch checked
+out's, so the card, approvals and comments written on it while it was worked
+on are the ones shown. Nothing uncommitted is in it, and a commit has no
+branch to change or file to edit, so the window offers neither. It judges the
+review's approvals against the commit on screen only, and never saves that
+judgement or its base: they are the working tree's, and the commands go on
+measuring them against it. An approval or a comment made in it is saved as
+ever.
+
+**A `-base` that names nothing here is said, and measured around.** The window
+says it could not find it, and measures from `-fallback-base` when one is given
+— a pull request's base branch, when its base commit was pushed after this
+clone last fetched — and otherwise as though no base was named. A base the
+window could not find is never written into the review.
 
 **With nowhere to draw — output down a pipe, no terminal — it prints what it
 can do without one instead of opening a window.** A full screen program writing

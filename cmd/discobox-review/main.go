@@ -24,6 +24,7 @@ import (
 	"github.com/discobox-ai/review/internal/cli"
 	"github.com/discobox-ai/review/internal/git"
 	"github.com/discobox-ai/review/internal/version"
+	"github.com/discobox-ai/review/pkg/source"
 	"github.com/discobox-ai/review/pkg/ui"
 )
 
@@ -45,9 +46,11 @@ func main() {
 
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	base := flag.String("base", "", "review from this ref instead of the one Discobox Review works out")
+	head := flag.String("head", "", "review up to this commit instead of the working tree: a pull request's head")
+	fallbackBase := flag.String("fallback-base", "", "measure from this ref when the -base given is not in the repository: a pull request's base branch")
 	by := flag.String("by", "", "who the comments written in the window are from; "+cli.GitUser+" takes git's own user.name")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: discobox-review -by <who> [-version] [-base <ref>] [path]\n"+
+		fmt.Fprintf(os.Stderr, "usage: discobox-review -by <who> [-version] [-base <ref> [-fallback-base <ref>]] [-head <commit>] [path]\n"+
 			"       discobox-review <command> [args]\n\n"+
 			"Review a branch: every change from its merge base to the working\n"+
 			"tree, approved file by file and commented on line by line. With no\n"+
@@ -97,10 +100,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	repo.FallbackBase = *fallbackBase
+
+	// With a head the change ends at that commit rather than at the working
+	// tree; the review over it is still this repository's.
+	var src source.Source = repo
+	if *head != "" {
+		if src, err = repo.Snapshot(*head); err != nil {
+			fmt.Fprintln(os.Stderr, "discobox-review:", err)
+			os.Exit(1)
+		}
+	}
+
 	// The alternate screen, the mouse and the keyboard enhancements are part
 	// of what the model's view asks the screen to be, rather than options
 	// settled here — see ui.Model.View.
-	p := tea.NewProgram(ui.New(repo, ui.Options{Base: *base, Author: author, Store: repo}))
+	p := tea.NewProgram(ui.New(src, ui.Options{Base: *base, Author: author, Store: repo, Apart: *head != ""}))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "discobox-review:", err)
 		os.Exit(1)

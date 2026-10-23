@@ -113,6 +113,13 @@ type Model struct {
 	// the command line, or with b — and stops the saved review handing it
 	// back to whatever it was measured from last time.
 	basePinned bool
+	// measured is the base the last scan was asked to measure from, and
+	// baseToSave a base chosen with b that is written once a scan has found
+	// it: until then nothing says it names anything.
+	measured   string
+	baseToSave bool
+	// apart is a source that is not the tree the review is of (Options.Apart).
+	apart bool
 
 	// The working tree's own review — every change from the base — kept even
 	// while a single commit is being read, since it is the space comments are
@@ -244,6 +251,15 @@ type Options struct {
 
 	// Theme is the palette, [DefaultTheme] when it is the zero Theme.
 	Theme Theme
+
+	// Apart is a source that is not the tree the review is of: one commit of
+	// a branch (discobox-review -head), read over the review its working
+	// tree keeps. The window judges the review's approvals against what it
+	// shows, on screen only: the working tree is what the commands measure
+	// them against, and a verdict reached on another tree, saved, would
+	// strike down what holds there. Nor does it save the base it was given.
+	// What the person at it does — an approval, a comment — is saved as ever.
+	Apart bool
 }
 
 // New builds the window over a source.
@@ -293,6 +309,7 @@ func New(src source.Source, opts Options) Model {
 		focus:      focusReview,
 		baseRef:    opts.Base,
 		basePinned: opts.Base != "",
+		apart:      opts.Apart,
 		context:    defaultContext,
 		workBy:     map[string]*reviewFile{},
 		state:      map[string]git.State{},
@@ -838,6 +855,7 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 	m.branch = msg.scan.Branch
 	m.merging = msg.scan.Merging
 	m.base = msg.scan.Base
+	m.measured = msg.base
 	m.incomplete = msg.scan.Incomplete
 	if msg.scan.Base.Err != "" {
 		m.setError(msg.scan.Base.Err)
@@ -869,6 +887,17 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.adoptReview()
+	if m.baseToSave && msg.base == m.baseRef {
+		// The base chosen with b, now that a scan has measured from it.
+		m.baseToSave = false
+		if m.baseFound() && m.mutate(func(*review.State) {}) {
+			if m.baseRef == "" {
+				m.setOK("Base: whatever this branch is built on")
+			} else {
+				m.setOK("Base: " + m.baseRef)
+			}
+		}
+	}
 	if !m.basePinned && m.baseRef != msg.base {
 		// The review names a base this scan was not measured from — the
 		// first scan of a session goes out before the review is read, and
@@ -972,6 +1001,12 @@ func (m *Model) readReview() (base string) {
 	return m.rv.Base
 }
 
+// baseFound reports whether the base on screen is the one asked for, and the
+// source found it: only such a base is written into the review.
+func (m *Model) baseFound() bool {
+	return m.measured == m.baseRef && m.base.Err == ""
+}
+
 // lockWait is how long the window waits for the review's lock when the person
 // at it has asked for something. The window cannot draw or take a key while
 // it waits, so this is short: long enough to queue behind commands that each
@@ -1012,8 +1047,11 @@ func (m *Model) update(wait time.Duration, change func(*review.State)) error {
 		change(st)
 		// A base chosen here, in this session, is the window's to say. Any
 		// other is the file's: one set by a command a moment ago, which the
-		// poll has not got to yet, must not be put back by this write.
-		if m.basePinned {
+		// poll has not got to yet, must not be put back by this write. Nor
+		// is one the source could not find, which would leave the review
+		// measured from something nothing else here can read either: so it
+		// waits for a scan that was measured from it and found it.
+		if m.basePinned && !m.apart && m.baseFound() {
 			st.Base = m.baseRef
 		}
 		now = st
@@ -1024,6 +1062,10 @@ func (m *Model) update(wait time.Duration, change func(*review.State)) error {
 	}
 	m.rv, m.rvErr = now, ""
 	m.stamp = m.store.StateFileStamp(review.FileName)
+	if m.apart {
+		// What was read back is the file's own verdict, not this tree's.
+		m.reconcile(true)
+	}
 	if !m.basePinned && now.Base != m.baseRef {
 		// The base moved under the window. Every diff on screen is measured
 		// from the old one, which is the poll's business to put right: with
@@ -1126,6 +1168,11 @@ func (m *Model) reconcile(fresh bool) (undecided bool) {
 	}
 	changed, nullified := verdict(probe)
 	if !changed {
+		return false
+	}
+	if m.apart {
+		// Shown, never saved: see Options.Apart.
+		m.rv = probe
 		return false
 	}
 	if !fresh {
@@ -2135,9 +2182,27 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	// signed off though the hunk as drawn is not.
 	all := f.blocks
 	left, promoted := 0, false
+	apart := m.apart
 	if !m.mutate(func(st *review.State) {
 		approved, signed := st.Approved(path, author), st.ApprovedHunks(path, author)
 		var keep []string
+		if apart {
+			// What the file says is the tree's (Options.Apart): an approval of
+			// another digest is no approval here, and a run this commit does
+			// not show is the tree's to keep.
+			if v := st.VerdictOf(path, author); v != nil && v.Digest != "" && v.Digest != digest {
+				approved = false
+			}
+			shown := map[string]bool{}
+			for _, d := range slices.Concat(all...) {
+				shown[d] = true
+			}
+			for d := range signed {
+				if !shown[d] {
+					keep = append(keep, d)
+				}
+			}
+		}
 		for h, blocks := range all {
 			whole := true
 			for _, d := range blocks {
@@ -3118,16 +3183,10 @@ func (m Model) onBaseChosen(ref string) (tea.Model, tea.Cmd) {
 		m.baseRef = ref
 	}
 	m.basePinned = true
-	// Unsaved, the base still holds for this session, which is what was asked
-	// for first: it is written with the next thing that is, and meanwhile the
-	// status bar says the saving failed.
-	if m.mutate(func(*review.State) {}) {
-		if m.baseRef == "" {
-			m.setOK("Base: whatever this branch is built on")
-		} else {
-			m.setOK("Base: " + m.baseRef)
-		}
-	}
+	// It is saved once the scan it asks for has found it (onRescan): one that
+	// names nothing is said there and never written. Unsaved, it still holds
+	// for this session, which is what was asked for first.
+	m.baseToSave = true
 	cmd := m.scan()
 	return m, cmd
 }
