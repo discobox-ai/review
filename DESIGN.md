@@ -43,7 +43,8 @@ flowchart LR
   one commit instead of the working tree: a `Source` and a `Carrier`, never a
   `Worktree`, reviewed in the repository's own store. Every command it runs and every file it touches goes
   through `git.System`; `Local` is the real one. A test fails if anything
-  outside `system.go` runs a command or touches a file.
+  outside `system.go`, and the `system_*.go` halves it spells per system,
+  runs a command or touches a file.
 - `internal/review` is the review document — approvals by reviewer and by
   hunk, digests, threads, the review card — and the store that reads and
   writes it under a lock. It does no I/O of its own; the caller's `System`

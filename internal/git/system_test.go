@@ -39,8 +39,20 @@ var forbiddenImports = map[string]bool{
 	"os/user":   true,
 }
 
-// systemFile is the one place allowed to make those calls.
+// systemFile is the one place allowed to make those calls, with the
+// system_*.go files beside it in this package that hold its halves spelled
+// per system.
 const systemFile = "system.go"
+
+// isSystemFile reports whether a path, relative to the module root, is the
+// boundary or one of its per-system halves.
+func isSystemFile(rel string) bool {
+	if filepath.Dir(rel) != filepath.Join("internal", "git") {
+		return false
+	}
+	name := filepath.Base(rel)
+	return name == systemFile || strings.HasPrefix(name, "system_")
+}
 
 // TestSystemIsTheOnlyBoundary walks the whole module and fails if anything
 // outside the System implementation runs a command or touches a file. It is
@@ -73,7 +85,7 @@ func TestSystemIsTheOnlyBoundary(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		if filepath.Base(path) == systemFile {
+		if isSystemFile(rel) {
 			return nil // the boundary itself
 		}
 
