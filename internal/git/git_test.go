@@ -3,7 +3,9 @@ package git
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -519,6 +521,58 @@ func TestWriteStateFileIsAtomic(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r.GitDir, "review.json.tmp")); err == nil {
 		t.Error("the temporary file was left behind")
+	}
+}
+
+// Reading takes no lock, so a reader must never stop a writer: a write lands
+// while the file is being read, and the reader keeps what it had. On Windows a
+// file opened without FILE_SHARE_DELETE refuses to be renamed over.
+func TestAReaderDoesNotRefuseAWrite(t *testing.T) {
+	d := NewStateDir(Local{}, t.TempDir())
+	if err := d.WriteStateFile("review.json", "{}\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					d.ReadStateFile("review.json")
+				}
+			}
+		})
+	}
+	defer func() { close(stop); wg.Wait() }()
+
+	for i := range 500 {
+		if err := d.WriteStateFile("review.json", `{"n":`+strconv.Itoa(i)+"}\n"); err != nil {
+			t.Fatalf("write %d refused while being read: %v", i, err)
+		}
+	}
+}
+
+// A state file deep enough to pass the system's old path limit still reads:
+// a read that failed would read as no review, and the next write would start
+// a fresh one over it.
+func TestAStateFileOnALongPathReads(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), strings.Repeat("d", 100), strings.Repeat("e", 100), strings.Repeat("f", 100))
+	if err := (Local{}).MkdirAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	d := NewStateDir(Local{}, dir)
+	if err := d.WriteStateFile("review.json", "{}\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.WriteStateFile("review.json", `{"n":1}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := d.ReadStateFile("review.json"); !ok || got != `{"n":1}`+"\n" {
+		t.Errorf("read back %q (present=%v)", got, ok)
 	}
 }
 

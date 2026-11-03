@@ -22,9 +22,10 @@ import (
 // Everything else in this package is built on it, so a different backend — a
 // repository on another machine, a test double — is a matter of implementing
 // this interface and passing it to OpenWith. Nothing outside this file runs a
-// command or touches a file — but for the one call that each kind of system
-// spells differently, taking a lock on a file this one has opened, which is in
-// the system_*.go files beside it.
+// command or touches a file — but for the calls that each kind of system
+// spells differently, reading a file, renaming one over another and taking a
+// lock on one this file has opened, which are in the system_*.go files beside
+// it.
 type System interface {
 	// Git runs git in dir and returns its standard output. stdin is fed to the
 	// command when it is not nil. On failure the error carries git's standard
@@ -124,8 +125,10 @@ func (Local) Git(dir string, stdin []byte, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-// ReadFile reads a file.
-func (Local) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+// ReadFile reads a file. Reading takes no lock, so it must never stop a write:
+// a file being read can still be replaced by Rename, and the reader keeps what
+// it opened. readFile is the half each kind of system spells its own way.
+func (Local) ReadFile(path string) ([]byte, error) { return readFile(path) }
 
 // WriteFile writes a file, creating it if needed.
 func (Local) WriteFile(path string, data []byte) error {
@@ -144,8 +147,10 @@ func (Local) Remove(path string) error {
 // RemoveAll deletes a path and anything under it.
 func (Local) RemoveAll(path string) error { return os.RemoveAll(path) }
 
-// Rename moves a file over another.
-func (Local) Rename(oldPath, newPath string) error { return os.Rename(oldPath, newPath) }
+// Rename moves a file over another, even one somebody is reading: whoever
+// has the old file open keeps it. rename is the half each kind of system
+// spells its own way.
+func (Local) Rename(oldPath, newPath string) error { return rename(oldPath, newPath) }
 
 // MkdirAll makes a directory, and any above it, readable only by its owner: a
 // review is somebody's own until they hand it over.
