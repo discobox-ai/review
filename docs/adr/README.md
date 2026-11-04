@@ -16,4 +16,5 @@ Follow `template.md` and the `repostd` skill.
 | ADR | Title | Status |
 |---|---|---|
 | [26-10-21-407](26-10-21-407-keep-the-review-card-in-the-review-file.md) | Keep the review card in the review file, and write version 3 only when there is one | Accepted |
+| [26-11-04-506](26-11-04-506-derive-approval-identities-before-adding-display-context.md) | Derive approval identities before adding display context | Proposed |
 <!-- /repostd:adr-index -->
