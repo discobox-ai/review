@@ -313,9 +313,30 @@ func Run(repo *git.Repo, args []string, in io.Reader, out io.Writer) error {
 		case "delete":
 			note, cmdErr = remove(st, rest)
 		case "approve":
-			note, cmdErr = setApproved(st, rest, opts, true)
+			base := st.Base
+			if opts.base != "" {
+				base = opts.base
+			}
+			scan, scanErr := repo.Scan(base, 0)
+			if scanErr != nil {
+				return scanErr
+			}
+			if scan.Base.Err != "" {
+				return errors.New(scan.Base.Err)
+			}
+			if scan.Branch != branch {
+				return errors.New("branch moved while approving; retry")
+			}
+			reading := review.CompareScan(repo, scan, 0)
+			for _, path := range rest {
+				if reading.Identities[path].Digest == "" {
+					return fmt.Errorf("approval verification unavailable for %s", path)
+				}
+			}
+			st.ReconcileCanonical(reading.Identities, reading.Complete)
+			note, cmdErr = setApproved(st, rest, opts, true, reading.Identities)
 		case "unapprove":
-			note, cmdErr = setApproved(st, rest, opts, false)
+			note, cmdErr = setApproved(st, rest, opts, false, nil)
 		}
 		return cmdErr
 	})
@@ -502,18 +523,15 @@ func Author(repo *git.Repo, by string) (string, error) {
 // old one for a line the change took away — which is exactly what `comment`
 // takes back.
 func diff(out io.Writer, repo *git.Repo, st *review.State, o options) error {
-	base := st.Base
-	if o.base != "" {
-		base = o.base
-	}
-	scan, err := repo.Scan(base, o.context)
+
+	reading, err := reconcile(repo, repo.CurrentBranch(), st, o)
 	if err != nil {
 		return err
 	}
+	scan := reading.Scan
 	if scan.Base.Err != "" {
 		return errors.New(scan.Base.Err)
 	}
-
 	// The same tree measured from HEAD says which lines are not in a commit
 	// yet, and the working tree scan says what stands against each file.
 	uncommitted := map[string]map[int]bool{}
@@ -525,10 +543,21 @@ func diff(out io.Writer, repo *git.Repo, st *review.State, o options) error {
 		states[f.Path] = f.State
 	}
 
-	patches := git.ParseMulti(scan.Diff)
-	if err := reconcile(repo, repo.CurrentBranch(), st, patches); err != nil {
-		return err
+	if o.raw {
+		shown := 0
+		for _, file := range reading.Files {
+			if o.path != "" && file.Patch.Path != o.path {
+				continue
+			}
+			fmt.Fprint(out, file.Unified())
+			shown++
+		}
+		if shown == 0 {
+			fmt.Fprintln(out, "nothing to review")
+		}
+		return nil
 	}
+	patches := git.ParseMulti(scan.Diff)
 
 	shown := 0
 	for _, p := range patches {
@@ -536,12 +565,8 @@ func diff(out io.Writer, repo *git.Repo, st *review.State, o options) error {
 			continue
 		}
 		shown++
-		if o.raw {
-			// Verbatim, so it can be fed to anything that reads a patch.
-			fmt.Fprint(out, rawPatch(p))
-			continue
-		}
-		fmt.Fprintln(out, fileLine(p, st, states[p.Path]))
+
+		fmt.Fprintln(out, fileLine(p, st, states[p.Path], reading.Identities[p.Path].Digest != ""))
 		if o.stat {
 			continue
 		}
@@ -555,7 +580,7 @@ func diff(out io.Writer, repo *git.Repo, st *review.State, o options) error {
 
 // fileLine heads a file's section with everything standing against it, in the
 // same words the window's own heading uses.
-func fileLine(p *git.Patch, st *review.State, state git.State) string {
+func fileLine(p *git.Patch, st *review.State, state git.State, verified bool) string {
 	adds, dels := p.Stat()
 	parts := []string{p.Path}
 	if p.From != "" {
@@ -569,14 +594,20 @@ func fileLine(p *git.Patch, st *review.State, state git.State) string {
 	}
 	// Who approved it is said along with the fact, since one reviewer's
 	// approval is no news about another's.
-	if by := st.Approvers(p.Path); len(by) > 0 {
+	if by := st.Approvers(p.Path); verified && len(by) > 0 {
 		verdict := "approved"
 		if names := strings.Join(slices.DeleteFunc(by, func(n string) bool { return n == "" }), ", "); names != "" {
 			verdict += " by " + names
 		}
 		parts = append(parts, verdict)
-	} else if len(st.Fallen(p.Path)) > 0 {
+	} else if verified && len(st.Fallen(p.Path)) > 0 {
 		parts = append(parts, "approval nullified")
+	}
+	if !verified {
+		parts = append(parts, "approval verification unavailable")
+	}
+	if names := st.NeedsReview(p.Path); len(names) > 0 {
+		parts = append(parts, "legacy approval needs review by "+strings.Join(names, ", "))
 	}
 	if pending := state.Pending(); pending != "" {
 		parts = append(parts, pending)
@@ -642,21 +673,6 @@ func codeOf(s string) string {
 	return s[1:]
 }
 
-// rawPatch puts a parsed patch back the way git printed it.
-func rawPatch(p *git.Patch) string {
-	var b strings.Builder
-	for _, l := range p.Preamble {
-		b.WriteString(l + "\n")
-	}
-	for _, h := range p.Hunks {
-		b.WriteString(h.Header + "\n")
-		for _, l := range h.Lines {
-			b.WriteString(l + "\n")
-		}
-	}
-	return b.String()
-}
-
 func list(out io.Writer, st *review.State, o options) error {
 	n := 0
 	for _, t := range st.Threads {
@@ -717,16 +733,16 @@ func status(out io.Writer, repo *git.Repo, st *review.State, branch string, o op
 	say := func(key string, value any) { fmt.Fprintf(out, "%-12s%v\n", key, value) }
 	say("branch", branch)
 
-	base := st.Base
-	if o.base != "" {
-		base = o.base
-	}
 	// Context of none: the file names are all this wants, and every line of
 	// context is a line to produce and parse for nothing.
-	scan, err := repo.Scan(base, 0)
+	statusOptions := o
+	statusOptions.context = 0
+	reading, err := reconcile(repo, branch, st, statusOptions)
 	if err != nil {
 		return err
 	}
+	scan := reading.Scan
+
 	say("base", nameOr(scan.Base.Ref, "(none)"))
 	say("merge-base", nameOr(scan.Base.Commit, "(none)"))
 	say("ahead", scan.Base.Ahead)
@@ -737,16 +753,13 @@ func status(out io.Writer, repo *git.Repo, st *review.State, branch string, o op
 	}
 
 	patches := git.ParseMulti(scan.Diff)
-	if err := reconcile(repo, branch, st, patches); err != nil {
-		return err
-	}
 
 	// Anybody's approval, or the one reviewer's that was asked about.
 	stands := func(path string) bool {
 		if o.by != "" {
-			return st.Approved(path, o.by)
+			return reading.Identities[path].Digest != "" && st.Approved(path, o.by)
 		}
-		return len(st.Approvers(path)) > 0
+		return reading.Identities[path].Digest != "" && len(st.Approvers(path)) > 0
 	}
 	files, approved := 0, 0
 	for _, p := range patches {
@@ -781,6 +794,18 @@ func status(out io.Writer, repo *git.Repo, st *review.State, branch string, o op
 		say("nullified", p)
 	}
 
+	for _, file := range reading.Files {
+		path := file.Patch.Path
+		if problem := reading.Problems[path]; problem != "" {
+			say("unverified", path+": "+problem)
+		}
+		if names := st.NeedsReview(path); len(names) > 0 && (o.by == "" || slices.Contains(names, o.by)) {
+			say("legacy", path+": legacy approval needs review")
+		}
+	}
+	if scan.Incomplete != "" {
+		say("problem", scan.Incomplete)
+	}
 	// A base that could not be used is reported rather than returned: this is
 	// the command you run to find out what is wrong, so it has to answer.
 	if scan.Base.Err != "" {
@@ -789,36 +814,37 @@ func status(out io.Writer, repo *git.Repo, st *review.State, branch string, o op
 	return nil
 }
 
-// reconcile checks every approval against the change now in front of the
-// reader, and saves if any of them fell.
-//
-// The window does this on every scan; a command that did not would report an
-// approval as standing when the file had moved under it, which is the one
-// thing an approval is supposed to be unable to do. It also stamps in the
-// digest of an approval given without one — which is how `discobox-review approve`
-// leaves it — so such an approval becomes nullifiable as soon as anything
-// reads the review.
-//
-// The digests come out the same whatever context the diff was taken with,
-// since they count only the changed lines and their numbers.
-func reconcile(repo *git.Repo, branch string, st *review.State, patches []*git.Patch) error {
-	digests := make(map[string]string, len(patches))
-	for _, p := range patches {
-		if p.Path != "" {
-			digests[p.Path] = review.Digest(p)
+// reconcile reads coherent content pairs and judges the latest saved review
+// under its lock. The returned patches and identities are from that same
+// reading, so a command never reports an approval against an earlier patch.
+func reconcile(repo *git.Repo, branch string, st *review.State, o options) (review.Reading, error) {
+	var reading review.Reading
+	err := review.Update(repo, branch, lockWait, func(now *review.State) error {
+		base := now.Base
+		if o.base != "" {
+			base = o.base
 		}
-	}
-	if changed, _ := st.Reconcile(digests); !changed {
-		return nil
-	}
-	// st was read before the diff was taken, and anything may have been
-	// written since. So the verdict is given again on the review as it stands
-	// now, and that is what the caller goes on to report.
-	return review.Update(repo, branch, lockWait, func(now *review.State) error {
-		now.Reconcile(digests)
+		scan, err := repo.Scan(base, o.context)
+		if err != nil {
+			return err
+		}
+		if scan.Branch != branch {
+			return errors.New("branch moved while reading review; retry")
+		}
+		reading = review.CompareScan(repo, scan, o.context)
+		if scan.Base.Err != "" {
+			reading.Complete = false
+			for path := range reading.Identities {
+				reading.Identities[path] = review.Identity{}
+				reading.Problems[path] = scan.Base.Err
+			}
+		} else {
+			now.ReconcileCanonical(reading.Identities, reading.Complete)
+		}
 		*st = *now
 		return nil
 	})
+	return reading, err
 }
 
 func nameOr(s, fallback string) string {
@@ -969,7 +995,7 @@ func setBase(out io.Writer, st *review.State, args []string, o options) (string,
 	return "", errors.New("base wants one ref, or none to show it")
 }
 
-func setApproved(st *review.State, args []string, o options, want bool) (string, error) {
+func setApproved(st *review.State, args []string, o options, want bool, identities map[string]review.Identity) (string, error) {
 	if len(args) == 0 {
 		return "", errors.New("wants at least one path")
 	}
@@ -980,10 +1006,10 @@ func setApproved(st *review.State, args []string, o options, want bool) (string,
 	}
 	for _, path := range args {
 		if want {
-			// No digest: discobox-review stamps in the change as it stands the next
-			// time it reads the review, which is what makes an approval given
-			// here nullifiable like any other.
-			st.Approve(path, "", o.by)
+			// Bind the approval now, under the same lock as verification.
+			if err := st.Approve(path, identities[path], o.by); err != nil {
+				return "", err
+			}
 			continue
 		}
 		if o.by != "" {

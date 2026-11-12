@@ -21,16 +21,26 @@ import (
 )
 
 // Source is the change under review: one diff, the commits it was made in,
-// and the text of any file at any of them.
+// and the text of any file at any of them. Methods may run concurrently:
+// a fresh approval verification can overlap a display scan or commit read.
 type Source interface {
 	// Scan reads the whole review in one go. base is the ref the review is
 	// measured from, or empty to let the source decide; context is how many
 	// unchanged lines every diff is taken with.
 	//
 	// context is a hint. A source that cannot choose — a hosting service
-	// sends the context it sends — gives what it has: the window shows the
-	// rest of a file from FileContent, between the hunks, either way.
+	// sends the context it sends — gives what it has. Main-review rendering
+	// and identity are derived from ReadContents, independently of that patch.
 	Scan(base string, context int) (Scan, error)
+
+	// ReadContents returns the complete changed-path manifest and both sides
+	// of its files, bound to this scan's resolved revisions. Contents include
+	// their exact repository bytes (clean-filtered for a worktree), paths and
+	// modes. Missing data is unavailable, never an empty file. A moving source
+	// must reject the read; a host uses immutable resolved revision IDs.
+	// Returned records and bytes belong to this reading and remain unchanged
+	// after return, so a window can render the same pair it verified.
+	ReadContents(scan Scan) (Contents, error)
 
 	// CommitDiff is everything one commit changed, as a unified diff taken
 	// with context lines of context — a hint, as it is for Scan.
@@ -40,7 +50,7 @@ type Source interface {
 	// review's new side has it — the working tree, a pull request's head —
 	// when commit is empty.
 	//
-	// A scan reads every changed file, and reads several at once: FileContent
+	// Commit views read several files at once: FileContent
 	// is called from more than one goroutine at a time, and has to be safe
 	// for that.
 	FileContent(commit, path string) (string, error)
@@ -154,6 +164,9 @@ type Stamp struct {
 // stands, what it has committed since the base, what is not committed yet, and
 // the two diffs the review is drawn from.
 type Scan struct {
+	// Revision is the immutable new revision observed by Scan. A worktree
+	// binds its collected contents separately and also checks this HEAD.
+	Revision string
 	// Branch names what is under review, and is what the review is kept
 	// under: a review is of a branch.
 	Branch  string
@@ -187,6 +200,33 @@ type Scan struct {
 	// service caps how much of one it sends — says so here, and the window
 	// says so in turn rather than showing part of a review as all of it.
 	Incomplete string
+}
+
+// Contents is one coherent comparison. Complete means the manifest is whole;
+// an individual pair may still be unavailable and must say why in Problem.
+type Contents struct {
+	Complete bool
+	Files    []Change
+}
+
+// Change is a file's complete two sides. An absent side has Present false;
+// an existing empty file has Present true and empty Data. Mode includes the
+// kind (regular, symlink or gitlink) and executable bit, in Git's octal form.
+type Change struct {
+	Old, New Side
+	Problem  string
+}
+
+// Side is repository content, without text conversions or newline changes.
+// An absent side has every field zero, so local and external sources encode
+// the same absence. An unavailable side is reported by Change.Problem.
+// For a gitlink, Data is its full lowercase hexadecimal object ID, without
+// a line terminator; the referenced repository is not read recursively.
+type Side struct {
+	Path    string
+	Mode    string
+	Present bool
+	Data    []byte
 }
 
 // Base is what the review is measured from: a ref, the commit it and this

@@ -1,6 +1,7 @@
 package review
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"time"
 )
@@ -232,6 +233,27 @@ func Update(fs Files, branch string, wait time.Duration, change func(*State) err
 	after := string(st.Bytes())
 	if existed && after == before {
 		return nil
+	}
+	if existed && st.Scheme != "" {
+		original, err := Parse([]byte(before))
+		if err != nil {
+			return err
+		}
+		if original.Scheme == "" {
+			name := fmt.Sprintf("discobox-review.legacy-%x.json", sha256.Sum256([]byte(before)))
+			if saved, ok := fs.ReadStateFile(name); ok {
+				if saved != before {
+					return fmt.Errorf("legacy backup differs: %s", name)
+				}
+			} else {
+				if fs.StateFileExists(name) {
+					return fmt.Errorf("cannot read legacy backup: %s", name)
+				}
+				if err := fs.WriteStateFile(name, before); err != nil {
+					return fmt.Errorf("retain legacy review: %w", err)
+				}
+			}
+		}
 	}
 	return fs.WriteStateFile(FileName, after)
 }

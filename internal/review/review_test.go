@@ -29,7 +29,7 @@ const patchText = `diff --git a/foo.txt b/foo.txt
 func TestBytesAreReadable(t *testing.T) {
 	s := New("feature/x")
 	s.Base = "origin/main"
-	s.Approve("a.go", "deadbeef", "Darren")
+	s.Approve("a.go", Identity{Digest: "deadbeef"}, "Darren")
 	s.Start(&Thread{Path: "b.go", Side: SideNew, Line: 12, Text: "\treturn nil"},
 		"Darren", "Why nil?")
 
@@ -53,8 +53,8 @@ func TestBytesAreReadable(t *testing.T) {
 // when the review does.
 func TestBytesAreStable(t *testing.T) {
 	s := New("main")
-	s.Approve("z.go", "1", "Darren")
-	s.Approve("a.go", "2", "Darren")
+	s.Approve("z.go", Identity{Digest: "1"}, "Darren")
+	s.Approve("a.go", Identity{Digest: "2"}, "Darren")
 	first := string(s.Bytes())
 	if second := string(s.Bytes()); second != first {
 		t.Errorf("two saves differ:\n%s\n---\n%s", first, second)
@@ -67,7 +67,7 @@ func TestBytesAreStable(t *testing.T) {
 
 func TestParseRoundTrips(t *testing.T) {
 	s := New("main")
-	s.Approve("a.go", "digest", "Darren")
+	s.Approve("a.go", Identity{Digest: "digest"}, "Darren")
 	th := s.Start(&Thread{Path: "b.go", Side: SideOld, Line: 4}, "Darren", "hm")
 	s.Reply(th.ID, "claude", "fixed")
 	s.SetResolved(th.ID, true)
@@ -107,8 +107,8 @@ func TestAHandWrittenReviewIsEnough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Version != Version {
-		t.Errorf("version = %d, want %d filled in", s.Version, Version)
+	if s.Version != versionWithout {
+		t.Errorf("version = %d, want legacy version %d filled in", s.Version, versionWithout)
 	}
 	if !s.Approved("a.go", "") {
 		t.Error("an approval written without a digest was not honored")
@@ -149,9 +149,9 @@ func TestParseMakesIdsUnique(t *testing.T) {
 func TestDigestIgnoresContext(t *testing.T) {
 	narrow := git.ParsePatch("--- a/x\n+++ b/x\n@@ -2,1 +2,1 @@\n-two\n+TWO\n")
 	wide := git.ParsePatch("--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n")
-	if Digest(narrow) != Digest(wide) {
+	if LegacyDigest(narrow) != LegacyDigest(wide) {
 		t.Errorf("the same change digests differently at two contexts:\n%s\n%s",
-			Digest(narrow), Digest(wide))
+			LegacyDigest(narrow), LegacyDigest(wide))
 	}
 }
 
@@ -159,15 +159,15 @@ func TestDigestIgnoresContext(t *testing.T) {
 func TestDigestFollowsTheChange(t *testing.T) {
 	a := git.ParsePatch(patchText)
 	b := git.ParsePatch(strings.Replace(patchText, "+TWO", "+Two", 1))
-	if Digest(a) == Digest(b) {
+	if LegacyDigest(a) == LegacyDigest(b) {
 		t.Error("two different changes have the same digest")
 	}
 	// The line number is part of it: the same text moved is a different change.
 	c := git.ParsePatch(strings.Replace(patchText, "@@ -1,3 +1,3 @@", "@@ -9,3 +9,3 @@", 1))
-	if Digest(a) == Digest(c) {
+	if LegacyDigest(a) == LegacyDigest(c) {
 		t.Error("the same edit at a different line has the same digest")
 	}
-	if Digest(nil) != "" {
+	if LegacyDigest(nil) != "" {
 		t.Error("a missing patch has a digest")
 	}
 }
@@ -177,14 +177,11 @@ func TestDigestFollowsTheChange(t *testing.T) {
 // given.
 func TestReconcileNullifiesAStaleApproval(t *testing.T) {
 	s := New("main")
-	s.Approve("a.go", "before", "Darren")
+	s.Approve("a.go", Identity{Digest: "before"}, "Darren")
 
-	changed, nullified := s.Reconcile(map[string]string{"a.go": "after"})
+	changed := s.ReconcileCanonical(map[string]Identity{"a.go": {Digest: "after"}}, true)
 	if !changed {
 		t.Fatal("Reconcile did not report a change")
-	}
-	if len(nullified) != 1 || nullified[0] != "a.go" {
-		t.Errorf("nullified = %v", nullified)
 	}
 	if s.Approved("a.go", "Darren") {
 		t.Error("the approval survived the file changing")
@@ -201,8 +198,8 @@ func TestReconcileNullifiesAStaleApproval(t *testing.T) {
 // changes nothing the second time.
 func TestReconcileLeavesAGoodApprovalAlone(t *testing.T) {
 	s := New("main")
-	s.Approve("a.go", "same", "Darren")
-	if changed, _ := s.Reconcile(map[string]string{"a.go": "same"}); changed {
+	s.Approve("a.go", Identity{Digest: "same"}, "Darren")
+	if changed := s.ReconcileCanonical(map[string]Identity{"a.go": {Digest: "same"}}, true); changed {
 		t.Error("an unchanged file was reported as changed")
 	}
 	if !s.Approved("a.go", "Darren") {
@@ -217,9 +214,9 @@ func TestReconcileStampsAnApprovalWrittenByHand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	changed, nullified := s.Reconcile(map[string]string{"a.go": "current"})
-	if !changed || len(nullified) != 0 {
-		t.Errorf("changed=%v nullified=%v; want a stamp, not a nullification", changed, nullified)
+	changed := s.ReconcileCanonical(map[string]Identity{"a.go": {Digest: "current"}}, true)
+	if !changed || s.Nullified("a.go", "") {
+		t.Fatal("want a stamp, not a nullification")
 	}
 	if f := s.VerdictOf("a.go", ""); f.Digest != "current" {
 		t.Errorf("digest = %q, want the current one", f.Digest)
@@ -228,7 +225,7 @@ func TestReconcileStampsAnApprovalWrittenByHand(t *testing.T) {
 		t.Error("stamping the digest dropped the approval")
 	}
 	// And now it behaves like any other approval.
-	if _, nullified := s.Reconcile(map[string]string{"a.go": "other"}); len(nullified) != 1 {
+	if !s.ReconcileCanonical(map[string]Identity{"a.go": {Digest: "other"}}, true) || !s.Nullified("a.go", "") {
 		t.Error("the stamped approval did not fall when the file changed")
 	}
 }
@@ -238,8 +235,8 @@ func TestReconcileStampsAnApprovalWrittenByHand(t *testing.T) {
 // cannot be made.
 func TestReconcileIgnoresAFileNotInTheReview(t *testing.T) {
 	s := New("main")
-	s.Approve("a.go", "before", "Darren")
-	if changed, _ := s.Reconcile(map[string]string{"b.go": "x"}); changed {
+	s.Approve("a.go", Identity{Digest: "before"}, "Darren")
+	if changed := s.ReconcileCanonical(map[string]Identity{"b.go": {Digest: "x"}}, false); changed {
 		t.Error("a file outside the review was reconciled anyway")
 	}
 	if !s.Approved("a.go", "Darren") {
@@ -251,7 +248,7 @@ func TestReconcileIgnoresAFileNotInTheReview(t *testing.T) {
 // their mind, and the file is not marked as having moved.
 func TestUnapproveIsNotANullification(t *testing.T) {
 	s := New("main")
-	s.Approve("a.go", "d", "Darren")
+	s.Approve("a.go", Identity{Digest: "d"}, "Darren")
 	s.Unapprove("a.go", "Darren")
 	if s.Approved("a.go", "Darren") {
 		t.Error("still approved")
@@ -476,7 +473,7 @@ func TestAnUpdateThatChangesNothingWritesNothing(t *testing.T) {
 	}
 	refused := errors.New("no such thread")
 	err := Update(fs, "main", 0, func(st *State) error {
-		st.Approve("a.go", "d", "Darren")
+		st.Approve("a.go", Identity{Digest: "d"}, "Darren")
 		return refused
 	})
 	if !errors.Is(err, refused) {
@@ -681,7 +678,7 @@ func TestHunkDigestsDoNotDependOnContext(t *testing.T) {
 	joined := git.ParsePatch("--- a/f\n+++ b/f\n" +
 		"@@ -2,9 +2,9 @@\n two\n-three\n+THREE\n four\n five\n six\n seven\n eight\n-nine\n+NINE\n ten\n")
 
-	a, j := HunkDigests(apart), HunkDigests(joined)
+	a, j := LegacyHunkDigests(apart), LegacyHunkDigests(joined)
 	if len(a) != 2 || len(a[0]) != 1 || len(a[1]) != 1 {
 		t.Fatalf("two hunks of one run each came out as %v", a)
 	}
@@ -719,11 +716,11 @@ func TestPruneHunksDropsWhatIsGone(t *testing.T) {
 // another, and one taking theirs back leaves the other's standing.
 func TestEachReviewerHasTheirOwnVerdict(t *testing.T) {
 	s := New("main")
-	s.Approve("a.go", "d", "claude")
+	s.Approve("a.go", Identity{Digest: "d"}, "claude")
 	if s.Approved("a.go", "Darren") {
 		t.Fatal("an agent's approval was taken for the person's")
 	}
-	s.Approve("a.go", "d", "Darren")
+	s.Approve("a.go", Identity{Digest: "d"}, "Darren")
 	if got := s.Approvers("a.go"); len(got) != 2 || got[0] != "Darren" || got[1] != "claude" {
 		t.Errorf("approvers = %v, want both, by name", got)
 	}
@@ -749,18 +746,15 @@ func TestEachReviewerHasTheirOwnVerdict(t *testing.T) {
 // The file changing is the file changing for everybody who approved it.
 func TestAChangeNullifiesEveryApproval(t *testing.T) {
 	s := New("main")
-	s.Approve("a.go", "before", "claude")
-	s.Approve("a.go", "before", "Darren")
-	_, nullified := s.Reconcile(map[string]string{"a.go": "after"})
-	if len(nullified) != 1 || nullified[0] != "a.go" {
-		t.Errorf("nullified = %v, want the path once", nullified)
-	}
+	s.Approve("a.go", Identity{Digest: "before"}, "claude")
+	s.Approve("a.go", Identity{Digest: "before"}, "Darren")
+	s.ReconcileCanonical(map[string]Identity{"a.go": {Digest: "after"}}, true)
 	if got := s.Fallen("a.go"); len(got) != 2 || len(s.Approvers("a.go")) != 0 {
 		t.Errorf("fallen = %v, approvers = %v", got, s.Approvers("a.go"))
 	}
 
 	// One of them reads it again; the other's is still the one that fell.
-	s.Approve("a.go", "after", "Darren")
+	s.Approve("a.go", Identity{Digest: "after"}, "Darren")
 	if !s.Approved("a.go", "Darren") || !s.Nullified("a.go", "claude") {
 		t.Errorf("verdicts = %+v", s.FileFor("a.go").Verdicts)
 	}
@@ -879,22 +873,22 @@ func TestNamelessHunksGoToWhoeverClaimsThem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.ClaimHunks("Darren") {
+	if !s.ClaimLegacyHunks("Darren", map[string]Identity{"a.go": {Digest: "a", Fingerprint: "pair-a"}, "b.go": {Digest: "b", Fingerprint: "pair-b"}}) {
 		t.Fatal("nothing was claimed")
 	}
-	if got := s.ApprovedHunks("a.go", "Darren"); len(got) != 2 {
-		t.Errorf("a.go: Darren's hunks = %v, want both", got)
+	if got := s.VerdictOf("a.go", "Darren"); got == nil || len(got.Legacy) != 1 || len(got.Legacy[0].Hunks) != 2 || len(got.Hunks) != 0 {
+		t.Fatalf("a.go: unnamed claims not retained as pending: %+v", got)
 	}
 	if s.VerdictOf("a.go", "") != nil {
 		t.Error("a.go: a verdict that says nothing was left under no name")
 	}
-	if got := s.ApprovedHunks("b.go", "Darren"); len(got) != 1 || s.Approved("b.go", "Darren") {
-		t.Errorf("b.go: hunks %v, approved %v: want the hunks and not the approval", got, s.Approved("b.go", "Darren"))
+	if got := s.VerdictOf("b.go", "Darren"); got == nil || len(got.Legacy) != 1 || len(got.Legacy[0].Hunks) != 1 || s.Approved("b.go", "Darren") {
+		t.Fatalf("b.go: claim ownership granted approval: %+v", got)
 	}
 	if !s.Approved("b.go", "") || !s.Approved("c.go", "") || s.Approved("c.go", "Darren") {
 		t.Errorf("an approval under no name was moved: %s", s.Bytes())
 	}
-	if s.ClaimHunks("claude") {
+	if s.ClaimLegacyHunks("claude", map[string]Identity{"a.go": {Digest: "a"}, "b.go": {Digest: "b"}}) {
 		t.Error("a second reader found something left to claim")
 	}
 }

@@ -139,6 +139,17 @@ func patchPaths(preamble []string) (path, from string) {
 				continue
 			}
 			body := strings.TrimPrefix(l, "diff --git ")
+			if first, err := strconv.QuotedPrefix(body); err == nil {
+				rest := strings.TrimSpace(body[len(first):])
+				if second, err := strconv.QuotedPrefix(rest); err == nil && len(second) == len(rest) {
+					from = stripPrefix(unquotePath(first), "a/")
+					path = stripPrefix(unquotePath(second), "b/")
+					if from == path {
+						from = ""
+					}
+					continue
+				}
+			}
 			if i := strings.LastIndex(body, " b/"); i >= 0 {
 				path = unquotePath(body[i+3:])
 				from = stripPrefix(unquotePath(body[:i]), "a/")
@@ -397,4 +408,27 @@ func hunkSide(h Hunk, kind byte) int {
 		}
 	}
 	return n
+}
+
+// QuotePath encodes a pathname in Git's C-quoted byte format. Go's quoted
+// strings can use \x and \u escapes, which Git does not accept.
+func QuotePath(path string) string {
+	var out strings.Builder
+	out.WriteByte('"')
+	for _, b := range []byte(path) {
+		switch {
+		case b == '"' || b == '\\':
+			out.WriteByte('\\')
+			out.WriteByte(b)
+		case b < 32 || b >= 127:
+			out.WriteByte('\\')
+			out.WriteByte('0' + b/64)
+			out.WriteByte('0' + b/8%8)
+			out.WriteByte('0' + b%8)
+		default:
+			out.WriteByte(b)
+		}
+	}
+	out.WriteByte('"')
+	return out.String()
 }
