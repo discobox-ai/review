@@ -291,18 +291,18 @@ func TestShow(t *testing.T) {
 	}
 }
 
-// Approving from a command leaves the digest out, so discobox-review stamps in the
-// change as it stands when it next reads the review — which is what makes an
-// approval given here nullifiable like any other.
+// A command binds approval to the current change under the review lock;
+// a later reader cannot stamp an intervening edit as if it had been read.
 func TestApproving(t *testing.T) {
 	repo := testRepo(t)
+	write(t, repo.Dir, "other.go", "package other\n")
 	run(t, repo, "approve", "--by", "git-user", "server.go", "other.go")
 	st := stored(t, repo)
 	if !st.Approved("server.go", "Test") || !st.Approved("other.go", "Test") {
 		t.Fatalf("files = %+v", st.Files)
 	}
-	if got := st.VerdictOf("server.go", "Test"); got.Digest != "" {
-		t.Errorf("digest = %q, want it left for discobox-review to stamp", got.Digest)
+	if got := st.VerdictOf("server.go", "Test"); got.Digest == "" {
+		t.Errorf("digest was not bound when approval was given")
 	}
 	if got := st.VerdictOf("server.go", "Test").By; got != "Test" {
 		t.Errorf("by %q", got)

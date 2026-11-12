@@ -167,6 +167,8 @@ type fakeSystem struct {
 	fileCalls []string
 }
 
+func (f *fakeSystem) Readlink(path string) (string, error) { return f.files[path], nil }
+
 func (f *fakeSystem) Git(_ string, _ []byte, args ...string) (string, error) {
 	key := strings.Join(args, " ")
 	f.gitCalls = append(f.gitCalls, key)
@@ -248,6 +250,8 @@ func (f *fakeSystem) Stat(path string) (FileInfo, error) {
 		IsDir:   f.dirs[path],
 	}, nil
 }
+
+func (f *fakeSystem) Lstat(path string) (FileInfo, error) { return f.Stat(path) }
 
 // fakeEditor stands in for a program that takes the terminal: it records that
 // it was asked for and returns without doing anything.

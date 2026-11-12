@@ -1,5 +1,11 @@
 # discobox-review review notes
 
+- Never migrate a legacy checksum into a broader canonical approval without
+  independent evidence for paths, kinds, modes, binary bytes and line
+  terminators: versions 1–3 did not hash all those dimensions. Keep unproved
+  claims separately, retire them permanently when their pair changes, and
+  retain the original document before replacing it (issue #18).
+
 - In `pkg/ui`, take what an approval moves on from (`m.view.paths()`) before
   `mutate`, not after. With `f` on, the file just approved has left
   `m.view.files` by the time `mutate` returns, and an `advance` that looks it
@@ -49,3 +55,27 @@
 - Keep a review card's summary visible even when its core is empty: tests
   and documentation changes have no production-code core to name. Decide
   whether to draw the card by its presence, not by its core links.
+- Derive approval identities and display hunks from the same complete content
+  pair, never the host's patch; repeated lines realign with Git context. Keep
+  unavailable identities distinct from empty changes, and require a complete
+  manifest before retiring omitted paths. Legacy checksums cannot prove
+  metadata or terminators they never encoded; preserve history and require
+  review rather than granting broader approval.
+- Verify an approval against fresh contents while holding the review lock,
+  and apply its intention to the latest document. UI approval source reads and lock
+  waits run off the render thread. A deferred approval must be rejected if
+  the displayed identity moved, and pending input must retain its order.
+- Associate a review stamp with the bytes actually read. A stamp obtained
+  after unlocking may belong to a later writer; retaining it beside an older
+  state would make the next poll miss that writer's changes.
+- Parse quoted `diff --git` paths even without text hunks: canonical binary
+  and mode-only patches have no `+++` line to recover their names from.
+
+- Serialize file-kind replacements as delete/create records in raw patches.
+  A regular-file/symlink transition is not a chmod, even when both store the
+  same bytes; keep one canonical approval scope in the display.
+
+- An automatic reconciliation discovered during a UI write must run after
+  that write completes. A delayed result must not replace a newer scan's
+  saved nullification with its older approval snapshot; otherwise undo can
+  revive approval, especially when polling is disabled by an embedding host.

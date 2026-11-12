@@ -107,6 +107,7 @@ type (
 func (r *Repo) Scan(baseRef string, context int) (Scan, error) {
 	s := Scan{HasHEAD: r.HasHEAD()}
 	s.Branch = r.CurrentBranch()
+	s.Revision, _ = r.CommitOf("HEAD")
 	s.Merging = r.IsMerging()
 	s.Base = r.ResolveBase(baseRef, s.HasHEAD)
 	if s.HasHEAD && s.Base.SHA != "" && s.Base.SHA != EmptyTree {

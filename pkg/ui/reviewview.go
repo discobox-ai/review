@@ -81,9 +81,11 @@ type reviewFile struct {
 	adds  int
 	dels  int
 
-	// digest identifies this change, and is what an approval is a claim
-	// about. See [review.Digest].
-	digest string
+	// identity and blocks come from the same complete canonical comparison.
+	identity   review.Identity
+	verifiable bool
+	problem    string
+	legacy     []string
 
 	// blocks is the same for the parts of the change: for each hunk, the
 	// digest of every run of changed lines in it. See [review.HunkDigests].
@@ -2146,6 +2148,12 @@ func (f *reviewFile) headerTail(avail int) string {
 		add("no longer changed", "gone")
 	default:
 		add(f.state.Pending(), f.state.Pending())
+	}
+	if f.problem != "" {
+		add("approval verification unavailable", "unverified")
+	}
+	if len(f.legacy) > 0 {
+		add("legacy approval needs review: "+reviewerNames(f.legacy), "legacy needs review")
 	}
 	switch {
 	case f.approved:

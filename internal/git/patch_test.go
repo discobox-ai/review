@@ -1,6 +1,7 @@
 package git
 
 import (
+	"strconv"
 	"testing"
 )
 
@@ -351,6 +352,16 @@ func TestMapState(t *testing.T) {
 	for _, c := range cases {
 		if got := mapState(c.x, c.y); got != c.want {
 			t.Errorf("mapState(%c,%c) = %s, want %s", c.x, c.y, got, c.want)
+		}
+	}
+}
+
+func TestQuotedMetadataOnlyPaths(t *testing.T) {
+	for _, path := range []string{"baz.bin", "space name", "line\nname", "slash\\quote\""} {
+		text := "diff --git " + strconv.Quote("a/"+path) + " " + strconv.Quote("b/"+path) + "\nnew file mode 100644\nBinary files differ\n"
+		patches := ParseMulti(text)
+		if len(patches) != 1 || patches[0].Path != path {
+			t.Fatalf("path %q: %+v", path, patches)
 		}
 	}
 }

@@ -229,10 +229,11 @@ apart from never having been approved at all.
  ○ util.go        not looked at yet
 ```
 
-The digest counts **only the changed lines and their numbers**, so turning the
-diff context up or down — which moves every hunk boundary — does not nullify a
-single approval, while editing one character of one line nullifies exactly the
-file it was in.
+The digest names a deterministic comparison of complete before/after contents,
+including paths, modes and exact line endings. The same comparison supplies
+the displayed hunks, so changing context cannot change approval. An edit
+nullifies the file approval while leaving unaffected approved runs standing.
+Undoing an edit does not revive a nullified approval.
 
 **Approving a file in the window folds it away again**, so what is left open
 is what is left to do. `Space` on its heading opens it, and that choice sticks across rescans.
@@ -811,7 +812,8 @@ change is not in a commit yet, and `<t1>` for whatever has already been said
 about it.
 
 `--stat` prints the headings alone. `--raw` prints the plain unified diff with
-none of that, which `git apply` will take.
+none of that. Text changes apply with `git apply`; use `--unidiff-zero` when
+requesting zero context. Binary summaries carry no binary payload.
 
 | | |
 | --- | --- |
@@ -859,12 +861,11 @@ They work on the repository containing the current directory, and on the branch
 checked out there — the same branch swap the window does, so the two never
 disagree about which review they are looking at.
 
-`discobox-review approve` deliberately writes no digest, exactly as a hand-written
-approval does: discobox-review stamps in the change as it stands the next time it reads
-the review, which is what keeps such an approval nullifiable like any other.
-`diff` and `status` do that reading, and nullify an approval whose file has
-moved since — a command that reported an approval as standing when the file had
-changed under it would be undoing the one thing an approval cannot do.
+`discobox-review approve` verifies the current complete change and records its
+canonical digest while holding the review lock. `diff` and `status` verify
+existing approvals under that same lock, so concurrent reviewers keep their
+own verdicts. A missing or oversized content pair is reported as approval
+verification unavailable; it cannot grant or nullify that file's approval.
 
 ### Writing it from somewhere else
 
@@ -885,20 +886,23 @@ The smallest useful edits are all one line:
   point of stamping rather than treating a digest-less approval as stale:
   "approved" plainly means "approved as it is now".
 
-A review written by a discobox-review from before a file had a verdict for each
-reviewer — `"version": 1`, with the one approval on the file itself — is read
-the same way, as the verdict of whoever signed it, and saved as version 2.
-Version 1 put no name on a hunk signed off on its own, only on a whole file's
-approval; since only a window ever signed off a hunk, the first window to open
-such a review takes those hunks as its reader's. An approval with no name on
-it — written by hand, without a `by` — stays nobody's: it counts for `status`,
-shows in the second column as `✓ by nobody named`, and is never taken for
-yours. One from a version newer than the program is refused rather than half
-understood.
+Versions 1–3 remain readable. On the first canonical approval or migration,
+the review becomes version 4 and names its identity scheme. The exact original
+document is retained beside it as `discobox-review.legacy-<sha256>.json` before
+the upgrade is saved. Older programs refuse version 4; upgrade them before
+sharing the review. Documents without canonical claims retain version 2, or
+version 3 when they have a card.
 
-A review with a card is written as version 3, and one without as version 2, so
-a discobox-review from before cards goes on reading every review it can, and
-refuses one with a card rather than writing it back without.
+Older digests omit metadata and line terminators and may depend on Git's hunk
+alignment. Such claims become **legacy approval needs review**, even when a
+checksum happens to match. Their reviewer, time, digest and hunks remain in
+`legacy` history. A pending claim binds to the first verified content pair;
+changing that pair, withdrawing the claim or explicitly approving again
+retires it permanently. A digest-less active whole-file approval written by
+hand binds to the current complete change on its first successful verification.
+Version 1 unnamed hunk claims become the first window reader's pending history;
+ownership alone does not prove approval. An anonymous whole-file approval
+stays anonymous.
 
 Where a name has two verdicts on a file — a reviewer whose approval fell adding
 a fresh one by hand under the one that is there — the later one stands.
@@ -915,7 +919,8 @@ writes — the ones that only read included, at the moment they stamp a digest
 into an approval. So any number of commands and windows can be at one review at
 once and everything they write lands: thirty `comment`s started together leave
 thirty comments. Nothing has to be wrapped in a lock of the caller's own.
-Reading takes no lock and waits for nobody.
+Reading the document alone takes no lock. Approval verification holds it while
+reading coherent contents and updating the latest verdicts.
 
 The lock goes with the process that took it, so one that died holds nothing,
 and the lock file is simply left where it is. Nothing waits for it for ever
@@ -1379,8 +1384,8 @@ in the middle of a band.
 ## Embedding the window
 
 The window is a library as well as a command. `ui.New` builds it over a
-`source.Source` — anything that can hand over a unified diff, the commits it
-was made in, and a file's text at a commit — so a program that has a change
+`source.Source` — anything that can hand over complete before/after content
+pairs, the commits it was made in, and a file's text at a commit — so a program that has a change
 from somewhere other than a Git checkout can show it the same way. The
 discobox console's pull request page is the case it was built for: the diff
 comes from GitHub, with no box, no fetch and no working tree.
@@ -1453,23 +1458,28 @@ second. A host that knows the source has moved — a new head commit — sends
 out is in, if there is one, so that an answer about the old head never lands
 after one about the new. `Typing` says whether
 keys are going into a text field, for a host deciding whether a key is its own.
+Hosts must execute every command returned by `Step` or `Update`, including
+commands returned while handling command results: approval writes are asynchronous.
 
-A scan reads the text of every changed file, for the unchanged lines between
-its hunks, and it reads up to eight at once: from a source across a network,
-one after another is a round trip each.
+`Source.ReadContents(scan)` is required. It returns a complete changed-path
+manifest and exact old/new bytes, presence, paths and modes bound to the scan's
+resolved revisions. The window derives its main patch, approval IDs and gaps
+from those pairs. Missing data stays readable through the host patch but is
+explicitly unverified. Methods must support concurrent calls: an approval
+rechecks the source while holding the review lock, off the render thread.
+Commit views may read `FileContent` in parallel for their gaps.
 
 `*git.Repo`, in `internal/git`, is the source the command uses: it is all
 three interfaces, and its own store.
 
 ## Cost
 
-One rescan is about a dozen git commands, whatever the size of the change: the
-branch and its base, the commits it adds, the four that build the working tree
-status, and **two diffs** — the review itself and the same tree measured from
-`HEAD`. Both cover every file at once, so a review of two hundred files costs
-the same number of commands as a review of two. Untracked files are the one
-exception, since there is no revision they belong to: they cost one small
-`--no-index` diff each.
+A rescan batches tracked metadata, clean-filtered hashes and blob reads into
+a fixed number of Git commands, including two content passes to detect a moving
+worktree. Large files and comparisons have explicit verification limits.
+Untracked display patches and changed submodule heads may need individual
+queries. The canonical comparison and syntax highlighting run off the render
+thread.
 
 Parsing and lexing that answer is the expensive part, and it is done off the
 render path, so a large change never makes the window stutter. Reading a single
