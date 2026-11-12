@@ -22,7 +22,8 @@ flowchart LR
 ## Packages
 
 - `pkg/source` is everything the window needs of a change: one required
-  interface, `Source` (the diff, its commits, a file's text at a commit), and
+  interface, `Source` (the diff, its commits, a file's text at a commit,
+  and a coherent manifest of complete content pairs through `ReadContents`), and
   two a source may add — `Worktree` (branches, checkout, `$EDITOR`) and
   `Carrier` (carrying a comment between a commit and the whole review). The
   window asks once, when it is made, and offers only what the source has.
@@ -50,6 +51,9 @@ flowchart LR
   writes it under a lock. It does no I/O of its own; the caller's `System`
   does. The card's format is `card.schema.json`, embedded, which `ParseCard`
   holds a card to.
+  Canonical approvals name their identity scheme in version 4. Legacy claims
+  remain separately recorded when their original evidence cannot prove the
+  new identity; the store retains the exact original document before upgrade.
 - `internal/cli` is the subcommands: the same review, driven without the
   window, for scripts and agents.
 
@@ -72,7 +76,18 @@ the file's own, made on every rebuild with lines and gaps of its own and
 keyed apart (`reviewFile.id`), so the stack finds, folds and keeps the cursor
 in each entry by its id and acts on the review by its path.
 
-A rescan is a fixed dozen or so git commands whatever the size of the change,
-and parsing and lexing happen off the render path. The window polls its review
+A rescan batches tracked-file metadata, filtered hashes and object reads into
+a fixed number of git commands; untracked display diffs and changed submodule
+heads may need individual queries. Parsing and lexing happen off the render path. The window polls its review
 file once a second and never its source; a host whose source has moved sends
 `ui.RescanMsg`.
+
+Approval identity and the main-review patch come from one bounded canonical
+Myers comparison of complete contents, through `x/pkg/diff`. Display context
+only groups its runs. Main-review gaps use those same bytes. A host patch is
+readable fallback when contents are unavailable and cannot justify a verdict.
+UI review writes run as commands off the render thread. Approval commands
+re-read and compare the source under the store lock, reject a changed displayed
+identity, and apply the intention to the latest document. Input waits in order
+while the write runs; resize and quit remain responsive. An Apart window only
+reconciles its in-memory view automatically; explicit decisions persist.

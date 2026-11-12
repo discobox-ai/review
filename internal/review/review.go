@@ -43,18 +43,11 @@ func safeBranch(branch string) string {
 	return strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(branch)
 }
 
-// Version is the schema version written into every file. It exists so that a
-// reader can tell whether it understands what it is looking at.
-//
-// 3 is the version in which a review can carry a [Card]. 2 is the one in which
-// a file carries a verdict for each reviewer; 1 kept a single approval on the
-// file itself, signed by whoever gave it last, and a review written that way
-// is still read — see [File.UnmarshalJSON].
-//
-// A review is written as 3 only when it has a card, and as 2 otherwise: a
-// discobox-review from before cards reads every review that has none, and
-// refuses one that has, rather than reading it and writing it back without.
-const Version = 3
+// Version is the newest schema understood. Version 4 separates canonical
+// identities and retained legacy claims; 3 adds a card, 2 per-reviewer
+// verdicts, and 1 stores the verdict directly on each file. Writes without
+// canonical state remain version 2 or 3; an upgraded review never downgrades.
+const Version = 4
 
 // versionWithout is the version a review with no card is written as.
 const versionWithout = 2
@@ -70,7 +63,8 @@ const (
 
 // State is the whole review of one branch.
 type State struct {
-	Version int `json:"version"`
+	Version int    `json:"version"`
+	Scheme  string `json:"scheme,omitempty"`
 
 	// Branch and Base say what this review is of. Base is the ref, empty when
 	// discobox-review is left to work one out.
@@ -114,10 +108,12 @@ type File struct {
 // this is what happened, rather than the approval merely never having been
 // given, since the two are worth telling apart.
 type Verdict struct {
-	By        string `json:"by"`
-	Approved  bool   `json:"approved"`
-	Digest    string `json:"digest,omitempty"`
-	Nullified bool   `json:"nullified,omitempty"`
+	By        string           `json:"by"`
+	Scheme    string           `json:"scheme,omitempty"`
+	Legacy    []LegacyApproval `json:"legacy,omitempty"`
+	Approved  bool             `json:"approved"`
+	Digest    string           `json:"digest,omitempty"`
+	Nullified bool             `json:"nullified,omitempty"`
 	// Hunks are the parts of the change signed off one at a time, each named
 	// by the digest of a run of changed lines; see [HunkDigests]. They stand
 	// whether or not the file as a whole is approved, and one that names a
@@ -129,7 +125,7 @@ type Verdict struct {
 // empty reports whether a verdict says nothing: no approval, none that fell,
 // and no hunk signed off. Such a one is not kept.
 func (v *Verdict) empty() bool {
-	return !v.Approved && !v.Nullified && len(v.Hunks) == 0
+	return !v.Approved && !v.Nullified && len(v.Hunks) == 0 && len(v.Legacy) == 0
 }
 
 // UnmarshalJSON reads a file's entry in either of the shapes it has had.
@@ -210,7 +206,7 @@ type Comment struct {
 
 // New is an empty review of a branch.
 func New(branch string) *State {
-	return &State{Version: Version, Branch: branch}
+	return &State{Version: versionWithout, Branch: branch}
 }
 
 // Parse reads a review. A file that is not valid JSON is an error rather than
@@ -230,6 +226,31 @@ func Parse(data []byte) (*State, error) {
 	if s.Version > Version {
 		return nil, fmt.Errorf("the review is version %d and this discobox-review reads up to %d: it wants upgrading", s.Version, Version)
 	}
+	if s.Scheme != "" && s.Scheme != IdentityScheme {
+		return nil, fmt.Errorf("unknown approval identity scheme: %s", s.Scheme)
+	}
+	if s.Scheme != "" && s.Version != 4 {
+		return nil, fmt.Errorf("approval identity scheme requires review version 4")
+	}
+	if s.Version == 4 && s.Scheme == "" {
+		return nil, fmt.Errorf("version 4 review has no approval identity scheme")
+	}
+	for _, f := range s.Files {
+		if f == nil {
+			continue
+		}
+		for _, v := range f.Verdicts {
+			if v == nil {
+				continue
+			}
+			if v.Scheme != "" && v.Scheme != IdentityScheme {
+				return nil, fmt.Errorf("unknown approval identity scheme for %s: %s", f.Path, v.Scheme)
+			}
+			if (v.Scheme != "" || len(v.Legacy) > 0) && s.Scheme == "" {
+				return nil, fmt.Errorf("canonical verdict requires review version 4 and an identity scheme")
+			}
+		}
+	}
 	s.normalise()
 	return &s, nil
 }
@@ -238,7 +259,10 @@ func Parse(data []byte) (*State, error) {
 // everything above this line can assume a complete document.
 func (s *State) normalise() {
 	if s.Version == 0 {
-		s.Version = Version
+		s.Version = versionWithout
+		if s.Card != nil {
+			s.Version = 3
+		}
 	}
 	// A path named twice is one file: somebody adding their approval by hand
 	// may well have added an entry rather than looked for the one there, and
@@ -281,6 +305,10 @@ func (s *State) normalise() {
 			if len(v.Hunks) == 0 {
 				v.Hunks = verdicts[at].Hunks
 			}
+			v.mergeLegacy(verdicts[at].Legacy)
+			if v.Approved {
+				v.retireLegacy()
+			}
 			verdicts[at] = v
 		}
 		f.Verdicts = verdicts
@@ -322,6 +350,9 @@ func (s *State) normalise() {
 func (s *State) Bytes() []byte {
 	s.Version = versionWithout
 	if s.Card != nil {
+		s.Version = 3
+	}
+	if s.Scheme != "" {
 		s.Version = Version
 	}
 	s.normalise()
@@ -423,12 +454,20 @@ func (s *State) named(path string, want func(*Verdict) bool) []string {
 	return out
 }
 
-// Approve records a reviewer's approval of the change identified by digest.
+// Approve records a reviewer's canonical approval of a verified change.
 // Anybody else's verdict on the path is left as it is.
-func (s *State) Approve(path, digest, by string) {
+func (s *State) Approve(path string, identity Identity, by string) error {
+	if identity.Digest == "" {
+		return fmt.Errorf("approval verification unavailable for %s", path)
+	}
 	v := s.verdictFor(path, by)
-	v.Approved, v.Digest, v.Nullified = true, digest, false
+	v.replaceLegacy(identity.Fingerprint)
+	s.Scheme = IdentityScheme
+	v.Approved, v.Digest, v.Nullified = true, identity.Digest, false
+	v.Scheme = IdentityScheme
+	v.retireLegacy()
 	v.At = Now()
+	return nil
 }
 
 // Unapprove takes a reviewer's approval back, and the hunks they signed off
@@ -450,7 +489,13 @@ func (s *State) drop(path string, match func(*Verdict) bool) {
 	if f == nil {
 		return
 	}
-	f.Verdicts = slices.DeleteFunc(f.Verdicts, match)
+	for _, v := range f.Verdicts {
+		if match(v) && len(v.Legacy) > 0 {
+			v.retireLegacy()
+			v.Approved, v.Nullified, v.Hunks = false, false, nil
+		}
+	}
+	f.Verdicts = slices.DeleteFunc(f.Verdicts, func(v *Verdict) bool { return match(v) && len(v.Legacy) == 0 })
 	if len(f.Verdicts) == 0 {
 		s.Files = slices.DeleteFunc(s.Files, func(o *File) bool { return o == f })
 	}
@@ -484,40 +529,37 @@ func (s *State) SetHunks(path, by string, digests []string) {
 	}
 	digests = append([]string(nil), digests...)
 	sort.Strings(digests)
-	s.verdictFor(path, by).Hunks = digests
+	v := s.verdictFor(path, by)
+	v.replaceLegacy("")
+	s.Scheme = IdentityScheme
+	v.Hunks, v.Scheme = digests, IdentityScheme
+	v.retireLegacy()
 }
 
-// ClaimHunks hands a reviewer the hunks that are signed off under no name, in
-// every path, and reports whether there were any.
-//
-// A version 1 review named whoever approved a file and nobody for a hunk
-// signed off on its own, so those come over belonging to no one — see
-// [File.UnmarshalJSON]. But only a window has ever signed off a hunk, and a
-// window has one reader, so the first one to open the review takes them as
-// its reader's: they are that person's reading, and would otherwise sit in
-// the file counting for nobody while every hunk came back unread.
-//
-// An approval of the whole file under no name is left where it is. That is
-// what a hand writes, and whose hand is exactly what must not be guessed.
-func (s *State) ClaimHunks(by string) bool {
+// ClaimLegacyHunks gives the window's reader ownership of old unnamed hunk
+// claims for verified paths. Ownership does not prove their identities: they
+// enter pending legacy history, never active canonical hunk approvals. An
+// unnamed file approval stays unnamed.
+func (s *State) ClaimLegacyHunks(by string, identities map[string]Identity) bool {
 	if by == "" {
 		return false
 	}
 	claimed := false
 	for _, f := range slices.Clone(s.Files) {
+		identity := identities[f.Path]
+		if identity.Digest == "" {
+			continue
+		}
 		nameless := f.verdict("")
-		if nameless == nil || len(nameless.Hunks) == 0 {
+		if nameless == nil || nameless.Scheme != "" || len(nameless.Hunks) == 0 {
 			continue
 		}
 		mine := s.verdictFor(f.Path, by)
-		for _, d := range nameless.Hunks {
-			if !slices.Contains(mine.Hunks, d) {
-				mine.Hunks = append(mine.Hunks, d)
-			}
-		}
-		sort.Strings(mine.Hunks)
-		nameless.Hunks, claimed = nil, true
+		mine.Legacy = append(mine.Legacy, LegacyApproval{Approved: false, Nullified: nameless.Nullified, Digest: nameless.Digest, Hunks: slices.Clone(nameless.Hunks), At: nameless.At, Fingerprint: identity.Fingerprint, Retired: nameless.Nullified})
+		s.Scheme = IdentityScheme
+		nameless.Hunks = nil
 		s.drop(f.Path, (*Verdict).empty)
+		claimed = true
 	}
 	return claimed
 }
@@ -551,55 +593,10 @@ func (s *State) PruneHunks(path string, present map[string]bool) bool {
 	return changed
 }
 
-// Reconcile checks every approval against the change now in front of the
-// reviewer, and reports whether anything moved, and which paths had an
-// approval fall.
-//
-// digests maps a path to the digest of its current change. An approval whose
-// digest no longer matches is nullified: the file has been edited since it was
-// read, so the approval was of something else — whoever gave it. An approval
-// carrying no digest at all — the shape an agent writes when it approves a
-// file by hand — is stamped with the current one rather than being treated as
-// stale, since "approved" plainly means "approved as it is now".
-func (s *State) Reconcile(digests map[string]string) (changed bool, nullified []string) {
-	for _, f := range s.Files {
-		cur, ok := digests[f.Path]
-		if !ok {
-			// Not part of the review as it now stands: the base may have
-			// moved, or the change may have been committed away. Leaving the
-			// approvals alone means they are still there if the file comes
-			// back.
-			continue
-		}
-		fell := false
-		for _, v := range f.Verdicts {
-			switch {
-			case !v.Approved:
-			case v.Digest == "":
-				v.Digest, changed = cur, true
-				if v.At == "" {
-					v.At = Now()
-				}
-			case v.Digest != cur:
-				v.Approved, v.Nullified, changed, fell = false, true, true, true
-			}
-		}
-		if fell {
-			nullified = append(nullified, f.Path)
-		}
-	}
-	sort.Strings(nullified)
-	return changed, nullified
-}
-
-// Digest identifies a change to one file, independently of how it is being
-// looked at.
-//
-// Only the changed lines and their numbers go in, so that turning the diff
-// context up or down — which moves every hunk boundary — does not nullify a
-// single approval, while editing one character of one line nullifies exactly
-// the file it was in.
-func Digest(p *git.Patch) string {
+// LegacyDigest reproduces versions 1–3 patch checksums for migration tests.
+// Host hunk alignment, metadata and missing terminators make this unsuitable
+// for approval identity; use Compare on a complete content pair instead.
+func LegacyDigest(p *git.Patch) string {
 	if p == nil {
 		return ""
 	}
@@ -626,15 +623,9 @@ func Digest(p *git.Patch) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// HunkDigests identifies the parts of a change, hunk by hunk: for each hunk of
-// the patch, one digest for every unbroken run of changed lines in it.
-//
-// A run rather than the hunk, for the reason [Digest] leaves the context out.
-// Where a hunk begins and ends is a matter of how much context was asked for,
-// and two that were apart become one when it is turned up; the runs of changed
-// lines inside them are the same runs either way. So an approval is recorded
-// against the runs, and a hunk is approved when all of its runs are.
-func HunkDigests(p *git.Patch) [][]string {
+// LegacyHunkDigests reproduces old patch run grouping for commit-view folds
+// and legacy fixtures. These checksums never prove approval of a content pair.
+func LegacyHunkDigests(p *git.Patch) [][]string {
 	if p == nil {
 		return nil
 	}

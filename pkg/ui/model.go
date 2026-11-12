@@ -124,9 +124,16 @@ type Model struct {
 	// The working tree's own review — every change from the base — kept even
 	// while a single commit is being read, since it is the space comments are
 	// stored in and the thing approvals are about.
-	work   []*reviewFile
-	workBy map[string]*reviewFile
-	state  map[string]git.State
+	work                  []*reviewFile
+	workBy                map[string]*reviewFile
+	state                 map[string]git.State
+	reading               review.Reading
+	writing               bool
+	writeID               uint64
+	pendingReconcile      bool
+	deferredReview        []deferredReviewInput
+	replayingReview       bool
+	reviewReplayScheduled bool
 
 	// commit is the commit being read, empty for the whole review. Its files
 	// and the diffs that carry comments in and out of it are kept for as long
@@ -335,11 +342,6 @@ func New(src source.Source, opts Options) Model {
 	return m
 }
 
-// errNoStore is what a write fails with when the window keeps no review. The
-// window offers no command that writes one, so it is never seen but by
-// something that reached past the keys.
-var errNoStore = errors.New("nothing here keeps a review")
-
 // offerer is [Model.offer] for a reader's hint line, which is one run of
 // hints separated the way the status bar's are.
 func (m Model) offerer() func(string) string {
@@ -412,9 +414,10 @@ func (m Model) Typing() bool {
 // ---------------------------------------------------------------------------
 
 type rescanMsg struct {
-	scan  git.Scan
-	files []*reviewFile
-	err   error
+	scan    git.Scan
+	reading review.Reading
+	files   []*reviewFile
+	err     error
 
 	// base is the ref the scan was asked to measure from, empty for the
 	// source's own choice.
@@ -479,19 +482,41 @@ func (m *Model) scan() tea.Cmd {
 // and doing it here means a big change never makes the window stutter.
 func (m Model) rescanCmd() tea.Cmd {
 	src, baseRef, context := m.src, m.baseRef, m.context
+	apart := m.apart
 	return func() tea.Msg {
 		scan, err := src.Scan(baseRef, context)
-		scan = drawable(scan)
 		if err != nil {
-			return rescanMsg{scan: scan, err: err, base: baseRef}
+			return rescanMsg{scan: drawable(scan), err: err, base: baseRef}
 		}
+		reading := review.CompareScan(src, scan, context)
+		if scan.Base.Err != "" && !apart {
+			reading.Complete = false
+			for path := range reading.Identities {
+				reading.Identities[path] = review.Identity{}
+				reading.Problems[path] = scan.Base.Err
+			}
+		}
+		scan = drawable(reading.Scan)
 		states := map[string]git.State{}
 		for _, f := range scan.Files {
 			states[f.Path] = f.State
 		}
 		files := buildFiles(scan.Diff, scan.Pending, states)
-		addGaps(src, "", files)
-		return rescanMsg{scan: scan, files: files, base: baseRef}
+		compared := map[string]review.Compared{}
+		for _, file := range reading.Files {
+			compared[file.Patch.Path] = file
+		}
+		for _, file := range files {
+			file.identity = reading.Identities[file.path]
+			file.verifiable = file.identity.Digest != ""
+			file.problem = reading.Problems[file.path]
+			if !file.verifiable && file.problem == "" {
+				file.problem = "Approval verification unavailable"
+			}
+			file.blocks = compared[file.path].Hunks
+		}
+		addReadingGaps(reading, files)
+		return rescanMsg{scan: scan, reading: reading, files: files, base: baseRef}
 	}
 }
 
@@ -584,8 +609,8 @@ func buildFiles(diff, pending string, states map[string]git.State) []*reviewFile
 		}
 		f := &reviewFile{
 			path: p.Path, from: p.From, patch: p,
-			lines: p.Render(), digest: review.Digest(p),
-			blocks:  review.HunkDigests(p),
+			lines:   p.Render(),
+			blocks:  review.LegacyHunkDigests(p),
 			pending: uncommitted[p.Path], state: states[p.Path],
 		}
 		f.adds, f.dels = p.Stat()
@@ -702,7 +727,26 @@ func lexAll(files []*reviewFile) {
 // ---------------------------------------------------------------------------
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.queueReviewInput(msg) {
+		return m, nil
+	}
 	switch msg := msg.(type) {
+	case replayReviewInputMsg:
+		m.reviewReplayScheduled = false
+		if m.writing || len(m.deferredReview) == 0 {
+			return m, nil
+		}
+		input := m.deferredReview[0]
+		m.deferredReview = m.deferredReview[1:]
+		if input.branch != m.branch || input.gen != m.gen || input.focus == focusCompose && (input.compose != m.compose || m.focus != focusCompose) {
+			m.setWarn("The change moved; repeat the command after reading it")
+			return m, m.replayReviewInput()
+		}
+		m.replayingReview = true
+		next, cmd := m.Update(input.msg)
+		m = next.(Model) //nolint:errcheck // Update always returns a Model
+		m.replayingReview = false
+		return m, tea.Batch(cmd, m.replayReviewInput())
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
@@ -761,44 +805,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.scan()
 		return m, cmd
 
+	case reviewWriteMsg:
+		return m.onReviewWrite(msg)
+
 	case approveAllMsg:
-		// As with one file: deciding about it hands its fold back to the rule,
-		// so what has just been signed off goes away.
 		undo := m.keepFolds(msg.paths...)
 		for _, p := range msg.paths {
 			delete(m.folds, p)
 		}
-		if !m.mutate(func(st *review.State) {
-			for _, p := range msg.paths {
-				st.Approve(p, msg.digests[p], msg.by)
-				st.SetHunks(p, msg.by, msg.hunks[p])
-			}
-		}) {
-			undo()
-			return m, nil
-		}
-		m.setOK("Approved " + plural(len(msg.paths), "file", "files"))
-		return m, nil
+		cmd := m.mutate(reviewMutation{expected: msg.identities, requireComplete: true, failed: undo,
+			apply: func(st *review.State) error {
+				for _, p := range msg.paths {
+					if err := st.Approve(p, msg.identities[p], msg.by); err != nil {
+						return err
+					}
+					st.SetHunks(p, msg.by, msg.hunks[p])
+				}
+				return nil
+			}, after: func(m *Model) tea.Cmd { m.setOK("Approved " + plural(len(msg.paths), "file", "files")); return nil }})
+		return m, cmd
 
 	case deleteMsg:
-		if msg.comment < 0 {
-			if m.mutate(func(st *review.State) { st.Remove(msg.id) }) {
-				m.setOK("Deleted " + msg.id)
-			}
-			return m, nil
-		}
 		gone := false
-		if !m.mutate(func(st *review.State) {
-			_, gone = st.RemoveComment(msg.id, msg.comment)
-		}) {
-			return m, nil
-		}
-		if gone {
-			m.setOK("Deleted the last comment, and " + msg.id + " with it")
-		} else {
-			m.setOK("Deleted a comment from " + msg.id)
-		}
-		return m, nil
+		cmd := m.mutate(reviewMutation{apply: func(st *review.State) error {
+			if msg.comment < 0 {
+				st.Remove(msg.id)
+			} else {
+				_, gone = st.RemoveComment(msg.id, msg.comment)
+			}
+			return nil
+		}, after: func(m *Model) tea.Cmd {
+			switch {
+			case msg.comment < 0:
+				m.setOK("Deleted " + msg.id)
+			case gone:
+				m.setOK("Deleted the last comment, and " + msg.id + " with it")
+			default:
+				m.setOK("Deleted a comment from " + msg.id)
+			}
+			return nil
+		}})
+		return m, cmd
 
 	case baseChosenMsg:
 		return m.onBaseChosen(msg.ref)
@@ -848,6 +895,14 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 		again = m.scan()
 	}
 	if msg.err != nil {
+		m.reading = review.Reading{Identities: map[string]review.Identity{}}
+		for _, f := range m.work {
+			f.verifiable = false
+			f.identity = review.Identity{}
+			f.problem = "Approval verification unavailable"
+		}
+		m.incomplete = "Approval verification unavailable: " + firstLine(msg.err.Error())
+		m.rebuild()
 		m.setError(firstLine(msg.err.Error()))
 		return m, again
 	}
@@ -861,6 +916,7 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 		m.setError(msg.scan.Base.Err)
 	}
 
+	m.reading = msg.reading
 	m.work = msg.files
 	m.reopenGaps("", msg.files)
 	m.workBy = make(map[string]*reviewFile, len(msg.files))
@@ -887,17 +943,12 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.adoptReview()
-	if m.baseToSave && msg.base == m.baseRef {
-		// The base chosen with b, now that a scan has measured from it.
+	var save tea.Cmd
+	if m.baseToSave && msg.base == m.baseRef && m.baseFound() && !m.writing {
 		m.baseToSave = false
-		if m.baseFound() && m.mutate(func(*review.State) {}) {
-			if m.baseRef == "" {
-				m.setOK("Base: whatever this branch is built on")
-			} else {
-				m.setOK("Base: " + m.baseRef)
-			}
-		}
+		save = m.mutate(reviewMutation{apply: func(*review.State) error { return nil }, after: func(m *Model) tea.Cmd { m.setOK("Base: " + m.baseRef); return nil }})
 	}
+
 	if !m.basePinned && m.baseRef != msg.base {
 		// The review names a base this scan was not measured from — the
 		// first scan of a session goes out before the review is read, and
@@ -912,7 +963,7 @@ func (m Model) onRescan(msg rescanMsg) (tea.Model, tea.Cmd) {
 		m.editor.Blur()
 	}
 	m.layout()
-	return m, tea.Batch(m.selectedCommitCmd(), again)
+	return m, tea.Batch(m.selectedCommitCmd(), again, save, m.reconcile(true))
 }
 
 // onCommitFiles takes delivery of a commit's diff, and shows it only if the
@@ -965,7 +1016,6 @@ func (m *Model) adoptReview() {
 	if saved := m.readReview(); !m.basePinned {
 		m.baseRef = saved
 	}
-	m.reconcile(true)
 }
 
 // readReview loads the review file and reports the base it names, which is not
@@ -978,6 +1028,7 @@ func (m *Model) adoptReview() {
 // so: an agent caught halfway through writing one is a moment, not a reason to
 // lose a review.
 func (m *Model) readReview() (base string) {
+	before := m.store.StateFileStamp(review.FileName)
 	data, ok := m.store.ReadStateFile(review.FileName)
 	if !ok {
 		m.rv, m.rvErr = review.New(m.branch), ""
@@ -998,6 +1049,9 @@ func (m *Model) readReview() (base string) {
 	}
 	m.rv, m.rvErr = st, ""
 	m.stamp = m.store.StateFileStamp(review.FileName)
+	if m.stamp != before {
+		m.stamp = git.Stamp{}
+	}
 	return m.rv.Base
 }
 
@@ -1027,66 +1081,6 @@ func (m *Model) keepOwnReview() {
 	m.rvErr = "this branch's review could not be read"
 }
 
-// update is every write the window makes: the review is read again, handed to
-// change, and saved if that left it different, all under the review's lock —
-// see [review.Update], which the commands write through as well. When it
-// fails, nothing has changed anywhere.
-//
-// That is what lets the window and any number of commands work on the same
-// review at the same time. All of them write the file whole, so a change has
-// to be applied to what is on disk right now — rather than to what was on disk
-// when the window was last drawn — and nothing else may write between that
-// read and this write, or a comment somebody added a moment ago is quietly
-// dropped.
-func (m *Model) update(wait time.Duration, change func(*review.State)) error {
-	if m.store == nil {
-		return errNoStore
-	}
-	var now *review.State
-	err := review.Update(m.store, m.branch, wait, func(st *review.State) error {
-		change(st)
-		// A base chosen here, in this session, is the window's to say. Any
-		// other is the file's: one set by a command a moment ago, which the
-		// poll has not got to yet, must not be put back by this write. Nor
-		// is one the source could not find, which would leave the review
-		// measured from something nothing else here can read either: so it
-		// waits for a scan that was measured from it and found it.
-		if m.basePinned && !m.apart && m.baseFound() {
-			st.Base = m.baseRef
-		}
-		now = st
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	m.rv, m.rvErr = now, ""
-	m.stamp = m.store.StateFileStamp(review.FileName)
-	if m.apart {
-		// What was read back is the file's own verdict, not this tree's.
-		m.reconcile(true)
-	}
-	if !m.basePinned && now.Base != m.baseRef {
-		// The base moved under the window. Every diff on screen is measured
-		// from the old one, which is the poll's business to put right: with
-		// no stamp to recognize the file by, the next tick takes it for new.
-		m.stamp = git.Stamp{}
-	}
-	return nil
-}
-
-// mutate changes the review at the asking of whoever is at the window, and
-// reports whether the change was saved. When it was not, it was not made
-// either: the status bar says why, and the caller has nothing to announce.
-func (m *Model) mutate(fn func(*review.State)) bool {
-	if err := m.update(lockWait, fn); err != nil {
-		m.setError("Saving the review: " + firstLine(err.Error()))
-		return false
-	}
-	m.rebuild()
-	return true
-}
-
 // pickUpChanges is the poll: it notices the review file being written by
 // something that is not discobox-review and takes the change straight onto the screen.
 func (m *Model) pickUpChanges() tea.Cmd {
@@ -1109,100 +1103,15 @@ func (m *Model) pickUpChanges() tea.Cmd {
 	// an approval of the file as it stands for not being of the file as it
 	// was. So the tree is read again first, and the scan's arrival does the
 	// judging.
-	stale := m.reconcile(false)
+	judgment := m.reconcile(false)
 	m.rebuild()
-	if moved || stale {
+	if moved {
 		// The base is what every diff on screen was taken against, so a
 		// review that names a different one has to be read again from git
 		// too.
 		return m.scan()
 	}
-	return nil
-}
-
-// reconcile checks the approvals against the changes now in front of the
-// reviewer, and says so when one has fallen.
-//
-// fresh says the changes in front of the reviewer have just been read from
-// git. When they have not, nothing is decided: it reports whether there is
-// anything to decide, and the caller reads git again before coming back.
-func (m *Model) reconcile(fresh bool) (undecided bool) {
-	if len(m.work) == 0 || m.store == nil {
-		return false
-	}
-	digests := make(map[string]string, len(m.work))
-	for _, f := range m.work {
-		digests[f.path] = f.digest
-	}
-	// The same for the hunks: an approval of a run of lines that is no longer
-	// in the change is dropped, rather than left to match again if the edit
-	// that removed it is ever undone.
-	present := make(map[string]map[string]bool, len(m.work))
-	for _, f := range m.work {
-		runs := map[string]bool{}
-		for _, d := range slices.Concat(f.blocks...) {
-			runs[d] = true
-		}
-		present[f.path] = runs
-	}
-	author := m.author
-	verdict := func(st *review.State) (changed bool, nullified []string) {
-		changed, nullified = st.Reconcile(digests)
-		// Hunks signed off before a sign-off carried a name are this
-		// reader's: see [review.State.ClaimHunks].
-		if st.ClaimHunks(author) {
-			changed = true
-		}
-		for path, runs := range present {
-			if st.PruneHunks(path, runs) {
-				changed = true
-			}
-		}
-		return changed, nullified
-	}
-	// Asked of a copy, so that the screen changes only once the verdict is
-	// saved: one that could not be written must not be shown as if it stood.
-	probe, err := review.Parse(m.rv.Bytes())
-	if err != nil {
-		return false
-	}
-	changed, nullified := verdict(probe)
-	if !changed {
-		return false
-	}
-	if m.apart {
-		// Shown, never saved: see Options.Apart.
-		m.rv = probe
-		return false
-	}
-	if !fresh {
-		return true
-	}
-	// What fell, fell from the copy on screen. The file may have moved on
-	// since that was read, so the same verdict is given again on what is
-	// there now, and that is what is saved.
-	//
-	// Nobody asked for this write, so it does not make them wait for it: if
-	// something else has the lock this instant, the stamp is forgotten and the
-	// next tick reads the file as new and comes back here. Any other failure
-	// is not going to mend itself in a second, and is said once.
-	err = m.update(0, func(st *review.State) { verdict(st) })
-	switch {
-	case errors.Is(err, git.ErrLocked):
-		m.stamp = git.Stamp{}
-		return
-	case err != nil:
-		m.setError("Saving the review: " + firstLine(err.Error()))
-		return
-	}
-	switch len(nullified) {
-	case 0:
-	case 1:
-		m.setWarn(nullified[0] + " changed since it was approved")
-	default:
-		m.setWarn(plural(len(nullified), "approval", "approvals") + " nullified: files changed since they were read")
-	}
-	return false
+	return judgment
 }
 
 // ---------------------------------------------------------------------------
@@ -1299,17 +1208,26 @@ func (m *Model) place(files []*reviewFile) []*reviewFile {
 		// The verdict a file is read by is the reader's own. Anybody else's
 		// is shown beside it and decides nothing: a file an agent approved
 		// is still one the person at the window has not read.
-		f.approved = m.rv.Approved(f.path, m.author)
+		identity := f.identity
+		if m.commit != "" {
+			if work := m.workBy[f.path]; work != nil {
+				identity = work.identity
+			}
+		}
+		f.approved = m.standing(f.path, m.author, identity)
+		f.legacy = m.rv.NeedsReview(f.path)
 		f.nullified = m.rv.Nullified(f.path, m.author)
 		mine := func(by string) bool { return by == m.author }
-		f.others = slices.DeleteFunc(m.rv.Approvers(f.path), mine)
+		f.others = slices.DeleteFunc(m.rv.Approvers(f.path), func(by string) bool { return mine(by) || !m.standing(f.path, by, identity) })
 		f.othersFell = slices.DeleteFunc(m.rv.Fallen(f.path), mine)
 		f.folded = m.foldedFor(f)
 		f.signed = nil
-		if m.commit == "" {
+		if m.commit == "" && f.verifiable {
 			// A hunk of one commit is not a hunk of the review, so there is
 			// nothing of the kind to show while a commit is being read.
-			f.signed = m.rv.ApprovedHunks(f.path, m.author)
+			if v := m.rv.VerdictOf(f.path, m.author); v != nil && v.Scheme == review.IdentityScheme {
+				f.signed = m.rv.ApprovedHunks(f.path, m.author)
+			}
 		}
 		if m.commit != "" {
 			// The state of the working tree says nothing about a commit that
@@ -2149,6 +2067,10 @@ func (m Model) doFoldHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 // hunk of a file signs off the file, and taking one hunk back out of an
 // approved file leaves the others standing — "all of it but this".
 func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
+	if !f.verifiable {
+		m.setError("Approval verification unavailable for " + f.path)
+		return m, nil
+	}
 	hunk := f.lines[head].Hunk
 	if hunk >= len(f.blocks) || len(f.blocks[hunk]) == 0 {
 		return m, nil
@@ -2164,8 +2086,8 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 			delete(m.hunks, k)
 		}
 	}
-	undo := func() { maps.Copy(m.hunks, was) }
-	path, digest, author := f.path, f.digest, m.author
+	undo := func(m *Model) tea.Cmd { maps.Copy(m.hunks, was); return nil }
+	path, identity, author := f.path, f.identity, m.author
 	key := f.id()
 	withdraw := f.approved || f.hunkApproved(hunk)
 	order := m.view.paths()
@@ -2183,14 +2105,18 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 	all := f.blocks
 	left, promoted := 0, false
 	apart := m.apart
-	if !m.mutate(func(st *review.State) {
+	cmd := m.mutate(reviewMutation{expected: map[string]review.Identity{path: identity}, failed: undo, apply: func(st *review.State) error {
 		approved, signed := st.Approved(path, author), st.ApprovedHunks(path, author)
+		if v := st.VerdictOf(path, author); v == nil || v.Scheme != review.IdentityScheme {
+			approved = false
+			signed = nil
+		}
 		var keep []string
 		if apart {
 			// What the file says is the tree's (Options.Apart): an approval of
 			// another digest is no approval here, and a run this commit does
 			// not show is the tree's to keep.
-			if v := st.VerdictOf(path, author); v != nil && v.Digest != "" && v.Digest != digest {
+			if v := st.VerdictOf(path, author); v != nil && v.Digest != "" && v.Digest != identity.Digest {
 				approved = false
 			}
 			shown := map[string]bool{}
@@ -2228,35 +2154,37 @@ func (m Model) doApproveHunk(f *reviewFile, head int) (tea.Model, tea.Cmd) {
 				st.Unapprove(path, author)
 			}
 		case left == 0:
-			st.Approve(path, digest, author)
+			if err := st.Approve(path, identity, author); err != nil {
+				return err
+			}
 			promoted = true
 		}
 		st.SetHunks(path, author, keep)
-	}) {
-		undo()
-		return m, nil
-	}
-	switch {
-	case withdraw:
-		m.setOK("Approval withdrawn from this hunk of " + path)
-	case promoted:
-		// Deciding about a file hands its fold back to the rule too, in
-		// both of its entries when the card's core has it.
-		delete(m.folds, path)
-		delete(m.folds, coreKey(path))
-		m.rebuild()
-		m.setOK("Approved " + path)
-	default:
-		m.setOK("Approved a hunk of " + path + " · " + plural(left, "hunk", "hunks") + " to go")
-	}
-	// The rows were laid out again around the file's heading, which may be
-	// far above the pane. It is the hunk that changed shape, so it is the
-	// hunk's header that keeps its place on the screen.
-	m.view.hold(key, head, screen)
-	if withdraw || !m.advance(order, key, hunk) {
-		m.view.goToDiffLine(key, head)
-	}
-	return m, nil
+		return nil
+	}, after: func(m *Model) tea.Cmd {
+		switch {
+		case withdraw:
+			m.setOK("Approval withdrawn from this hunk of " + path)
+		case promoted:
+			// Deciding about a file hands its fold back to the rule too, in
+			// both of its entries when the card's core has it.
+			delete(m.folds, path)
+			delete(m.folds, coreKey(path))
+			m.rebuild()
+			m.setOK("Approved " + path)
+		default:
+			m.setOK("Approved a hunk of " + path + " · " + plural(left, "hunk", "hunks") + " to go")
+		}
+		// The rows were laid out again around the file's heading, which may be
+		// far above the pane. It is the hunk that changed shape, so it is the
+		// hunk's header that keeps its place on the screen.
+		m.view.hold(key, head, screen)
+		if withdraw || !m.advance(order, key, hunk) {
+			m.view.goToDiffLine(key, head)
+		}
+		return nil
+	}})
+	return m, cmd
 }
 
 // advance takes the cursor on from what was just approved to the next thing
@@ -2657,7 +2585,7 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 	}
 	author := m.author
 	order, key := m.view.paths(), m.view.keyAt()
-	if m.rv.Approved(path, author) {
+	if f := m.workBy[path]; f != nil && m.standing(path, author, f.identity) {
 		// Withdrawing an approval is having more to say about the file, so it
 		// opens rather than going back to how the window started.
 		undo := m.keepFolds(path, coreKey(path))
@@ -2665,16 +2593,12 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 		if _, core := m.view.byPath[coreKey(path)]; core {
 			m.folds[coreKey(path)] = false
 		}
-		if m.mutate(func(st *review.State) { st.Unapprove(path, author) }) {
-			m.setOK("Approval withdrawn from " + path)
-		} else {
-			undo()
-		}
-		return m, nil
+		cmd := m.mutate(reviewMutation{apply: func(st *review.State) error { st.Unapprove(path, author); return nil }, failed: undo, after: func(m *Model) tea.Cmd { m.setOK("Approval withdrawn from " + path); return nil }})
+		return m, cmd
 	}
 	f := m.workBy[path]
-	if f == nil {
-		m.setError(path + " is not part of this review")
+	if f == nil || !f.verifiable {
+		m.setError(path + ": approval verification unavailable")
 		return m, nil
 	}
 	// Approving a file hands its fold back to the rule every file starts
@@ -2683,35 +2607,35 @@ func (m Model) doApprove() (tea.Model, tea.Cmd) {
 	undo := m.keepFolds(path, coreKey(path))
 	delete(m.folds, path)
 	delete(m.folds, coreKey(path))
-	digest := f.digest
+	identity := f.identity
 	// The hunks go in with the file, so that if the file is edited and the
 	// approval falls, the hunks the edit did not touch are still signed off.
 	// An approval given from the command line records none, and falls whole.
 	all := slices.Concat(f.blocks...)
-	if m.mutate(func(st *review.State) {
-		st.Approve(path, digest, author)
-		st.SetHunks(path, author, all)
-	}) {
-		m.setOK("Approved " + path)
-		m.advance(order, key, -1)
-	} else {
-		undo()
-	}
-	return m, nil
+	cmd := m.mutate(reviewMutation{expected: map[string]review.Identity{path: identity}, failed: undo,
+		apply: func(st *review.State) error {
+			if err := st.Approve(path, identity, author); err != nil {
+				return err
+			}
+			st.SetHunks(path, author, all)
+			return nil
+		},
+		after: func(m *Model) tea.Cmd { m.setOK("Approved " + path); m.advance(order, key, -1); return nil }})
+	return m, cmd
 }
 
 // keepFolds remembers how the reader left some files folded, and hands back
 // what puts that right again. A fold changes with a verdict, and the rows are
 // laid out as the verdict is saved — so the fold is set first, and undone if
 // the save did not happen: a verdict that was not recorded moved nothing.
-func (m *Model) keepFolds(paths ...string) func() {
+func (m *Model) keepFolds(paths ...string) func(*Model) tea.Cmd {
 	type fold struct{ folded, set bool }
 	was := make(map[string]fold, len(paths))
 	for _, p := range paths {
 		v, ok := m.folds[p]
 		was[p] = fold{v, ok}
 	}
-	return func() {
+	return func(m *Model) tea.Cmd {
 		for p, f := range was {
 			if f.set {
 				m.folds[p] = f.folded
@@ -2719,6 +2643,7 @@ func (m *Model) keepFolds(paths ...string) func() {
 				delete(m.folds, p)
 			}
 		}
+		return nil
 	}
 }
 
@@ -2726,9 +2651,17 @@ func (m *Model) keepFolds(paths ...string) func() {
 // for the review that turns out to be all noise — and worth asking about
 // first, since it is the one key here that can say a lot at once.
 func (m Model) doApproveAll() (tea.Model, tea.Cmd) {
+	if !m.reading.Complete {
+		m.setError("Approval verification unavailable for the complete change")
+		return m, nil
+	}
 	var pending []string
 	for _, f := range m.work {
-		if !m.rv.Approved(f.path, m.author) {
+		if !f.verifiable {
+			m.setError("Approval verification unavailable for " + f.path)
+			return m, nil
+		}
+		if !m.standing(f.path, m.author, f.identity) {
 			pending = append(pending, f.path)
 		}
 	}
@@ -2736,9 +2669,9 @@ func (m Model) doApproveAll() (tea.Model, tea.Cmd) {
 		m.setOK("You have already approved every file")
 		return m, nil
 	}
-	digests, hunks := map[string]string{}, map[string][]string{}
+	identities, hunks := map[string]review.Identity{}, map[string][]string{}
 	for _, p := range pending {
-		digests[p] = m.workBy[p].digest
+		identities[p] = m.workBy[p].identity
 		hunks[p] = slices.Concat(m.workBy[p].blocks...)
 	}
 	author := m.author
@@ -2747,16 +2680,16 @@ func (m Model) doApproveAll() (tea.Model, tea.Cmd) {
 			"Each approval is of the change as it stands now, so anything\n"+
 			"edited afterwards comes back unapproved.",
 		func(string) tea.Cmd {
-			return func() tea.Msg { return approveAllMsg{paths: pending, digests: digests, hunks: hunks, by: author} }
+			return func() tea.Msg { return approveAllMsg{paths: pending, identities: identities, hunks: hunks, by: author} }
 		})
 	return m, nil
 }
 
 type approveAllMsg struct {
-	paths   []string
-	digests map[string]string
-	hunks   map[string][]string
-	by      string
+	paths      []string
+	identities map[string]review.Identity
+	hunks      map[string][]string
+	by         string
 }
 
 // doComment starts a conversation about the line under the cursor.
@@ -2973,38 +2906,30 @@ func (m Model) doPost() (tea.Model, tea.Cmd) {
 		m.setError("Write something first")
 		return m.setFocus(focusCompose)
 	}
-	c, author := m.compose, m.author
+	c, author := *m.compose, m.author
 	id := c.thread
-	var saved bool
-	if c.thread != "" {
-		there := false
-		saved = m.mutate(func(st *review.State) { there = st.Reply(c.thread, author, body) })
-		if saved && !there {
-			// Deleted by something else while the reply was being written.
-			// The reply stays in the box: it is the only copy of it.
-			m.setError(c.thread + " is no longer there to reply to")
-			return m.setFocus(focusCompose)
-		}
-	} else {
-		saved = m.mutate(func(st *review.State) {
-			t := st.Start(&review.Thread{
-				Path: c.path, Side: c.side, Line: c.line, Lines: c.span,
-				Text: c.text, Origin: c.origin,
-			}, author, body)
+	cmd := m.mutate(reviewMutation{apply: func(st *review.State) error {
+		if c.thread != "" {
+			if !st.Reply(c.thread, author, body) {
+				return errors.New(c.thread + " is no longer there to reply to")
+			}
+		} else {
+			t := st.Start(&review.Thread{Path: c.path, Side: c.side, Line: c.line, Lines: c.span, Text: c.text, Origin: c.origin}, author, body)
 			id = t.ID
-		})
-	}
-	if !saved {
-		// What was written is still in the box, to be posted again.
-		return m.setFocus(focusCompose)
-	}
-	if c.thread != "" {
-		m.setOK("Replied to " + c.thread)
-	} else {
-		m.setOK("Commented on " + c.path + " as " + id)
-	}
-	m.closeDraft(id)
-	return m.setFocus(focusReview)
+		}
+		return nil
+	}, failed: func(m *Model) tea.Cmd { m.focus = focusCompose; return m.editor.Focus() }, after: func(m *Model) tea.Cmd {
+		if c.thread != "" {
+			m.setOK("Replied to " + c.thread)
+		} else {
+			m.setOK("Commented on " + c.path + " as " + id)
+		}
+		m.closeDraft(id)
+		m.focus = focusReview
+		m.editor.Blur()
+		return nil
+	}})
+	return m, cmd
 }
 
 // doResolve closes the conversation the cursor is in, or opens it again.
@@ -3020,16 +2945,16 @@ func (m Model) doResolve() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	want := !t.Resolved
-	if !m.mutate(func(st *review.State) { st.SetResolved(id, want) }) {
-		return m, nil
-	}
-	if want {
-		delete(m.view.expanded, id)
-		m.setOK("Resolved " + id)
-	} else {
-		m.setOK("Reopened " + id)
-	}
-	return m, nil
+	cmd := m.mutate(reviewMutation{apply: func(st *review.State) error { st.SetResolved(id, want); return nil }, after: func(m *Model) tea.Cmd {
+		if want {
+			delete(m.view.expanded, id)
+			m.setOK("Resolved " + id)
+		} else {
+			m.setOK("Reopened " + id)
+		}
+		return nil
+	}})
+	return m, cmd
 }
 
 // doDelete throws away what the cursor is on: one remark when it is on one,

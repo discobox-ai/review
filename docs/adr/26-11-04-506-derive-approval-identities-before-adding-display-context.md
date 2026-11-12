@@ -1,7 +1,9 @@
 # 26-11-04-506 — Derive approval identities before adding display context
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-11-04
+
+Accepted by the owner by merging #19, 2026-11-04.
 
 ## Context
 
