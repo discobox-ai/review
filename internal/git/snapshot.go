@@ -41,7 +41,7 @@ func (r *Repo) Snapshot(rev string) (*Snapshot, error) {
 // checked out, since that is whose review this is.
 func (s *Snapshot) Scan(baseRef string, context int) (Scan, error) {
 	r := s.repo
-	scan := Scan{Branch: r.CurrentBranch(), HasHEAD: true}
+	scan := Scan{Branch: r.CurrentBranch(), HasHEAD: true, Revision: s.head}
 	scan.Base = r.resolveBase(baseRef, s.head)
 	if scan.Base.SHA == "" {
 		return scan, fmt.Errorf("cannot measure %s from anything", abbrev(s.head))

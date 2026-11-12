@@ -386,8 +386,8 @@ func shotReview(t *testing.T, m Model) Model {
 		// An agent has been through two of the files already, which is the
 		// second column of verdicts: its approval stands beside the reader's
 		// own and is not taken for it.
-		st.Approve("internal/server/handler.go", "", "claude")
-		st.Approve("internal/store/store.go", "", "claude")
+		st.Files = append(st.Files, &review.File{Path: "internal/server/handler.go", Verdicts: []*review.Verdict{{By: "claude", Approved: true}}})
+		st.Files = append(st.Files, &review.File{Path: "internal/store/store.go", Verdicts: []*review.Verdict{{By: "claude", Approved: true}}})
 		for _, f := range st.Files {
 			for _, v := range f.Verdicts {
 				v.At = "2026-08-28T19:41:02+01:00"

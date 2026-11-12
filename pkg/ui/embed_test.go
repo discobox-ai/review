@@ -157,10 +157,10 @@ func TestEmbeddedInAnotherProgram(t *testing.T) {
 // back in, the way a program would.
 func opened(t *testing.T, src source.Source, opts ui.Options) ui.Model {
 	t.Helper()
+	opts.Poll = -1
 	m := ui.New(src, opts).SetSize(120, 30)
 	for _, msg := range answers(m.Init()) {
-		next, _ := m.Update(msg)
-		m = next.(ui.Model)
+		m = settle(m, msg)
 	}
 	if !strings.Contains(m.View().Content, "hello.go") {
 		t.Fatalf("the scan never arrived:\n%s", m.View().Content)
@@ -187,7 +187,7 @@ func answers(cmd tea.Cmd) []tea.Msg {
 
 func press(m ui.Model, keys ...tea.KeyPressMsg) ui.Model {
 	for _, k := range keys {
-		m, _ = m.Step(k)
+		m = settle(m, k)
 	}
 	return m
 }
@@ -571,15 +571,15 @@ func (s manyFiles) FileContent(_, _ string) (string, error) {
 	return "new\nmore\n", nil
 }
 
-// A scan reads the files it needs several at a time — not one after another,
-// a round trip each, and not all at once either.
-func TestAScanReadsFilesSeveralAtATime(t *testing.T) {
+// A main scan reuses the complete pairs for unchanged gaps, without reading
+// potentially newer file contents separately.
+func TestAScanReusesItsCompletePairs(t *testing.T) {
 	var mu sync.Mutex
 	now, most := 0, 0
 	m := ui.New(manyFiles{&mu, &now, &most}, ui.Options{Author: "reader"}).SetSize(120, 30)
 	answers(m.Init())
-	if most < 2 || most > 8 {
-		t.Errorf("at most %d files were read at once, want between 2 and 8", most)
+	if most != 0 {
+		t.Errorf("%d separate file reads, want none", most)
 	}
 }
 
@@ -644,4 +644,35 @@ func TestTheFileReaderOffersNoEditor(t *testing.T) {
 	if bar := lastLine(reader); strings.Contains(bar, "e edit") || strings.Contains(bar, "on disk") {
 		t.Errorf("the reader offers what the source has not got: %q", bar)
 	}
+}
+
+func (s prSource) ReadContents(_ source.Scan) (source.Contents, error) {
+	return source.Contents{Complete: s.incomplete == "", Files: []source.Change{{Old: source.Side{Path: "hello.go", Mode: "100644", Present: true, Data: []byte(strings.Replace(prHead, `return "hello"`, `return "hi"`, 1))}, New: source.Side{Path: "hello.go", Mode: "100644", Present: true, Data: []byte(prHead)}}}}, nil
+}
+func (hostileSource) ReadContents(source.Scan) (source.Contents, error) {
+	return source.Contents{}, errors.New("unavailable")
+}
+func (s manyFiles) ReadContents(source.Scan) (source.Contents, error) {
+	c := source.Contents{Complete: true}
+	for i := range 20 {
+		name := fmt.Sprintf("f%02d.go", i)
+		c.Files = append(c.Files, source.Change{Old: source.Side{Path: name, Mode: "100644", Present: true, Data: []byte("old\n")}, New: source.Side{Path: name, Mode: "100644", Present: true, Data: []byte("new\n")}})
+	}
+	return c, nil
+}
+
+func (s pushedSource) ReadContents(scan source.Scan) (source.Contents, error) {
+	c, err := s.prSource.ReadContents(scan)
+	c.Files = append(c.Files, source.Change{New: source.Side{Path: "bye.go", Mode: "100644", Present: true, Data: []byte("package hello\n\nfunc Bye() string { return \"bye\" }\n")}})
+	return c, err
+}
+
+// settle drives asynchronous review writes just as the embedding program does.
+func settle(m ui.Model, msg tea.Msg) ui.Model {
+	next, cmd := m.Update(msg)
+	m = next.(ui.Model)
+	for _, answer := range answers(cmd) {
+		m = settle(m, answer)
+	}
+	return m
 }

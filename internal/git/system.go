@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,11 +37,13 @@ type System interface {
 	// no command for: the merge and squash messages it leaves in the git
 	// directory, the commit template, and discobox-review's own saved commit message.
 	ReadFile(path string) ([]byte, error)
+	Readlink(path string) (string, error)
 	WriteFile(path string, data []byte) error
 	Remove(path string) error
 	RemoveAll(path string) error
 	Rename(oldPath, newPath string) error
 	Stat(path string) (FileInfo, error)
+	Lstat(path string) (FileInfo, error)
 
 	// MkdirAll makes a directory and any above it that are missing: the one
 	// a review kept outside any repository lives in (see pkg/store).
@@ -90,6 +93,7 @@ type FileInfo struct {
 	ModTime time.Time
 	Size    int64
 	IsDir   bool
+	Mode    fs.FileMode
 }
 
 // Local is the System that runs git as a child process and reads files from
@@ -129,6 +133,9 @@ func (Local) Git(dir string, stdin []byte, args ...string) (string, error) {
 // a file being read can still be replaced by Rename, and the reader keeps what
 // it opened. readFile is the half each kind of system spells its own way.
 func (Local) ReadFile(path string) ([]byte, error) { return readFile(path) }
+
+// Readlink reads the stored link target without following it.
+func (Local) Readlink(path string) (string, error) { return os.Readlink(path) }
 
 // WriteFile writes a file, creating it if needed.
 func (Local) WriteFile(path string, data []byte) error {
@@ -253,7 +260,16 @@ func (Local) Stat(path string) (FileInfo, error) {
 	if err != nil {
 		return FileInfo{}, err
 	}
-	return FileInfo{ModTime: info.ModTime(), Size: info.Size(), IsDir: info.IsDir()}, nil
+	return FileInfo{ModTime: info.ModTime(), Size: info.Size(), IsDir: info.IsDir(), Mode: info.Mode()}, nil
+}
+
+// Lstat reports the entry itself, including a link's own kind and size.
+func (Local) Lstat(path string) (FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	return FileInfo{ModTime: info.ModTime(), Size: info.Size(), IsDir: info.IsDir(), Mode: info.Mode()}, nil
 }
 
 // defaultEditor is what to open a file with when the environment says nothing.

@@ -110,6 +110,12 @@ func drive(t *testing.T, m Model, msgs ...tea.Msg) Model {
 		}
 		msg := queue[0]
 		queue = queue[1:]
+		if cmd, ok := msg.(tea.Cmd); ok {
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			continue
+		}
 		// A batch is a bundle of commands rather than a message to handle.
 		if batch, ok := msg.(tea.BatchMsg); ok {
 			cmds = append(cmds, batch...)
@@ -939,7 +945,7 @@ func TestAnAgentsEditIsPickedUp(t *testing.T) {
 	st := reviewJSON(t, m.src.(*git.Repo))
 	st.Reply(id, "claude", "toned it down")
 	st.SetResolved(id, true)
-	st.Approve("beta.go", "", "claude")
+	st.Files = append(st.Files, &review.File{Path: "beta.go", Verdicts: []*review.Verdict{{By: "claude", Approved: true}}})
 	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
@@ -1019,7 +1025,7 @@ func TestStampingAnApprovalDoesNotClobberAConcurrentEdit(t *testing.T) {
 	// yet stamped.
 	st := review.New(m.branch)
 	st.Base = m.baseRef
-	st.Approve("beta.go", "", "claude")
+	st.Files = append(st.Files, &review.File{Path: "beta.go", Verdicts: []*review.Verdict{{By: "claude", Approved: true}}})
 	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
@@ -1031,7 +1037,7 @@ func TestStampingAnApprovalDoesNotClobberAConcurrentEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.reconcile(true)
+	m = drive(t, m, m.reconcile(true))
 
 	back := reviewJSON(t, m.src.(*git.Repo))
 	if len(back.Threads) != 1 {
@@ -1058,8 +1064,9 @@ func TestTheWindowWaitsForTheLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
+	cmd := m.mutate(reviewMutation{apply: func(st *review.State) error { return st.Approve("beta.go", m.workBy["beta.go"].identity, "Test") }})
 	go func() {
-		m.mutate(func(st *review.State) { st.Approve("beta.go", "d", "Test") })
+		cmd()
 		close(done)
 	}()
 	select {
@@ -1102,7 +1109,9 @@ func TestALockThatIsNotLetGoOfDoesNotStopTheWindow(t *testing.T) {
 	}
 	defer unlock()
 
-	err = m.update(0, func(st *review.State) { st.Approve("beta.go", "d", "Test") })
+	result := m.mutate(reviewMutation{automatic: true, apply: func(st *review.State) error { return st.Approve("beta.go", m.workBy["beta.go"].identity, "Test") }})().(reviewWriteMsg)
+	err = result.err
+	m = drive(t, m, result)
 	if !errors.Is(err, git.ErrLocked) {
 		t.Fatalf("err = %v, want the window told the review is locked", err)
 	}
@@ -1182,7 +1191,7 @@ func TestAStampThatCannotBeSavedIsNotShown(t *testing.T) {
 	m := newTestModel(t)
 	st := review.New(m.branch)
 	st.Base = m.baseRef
-	st.Approve("beta.go", "", "claude")
+	st.Files = append(st.Files, &review.File{Path: "beta.go", Verdicts: []*review.Verdict{{By: "claude", Approved: true}}})
 	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, string(st.Bytes())); err != nil {
 		t.Fatal(err)
 	}
@@ -1192,7 +1201,7 @@ func TestAStampThatCannotBeSavedIsNotShown(t *testing.T) {
 	if err := m.src.(*git.Repo).WriteStateFile(review.FileName, `{"version":1,`); err != nil {
 		t.Fatal(err)
 	}
-	m.reconcile(true)
+	m = drive(t, m, m.reconcile(true))
 
 	if got := m.rv.VerdictOf("beta.go", "claude"); got == nil || got.Digest != "" {
 		t.Errorf("the screen shows a stamp nothing saved: %+v", got)
@@ -4517,7 +4526,7 @@ func agentApproves(t *testing.T, m Model, by string, paths ...string) Model {
 	t.Helper()
 	err := review.Update(m.src.(*git.Repo), m.branch, 0, func(st *review.State) error {
 		for _, p := range paths {
-			st.Approve(p, "", by)
+			st.Files = append(st.Files, &review.File{Path: p, Verdicts: []*review.Verdict{{By: by, Approved: true}}})
 		}
 		return nil
 	})
@@ -4543,7 +4552,7 @@ func polled(t *testing.T, m Model) Model {
 // shows the file as it was, is judged against the tree and not the screen.
 func TestAnApprovalIsNotJudgedByAStaleDiff(t *testing.T) {
 	m := newTestModel(t)
-	stale := fileIn(t, m, "foo.txt").digest
+	stale := fileIn(t, m, "foo.txt").identity.Digest
 
 	// The author edits the file, and the reviewer approves what it now says.
 	// Nothing rescans the window in between.
@@ -4552,17 +4561,13 @@ func TestAnApprovalIsNotJudgedByAStaleDiff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := ""
-	for _, p := range git.ParseMulti(scan.Diff) {
-		if p.Path == "foo.txt" {
-			now = review.Digest(p)
-		}
-	}
+	identity := review.CompareScan(m.src, scan, 0).Identities["foo.txt"]
+	now := identity.Digest
 	if now == "" || now == stale {
 		t.Fatalf("the edit did not move the digest: %q, was %q", now, stale)
 	}
 	err = review.Update(m.src.(*git.Repo), m.branch, 0, func(st *review.State) error {
-		st.Approve("foo.txt", now, "claude")
+		st.Approve("foo.txt", identity, "claude")
 		return nil
 	})
 	if err != nil {
@@ -4574,14 +4579,14 @@ func TestAnApprovalIsNotJudgedByAStaleDiff(t *testing.T) {
 	if !st.Approved("foo.txt", "claude") || st.Nullified("foo.txt", "claude") {
 		t.Errorf("an approval of the file as it stands was struck down by the diff on screen: %+v", st.VerdictOf("foo.txt", "claude"))
 	}
-	if got := fileIn(t, m, "foo.txt").digest; got != now {
+	if got := fileIn(t, m, "foo.txt").identity.Digest; got != now {
 		t.Errorf("the window is still showing the file as it was: digest %q, want %q", got, now)
 	}
 
 	// And one given with no digest is stamped with the tree's, not the screen's.
 	writeFile(t, m.src.(*git.Repo).Dir, "foo.txt", "one\nTWO\nthree\nFOUR\nfive!\n")
 	m = agentApproves(t, m, "reviewer", "foo.txt")
-	if v := reviewJSON(t, m.src.(*git.Repo)).VerdictOf("foo.txt", "reviewer"); v == nil || !v.Approved || v.Digest != fileIn(t, m, "foo.txt").digest || v.Digest == now {
+	if v := reviewJSON(t, m.src.(*git.Repo)).VerdictOf("foo.txt", "reviewer"); v == nil || !v.Approved || v.Digest != fileIn(t, m, "foo.txt").identity.Digest || v.Digest == now {
 		t.Errorf("stamped %+v, want the digest of the file as it now stands", v)
 	}
 }
@@ -4684,7 +4689,7 @@ func TestAVerdictWithNoNameIsNotDrawnAsOne(t *testing.T) {
 }
 
 // A review from before a hunk's sign-off carried a name: the window that
-// opens it takes those hunks as its reader's, so what was read stays read.
+// opens it gives the reader ownership, but unproved runs need review.
 func TestTheWindowClaimsHunksSignedOffUnderNoName(t *testing.T) {
 	repo := changedRepo(t, 60, map[int]string{4: "FOUR", 50: "FIFTY"})
 	blocks := fileIn(t, modelFor(t, repo), "foo.txt").blocks
@@ -4694,11 +4699,11 @@ func TestTheWindowClaimsHunksSignedOffUnderNoName(t *testing.T) {
 	}
 
 	m := modelFor(t, repo)
-	if n, of := fileIn(t, m, "foo.txt").hunksApproved(); n != 1 || of != 2 {
-		t.Errorf("%d of %d hunks signed off, want the one that was", n, of)
+	if n, of := fileIn(t, m, "foo.txt").hunksApproved(); n != 0 || of != 2 {
+		t.Errorf("%d of %d hunks signed off, want none without proof", n, of)
 	}
 	st := reviewJSON(t, repo)
-	if len(st.ApprovedHunks("foo.txt", "Test")) != 1 || st.VerdictOf("foo.txt", "") != nil {
+	if len(st.ApprovedHunks("foo.txt", "Test")) != 0 || !slices.Equal(st.NeedsReview("foo.txt"), []string{"Test"}) || st.VerdictOf("foo.txt", "") != nil {
 		t.Errorf("the review was left as %s", st.Bytes())
 	}
 }
@@ -4770,9 +4775,7 @@ func TestABaseNotFoundIsNotSaved(t *testing.T) {
 	if m.base.Err == "" {
 		t.Fatal("the missing base was not reported")
 	}
-	if !m.mutate(func(st *review.State) { st.Card = nil }) {
-		t.Fatal("the write was refused")
-	}
+	m = drive(t, m, m.mutate(reviewMutation{apply: func(st *review.State) error { st.Card = nil; return nil }}))
 	if got := savedBase(t, repo); got != "" {
 		t.Errorf("the review is measured from %q after a write, want nothing saved", got)
 	}
@@ -4816,9 +4819,9 @@ func TestAWindowApartDoesNotStrikeTheTreesApprovals(t *testing.T) {
 	repo := testRepo(t)
 	tree := New(repo, Options{Base: "main", Author: "Test", Store: repo})
 	tree = drive(t, tree, tea.WindowSizeMsg{Width: 140, Height: 40}, tree.rescanCmd()())
-	digest := fileIn(t, tree, "foo.txt").digest
+	digest := fileIn(t, tree, "foo.txt").identity.Digest
 	err := review.Update(repo, repo.CurrentBranch(), time.Second, func(st *review.State) error {
-		st.Approve("foo.txt", digest, "agent")
+		st.Approve("foo.txt", review.Identity{Digest: digest}, "agent")
 		return nil
 	})
 	if err != nil {
@@ -4868,9 +4871,9 @@ func TestAHunkApprovedApartLeavesTheRestOfTheFile(t *testing.T) {
 	tree = drive(t, tree, tea.WindowSizeMsg{Width: 140, Height: 40}, tree.rescanCmd()())
 	writeFile(t, repo.Dir, "foo.txt", strings.Replace(readText(t, repo.Dir, "foo.txt"), "line 20\n", "TWENTY\n", 1))
 	tree = drive(t, tree, tree.rescanCmd()())
-	digest := fileIn(t, tree, "foo.txt").digest
+	digest := fileIn(t, tree, "foo.txt").identity.Digest
 	err := review.Update(repo, repo.CurrentBranch(), time.Second, func(st *review.State) error {
-		st.Approve("foo.txt", digest, "Test")
+		st.Approve("foo.txt", review.Identity{Digest: digest}, "Test")
 		return nil
 	})
 	if err != nil {
