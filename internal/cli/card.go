@@ -42,7 +42,8 @@ takes it out again. schema prints the JSON Schema a card is held to.
            offers to switch to it.
   summary  what changed, a short bullet each, at most six.
   core     the places that need a reviewer's judgement, most important
-           first. Not tests, comments, docs or mechanical edits.
+           first. Not tests, comments, docs or mechanical edits. Use []
+           when the change has no production-code core.
   commit   the commit the line numbers were taken at; set fills in HEAD.
 
 A core place is written:

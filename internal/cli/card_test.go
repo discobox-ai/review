@@ -223,3 +223,24 @@ func TestCardSetAndADeletedFile(t *testing.T) {
 		t.Errorf("lines of a deleted file's new side: err = %v", err)
 	}
 }
+
+func TestCardWithoutCoreSetAndShow(t *testing.T) {
+	repo := testRepo(t)
+	body := `{"summary":["Add regression tests"],"core":[]}`
+	out := run(t, repo, "card", "set", "--by", "reviewer", cardFile(t, body))
+	if !strings.Contains(out, "card: 0 core places") {
+		t.Errorf("set said %q", out)
+	}
+	c := stored(t, repo).Card
+	if c == nil || len(c.Core) != 0 || len(c.Summary) != 1 {
+		t.Fatalf("stored card = %+v", c)
+	}
+	shown := run(t, repo, "card")
+	if !strings.Contains(shown, "- Add regression tests") || strings.Contains(shown, "Core:") {
+		t.Errorf("card = %q", shown)
+	}
+	var back struct{ Core []string }
+	if err := json.Unmarshal([]byte(run(t, repo, "card", "--json")), &back); err != nil || back.Core == nil || len(back.Core) != 0 {
+		t.Errorf("empty core did not round trip: %+v, %v", back, err)
+	}
+}

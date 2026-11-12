@@ -365,3 +365,31 @@ func TestTheCardStaysWithNothingToReview(t *testing.T) {
 		t.Errorf("with nothing to review the card says nothing: %+v", m.view.card)
 	}
 }
+
+func TestACardWithoutCoreShowsItsSummary(t *testing.T) {
+	repo := changedRepo(t, 10, map[int]string{4: "FOUR"})
+	keepCard(t, repo, "main", &review.Card{
+		Summary: []string{"Add regression tests"}, Core: []string{},
+	})
+	m := modelFor(t, repo)
+	if got := strings.Join(m.view.paths(), " "); got != "bar.txt foo.txt" {
+		t.Fatalf("stack = %q", got)
+	}
+	var banner string
+	for _, r := range rowsOf(m, rowBanner) {
+		banner += r.text + "\n"
+	}
+	if !strings.Contains(banner, "Add regression tests") || strings.Contains(banner, "CORE") {
+		t.Errorf("banner = %q", banner)
+	}
+	m = drive(t, m, letterKey("i"))
+	for _, r := range rowsOf(m, rowBanner) {
+		if strings.Contains(r.text, "Add regression tests") {
+			t.Error("i did not hide the summary")
+		}
+	}
+	m = drive(t, m, letterKey("i"))
+	if m.view.card == nil || len(m.view.card.summary) != 1 {
+		t.Error("i did not restore the summary")
+	}
+}

@@ -80,7 +80,7 @@ func (m *Model) markCore(f *reviewFile) {
 // review that seemed to shrink as it was done would be lying about its size.
 func (m *Model) groupByCard(files, all []*reviewFile) ([]*reviewFile, *cardBanner) {
 	links := m.coreLinks()
-	if len(links) == 0 {
+	if m.rv.Card == nil || m.commit != "" {
 		return files, nil
 	}
 	rank := map[string]int{}
