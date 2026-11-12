@@ -65,7 +65,8 @@ directory's.
 
 ## Reading and drawing
 
-With a review card the stack is two groups, the core and the rest
+A review card may have an empty core for tests or documentation only; its
+summary still opens the stack. With core places the stack is two groups, the core and the rest
 (`pkg/ui/card.go`). A file in both is two entries: the core's is a copy of
 the file's own, made on every rebuild with lines and gaps of its own and
 keyed apart (`reviewFile.id`), so the stack finds, folds and keeps the cursor

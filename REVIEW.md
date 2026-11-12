@@ -45,3 +45,7 @@
   first: an approval of another digest counts for nothing here, and a run
   the commit does not show is kept, or one approved hunk approves the file —
   `TestAHunkApprovedApartLeavesTheRestOfTheFile`.
+
+- Keep a review card's summary visible even when its core is empty: tests
+  and documentation changes have no production-code core to name. Decide
+  whether to draw the card by its presence, not by its core links.
