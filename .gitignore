@@ -15,3 +15,4 @@
 *.out
 # The screenshot generator's frames, before freeze turns them into pictures.
 /docs/screenshots/*.ansi
+wnb-*-failed.txt
