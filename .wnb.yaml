@@ -1,0 +1,11 @@
+# The dev loop: rebuild build/discobox-review whenever its source changes.
+# discobox-review is a terminal UI a person runs, with nothing long-running
+# to serve, so there is no run command.
+watch:
+  extensions: [go]
+  include: [go.mod, go.sum]
+  exclude: ["*_test.go"]
+  exclude_dirs: [build]
+
+build:
+  command: go tool task build
