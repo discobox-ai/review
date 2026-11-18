@@ -10,7 +10,7 @@ require (
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/charmbracelet/ultraviolet v0.0.0-20260812204455-68fa937c71be
 	github.com/charmbracelet/x/ansi v0.11.8
-	github.com/discobox-ai/x v0.0.0-20260828205057-2567df0ccf27
+	github.com/discobox-ai/x v0.0.0-20261118155110-679a6f41f8d1
 	github.com/mattn/go-runewidth v0.0.27
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/sys v0.49.0
