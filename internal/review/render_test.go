@@ -55,7 +55,7 @@ func TestCanonicalDisplayContextDoesNotRedefineApprovalRuns(t *testing.T) {
 				raw.WriteString(line + "\n")
 			}
 		}
-		if _, err := (git.Local{}).Git(dir, []byte(raw.String()), "apply", "--unidiff-zero"); err != nil {
+		if _, err := (git.Local{}).Git(dir, []byte(raw.String()), "-c", "core.autocrlf=false", "apply", "--unidiff-zero"); err != nil {
 			t.Fatalf("context %d produced invalid patch: %v\n%s", context, err, raw.String())
 		}
 		data, err := os.ReadFile(filepath.Join(dir, "f with spaces.md"))
@@ -107,7 +107,7 @@ func TestRawPatchPreservesGitQuotedFilenameBytes(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, path), change.Old.Data, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := (git.Local{}).Git(dir, []byte(compared.Unified()), "apply"); err != nil {
+		if _, err := (git.Local{}).Git(dir, []byte(compared.Unified()), "-c", "core.autocrlf=false", "apply"); err != nil {
 			t.Fatalf("path %q: %v\n%s", path, err, compared.Unified())
 		}
 		data, err := os.ReadFile(filepath.Join(dir, path))
@@ -146,7 +146,7 @@ func TestRawKindReplacementAppliesBothDirections(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := (git.Local{}).Git(dir, []byte(compared.Unified()), "apply", "--unidiff-zero"); err != nil {
+			if _, err := (git.Local{}).Git(dir, []byte(compared.Unified()), "-c", "core.autocrlf=false", "apply", "--unidiff-zero"); err != nil {
 				t.Fatalf("reverse %v, same %v: %v\n%s", reverse, same, err, compared.Unified())
 			}
 			var data []byte
