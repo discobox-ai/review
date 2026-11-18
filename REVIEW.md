@@ -79,3 +79,7 @@
   that write completes. A delayed result must not replace a newer scan's
   saved nullification with its older approval snapshot; otherwise undo can
   revive approval, especially when polling is disabled by an embedding host.
+
+- Disable `core.autocrlf` explicitly in byte-exact patch application tests.
+  Windows or a user's global Git configuration can otherwise convert output
+  to CRLF even though the canonical patch correctly preserves LF bytes.
