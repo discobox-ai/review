@@ -49,3 +49,9 @@
 - Keep a review card's summary visible even when its core is empty: tests
   and documentation changes have no production-code core to name. Decide
   whether to draw the card by its presence, not by its core links.
+- The `discobox-review` skill writes no review card, but keeps clearing a
+  card signed `by card` before round 1 and keeps `card` a reserved reviewer
+  name. Earlier versions of the skill left such cards in reviews, and one
+  left behind goes stale as soon as the tree moves, so the window opens on a
+  wrong summary and core with no warning. The reserved name is what tells
+  those cards from one a person wrote.
