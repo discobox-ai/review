@@ -31,6 +31,19 @@ go tool task build     # build/discobox-review
 go tool task install   # $GOBIN/discobox-review
 ```
 
+The binary carries the agent skill that drives it, so an agent gets the
+instructions that go with the version it runs. `discobox-review skill` prints
+it, with that version in its frontmatter, anywhere, repository or not:
+
+```sh
+mkdir -p ~/.claude/skills/discobox-review
+discobox-review skill > ~/.claude/skills/discobox-review/SKILL.md
+```
+
+The skill is written in `.agents/skills/discobox-review/SKILL.md`;
+`go tool task generate` copies it into `internal/skill`, which the binary
+embeds.
+
 ## Run
 
 ```sh
@@ -827,6 +840,7 @@ none of that, which `git apply` will take.
 | `unapprove --by <who> <path>…` | take that reviewer's approval back; `--all` in place of `--by` for everybody's |
 | `card [set <file>\|- \| clear \| schema] [--json]` | the review card; see [Writing one](#writing-one) |
 | `status [--by <who>]` | what is left to do, one fact to a line |
+| `skill` | print the agent skill for driving this version |
 | `help [<command>]` | the list, or one command in full |
 
 `base` saves, because the base is part of the review: the window and every
@@ -1490,6 +1504,7 @@ carries a comment in and out of it.
 | `pkg/source/source.go` | What the window reads a change from: the source interfaces and the scan's types |
 | `pkg/ui/embed_test.go` | The window driven from outside the package, over a source that is not Git |
 | `internal/cli/cli.go` | discobox-review without the window: the subcommands |
+| `internal/skill/skill.go` | The agent skill the binary carries, a generated copy of `.agents/skills/discobox-review/SKILL.md` |
 | `pkg/ui/model.go` | The Bubble Tea model: state, keys, actions |
 | `pkg/ui/view.go` | Where each pane goes, the bars above and below them, and what the view asks of the screen |
 | `pkg/ui/reviewview.go` | The stack: rows, folds, comment blocks, navigation |

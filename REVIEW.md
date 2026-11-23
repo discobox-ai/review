@@ -49,3 +49,9 @@
 - Keep a review card's summary visible even when its core is empty: tests
   and documentation changes have no production-code core to name. Decide
   whether to draw the card by its presence, not by its core links.
+
+- Edit the discobox-review skill in `.agents/skills/discobox-review/SKILL.md`,
+  then run `go tool task generate`: `internal/skill/SKILL.md` is the copy
+  the binary embeds, and `TestTheEmbedIsTheSkill` fails when they differ.
+  Keep a `metadata:` block out of the skill's frontmatter; `skill` writes
+  its own there to stamp the version.

@@ -32,10 +32,13 @@ func main() {
 	// A subcommand is read before the flag package sees anything, so that a
 	// remark can be written without quoting rules getting in the way of it.
 	if len(os.Args) > 1 && cli.Is(os.Args[1]) {
-		repo, err := git.Open(".")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "discobox-review:", err)
-			os.Exit(1)
+		var repo *git.Repo
+		if !cli.Standalone(os.Args[1]) {
+			var err error
+			if repo, err = git.Open("."); err != nil {
+				fmt.Fprintln(os.Stderr, "discobox-review:", err)
+				os.Exit(1)
+			}
 		}
 		if err := cli.Run(repo, os.Args[1:], os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "discobox-review:", err)

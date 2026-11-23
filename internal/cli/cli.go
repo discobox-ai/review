@@ -24,6 +24,8 @@ import (
 
 	"github.com/discobox-ai/review/internal/git"
 	"github.com/discobox-ai/review/internal/review"
+	"github.com/discobox-ai/review/internal/skill"
+	"github.com/discobox-ai/review/internal/version"
 )
 
 // Command is one subcommand: what it is called, what it takes, and what it is
@@ -49,6 +51,10 @@ type Command struct {
 	// FlagHelp is what a flag means to this command, where that is not what
 	// it means to the others.
 	FlagHelp map[string]string
+
+	// Standalone marks a command that reads no repository, so it runs
+	// anywhere and Run is handed none.
+	Standalone bool
 }
 
 // Commands is every subcommand, in the order help lists them.
@@ -165,6 +171,14 @@ var Commands = []Command{
 			"all of it.",
 		Example: "discobox-review status | grep ^unapproved",
 	},
+	{
+		Name: "skill", What: "print the agent skill for driving this version",
+		Standalone: true,
+		Long: "The discobox-review skill an agent follows to review a change with\n" +
+			"this tool, as this binary carries it, with the version it goes with\n" +
+			"in its frontmatter. It reads no repository, so it runs anywhere.",
+		Example: "discobox-review skill > ~/.claude/skills/discobox-review/SKILL.md",
+	},
 }
 
 // flagHelp describes every flag once, so that a command listing one of them
@@ -210,6 +224,14 @@ func Is(word string) bool {
 	return word == "help"
 }
 
+// Standalone reports whether a word names a command that reads no
+// repository: one Run may be handed a nil repo for. help is one: it only
+// reads the command table.
+func Standalone(word string) bool {
+	c, ok := find(word)
+	return word == "help" || ok && c.Standalone
+}
+
 // lockWait is how long a command waits for the review's lock before giving
 // up. Nobody is watching a command wait, and what is ahead of it is other
 // commands that each hold the lock for one read and one write, so it can
@@ -220,7 +242,8 @@ func Is(word string) bool {
 const lockWait = time.Minute
 
 // Run carries out one subcommand. args is the command and its arguments, and
-// in is what a command reading "-" reads.
+// in is what a command reading "-" reads. repo may be nil for a Standalone
+// command.
 func Run(repo *git.Repo, args []string, in io.Reader, out io.Writer) error {
 	if len(args) == 0 || (args[0] == "help" && len(args) == 1) {
 		Usage(out)
@@ -247,6 +270,14 @@ func Run(repo *git.Repo, args []string, in io.Reader, out io.Writer) error {
 	// worth reporting rather than ignoring.
 	opts, rest, err := parseFlags(c, rest)
 	if err != nil {
+		return err
+	}
+
+	if cmd == "skill" {
+		if len(rest) > 0 {
+			return fmt.Errorf("skill takes no arguments, not %q", rest[0])
+		}
+		_, err := io.WriteString(out, skill.Stamped(version.Get()))
 		return err
 	}
 
@@ -354,7 +385,7 @@ func helpFor(out io.Writer, name string) error {
 	if !ok {
 		return fmt.Errorf("no such command: %s", name)
 	}
-	fmt.Fprintf(out, "discobox-review %s %s\n", c.Name, c.Args)
+	fmt.Fprintln(out, strings.TrimSpace("discobox-review "+c.Name+" "+c.Args))
 	fmt.Fprintf(out, "  %s\n", c.What)
 	if c.Long != "" {
 		fmt.Fprintln(out)
