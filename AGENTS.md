@@ -17,9 +17,13 @@
 - `internal/git`: every git invocation and all file access, behind `git.System`.
 - `internal/review`: the review document — approvals, threads — and its store.
 - `internal/cli`: the subcommands, discobox-review without the window.
+- `internal/skill`: the discobox-review agent skill the binary carries, copied
+  from `.agents/skills/discobox-review/SKILL.md` by `go generate`.
 - `internal/version`: the version the binary reports.
 - `internal/cmd/screenshots`: retakes the README's pictures
   (`nix develop .#screenshots -c go tool task screenshots`).
+- `internal/cmd/copyfile`: copies a file for a `go:generate` line that has to
+  run on Windows too.
 - `docs`: the README's screenshots and ADRs (`docs/adr`).
 - `DESIGN.md` / `REVIEW.md`: package-local design and review notes.
 

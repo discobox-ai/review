@@ -11,6 +11,8 @@ import (
 
 	"github.com/discobox-ai/review/internal/git"
 	"github.com/discobox-ai/review/internal/review"
+	"github.com/discobox-ai/review/internal/skill"
+	"github.com/discobox-ai/review/internal/version"
 )
 
 // testRepo builds a throwaway repository on a branch with one change on it.
@@ -990,5 +992,33 @@ func TestApprovalsArePerReviewer(t *testing.T) {
 	run(t, repo, "unapprove", "--all", "server.go")
 	if got := stored(t, repo).Approvers("server.go"); len(got) != 0 {
 		t.Errorf("unapprove --all left %v standing", got)
+	}
+}
+
+// skill reads no repository: it prints the skill this binary carries, with
+// the version it goes with in the frontmatter, and Run is handed no repo.
+func TestSkillPrintsTheStampedSkillWithoutARepository(t *testing.T) {
+	if !Standalone("skill") {
+		t.Fatal("skill is not Standalone, so main opens a repository for it")
+	}
+	got := run(t, nil, "skill")
+	if got != skill.Stamped(version.Get()) {
+		t.Errorf("skill printed something other than the stamped skill:\n%.300s", got)
+	}
+	if !strings.Contains(got, "\nmetadata:\n  version: \""+version.Get()+"\"\n---\n") {
+		t.Errorf("skill does not carry the version in its frontmatter:\n%.600s", got)
+	}
+	fails(t, nil, "skill", "extra")
+	// help reads only the command table, so it runs wherever skill does.
+	if !Standalone("help") {
+		t.Error("help is not Standalone, so `help skill` fails where skill runs")
+	}
+	if got := run(t, nil, "help", "skill"); !strings.Contains(got, "discobox-review skill") {
+		t.Errorf("help skill without a repository printed %q", got)
+	}
+	for _, c := range Commands {
+		if c.Standalone != (c.Name == "skill") {
+			t.Errorf("%s: Standalone is %v", c.Name, c.Standalone)
+		}
 	}
 }

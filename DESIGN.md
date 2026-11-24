@@ -51,7 +51,12 @@ flowchart LR
   does. The card's format is `card.schema.json`, embedded, which `ParseCard`
   holds a card to.
 - `internal/cli` is the subcommands: the same review, driven without the
-  window, for scripts and agents.
+  window, for scripts and agents. `skill` alone reads no repository
+  (`Command.Standalone`), so `main` opens none for it.
+- `internal/skill` is the agent skill the binary carries. Its `SKILL.md` is
+  a `go generate` copy of `.agents/skills/discobox-review/SKILL.md`, the one
+  written by hand: go:embed cannot reach outside the package, and a symlink
+  is a plain file in a Windows checkout. A test fails when the two differ.
 
 ## The review file
 

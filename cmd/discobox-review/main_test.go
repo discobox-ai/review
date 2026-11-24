@@ -139,6 +139,23 @@ func TestSubcommandsWorkWithNoTerminal(t *testing.T) {
 	}
 }
 
+// skill runs where there is no repository at all: it is how a box is given
+// the skill that goes with the binary it installed.
+func TestSkillRunsOutsideARepository(t *testing.T) {
+	out, stderr, code := runBin(t, t.TempDir(), "skill")
+	if code != 0 {
+		t.Fatalf("skill exited %d outside a repository: %s", code, stderr)
+	}
+	if !strings.HasPrefix(out, "---\nname: discobox-review\n") || !strings.Contains(out, "\nmetadata:\n  version: ") {
+		t.Errorf("skill printed %.300q", out)
+	}
+	for _, args := range [][]string{{"help"}, {"help", "skill"}, {"skill", "--help"}} {
+		if _, stderr, code := runBin(t, t.TempDir(), args...); code != 0 {
+			t.Errorf("%v exited %d outside a repository: %s", args, code, stderr)
+		}
+	}
+}
+
 // Programs run at the same moment against one repository all land: each is
 // its own process with its own copy of the review, so this is the one place
 // that can say they do not write those copies over each other.
